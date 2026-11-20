@@ -91,14 +91,16 @@ export const MapControls = () => {
             display: 'flex',
             flexDirection: 'row',
             alignItems: 'center',
-            gap: '16px',
+            gap: 'clamp(6px, 1vw, 14px)',
+            maxWidth: 'calc(100% - 16px)',
             background: 'rgba(0, 0, 0, 0.6)',
-            padding: '8px 16px',
+            padding: '6px 12px',
             borderRadius: '16px',
             border: '1px solid rgba(255, 255, 255, 0.1)',
             boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)',
             backdropFilter: 'blur(10px)',
-            pointerEvents: 'auto'
+            pointerEvents: 'auto',
+            boxSizing: 'border-box'
         }}>
             <button 
                 onClick={handleZoomOut} 

@@ -1,15 +1,18 @@
-
 import { Tile, Unit, GameSettings, WeatherState, AIDifficulty, VictoryMode } from '../types';
-import { UNIT_STATS, TERRAIN_DEFENSE, UNIT_COSTS, CP_SYSTEM, SHOP_ITEMS, DOOMSDAY_SETTINGS } from '../constants/Config';
+import { UNIT_STATS, TERRAIN_DEFENSE, UNIT_COSTS, CP_SYSTEM, SHOP_ITEMS, DOOMSDAY_SETTINGS, TERRAIN_COSTS, BANK_STATS, BASE_STATS, OVERWATCH_STATS } from '../constants/Config';
 import { getValidMoves, hasLineOfSight, getManhattanDistance, calculateVisibility } from '../grid/Pathfinding';
 import { findBestTarget } from './TargetingLogic';
 import { getRingIndex } from '../grid/DoomsdayManager';
+import { calculateSiegeDamage, canUnitAttackFromTile, canUnitEnterOverwatch, getEffectiveMaxRespawns, getUnitAttackCost, getUnitMaxHp, getUnitRange } from '../rules/CombatRules';
+import { resolveMoveWithOverwatch } from '../rules/OverwatchRules';
 
 // AI Action Types
-export type AIAction = 
+export type AIAction =
   | { type: 'END_TURN' }
   | { type: 'MOVE'; unitId: string; targetTileId: string; cost: number }
   | { type: 'ATTACK'; attackerId: string; targetUnitId: string; cost: number }
+  | { type: 'OVERWATCH'; unitId: string; cost: number }
+  | { type: 'RELOAD'; unitId: string; cost: number }
   | { type: 'SECURE'; unitId: string; tileId: string; cost: number }
   | { type: 'HEIST'; unitId: string; tileId: string; cost: number }
   | { type: 'SIEGE'; unitId: string; tileId: string; cost: number }
@@ -25,26 +28,73 @@ interface GameStateProxy {
   currentPlayer: number;
   playerCp: number;
   playerGold: number;
-  playerInventory: ('AMMO' | 'MEDKIT')[]; 
+  playerRespawns?: number;
+  playerInventory: ('AMMO' | 'MEDKIT')[];
   weather: WeatherState;
   difficulty: AIDifficulty;
   graveyard: any[];
   victoryMode?: VictoryMode;
   gridSize: number;
-  settings: GameSettings; 
-  totalTurns: number; 
+  settings: GameSettings;
+  totalTurns: number;
 }
+
+/**
+ * Multi-source BFS over walkable terrain so AI units navigate around rivers, canyons, and walls via bridges.
+ */
+const computePathDistanceField = (
+    goalTiles: Tile[],
+    mapData: Tile[],
+    gridSize: number
+): Map<string, number> => {
+    const distMap = new Map<string, number>();
+    if (goalTiles.length === 0) return distMap;
+
+    const queue: { x: number; y: number; d: number }[] = [];
+    for (const g of goalTiles) {
+        if (g.hazardState === 'LAVA') continue;
+        distMap.set(g.id, 0);
+        queue.push({ x: g.x, y: g.y, d: 0 });
+    }
+
+    const dirs = [
+        { dx: 0, dy: -1 },
+        { dx: 0, dy: 1 },
+        { dx: -1, dy: 0 },
+        { dx: 1, dy: 0 }
+    ];
+
+    let head = 0;
+    while (head < queue.length) {
+        const cur = queue[head++];
+        for (const dir of dirs) {
+            const nx = cur.x + dir.dx;
+            const ny = cur.y + dir.dy;
+            if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
+            const nId = `${nx},${ny}`;
+            if (distMap.has(nId)) continue;
+            const tile = mapData[ny * gridSize + nx];
+            if (!tile || tile.hazardState === 'LAVA' || TERRAIN_COSTS[tile.type] >= 90) continue;
+            distMap.set(nId, cur.d + 1);
+            queue.push({ x: nx, y: ny, d: cur.d + 1 });
+        }
+    }
+
+    return distMap;
+};
 
 // --- 1. MOVEMENT EVALUATION (Tactical Positions) ---
 
 const evaluatePosition = (
-    tile: Tile, 
-    unit: Unit, 
-    map: Tile[], 
-    enemies: Unit[], 
-    difficulty: AIDifficulty, 
+    tile: Tile,
+    unit: Unit,
+    map: Tile[],
+    enemies: Unit[],
+    difficulty: AIDifficulty,
     victoryMode: VictoryMode | undefined,
     targetBase: Tile | undefined,
+    enemyDistField: Map<string, number>,
+    baseDistField: Map<string, number>,
     doomsdayEnabled: boolean,
     totalTurns: number,
     gridSize: number,
@@ -60,109 +110,121 @@ const evaluatePosition = (
       const turnsUntilDoom = lavaTurn - totalTurns;
 
       if (turnsUntilDoom <= 1) {
-          score -= 5000; // RUN FOR YOUR LIFE
+          score -= 5000;
       } else if (turnsUntilDoom <= 5) {
-          score -= 500; // Unsafe, move inward
+          score -= 500;
       } else {
-          // Slight preference for center even when safe
           score += ring * 2;
       }
   }
 
   // B. Terrain Defense & Bonuses
-  // TERRAIN_DEFENSE contains negative values for Sand (-0.1).
-  // score += -0.1 * 20 = -2. Correct penalty.
   const defense = TERRAIN_DEFENSE[tile.type] || 0;
   score += defense * 20;
 
-  // Specific Avoidance
-  if (tile.type === 'QUICKSAND') score -= 100; // Avoid rooting unless absolutely necessary
-  if (tile.type === 'DUNES') score += 10; // Extra bonus for Dunes
+  if (tile.type === 'QUICKSAND') score -= 120;
+  if (tile.type === 'DUNES') score += 10;
 
   // C. Unit Specific Preferences
   if (unit.type === 'SNIPER') {
-      if (tile.type === 'MOUNTAIN' || tile.type === 'DUNES') score += 60; // Snipers love high ground
-      if (tile.type === 'BUILDING' && tile.owner === unit.owner) score += 40; 
+      if (canUnitAttackFromTile(unit, tile)) {
+          score += 65; // Snipers need Mountain, Dunes, or owned Building to shoot
+      } else {
+          score -= 25;
+      }
   } else if (unit.type === 'ASSAULTER') {
-      if (tile.type === 'FOREST') score += 20; // Assaulters use cover
+      if (tile.type === 'FOREST') score += 20;
   }
 
-  // D. Threat & Range Assessment
+  // D. Path & Range Assessment
   let minEnemyDist = 999;
-  
   enemies.forEach(e => {
-    const eTile = map.find(t => t.id === e.tileId)!;
+    const eTile = map.find(t => t.id === e.tileId);
+    if (!eTile) return;
     const d = getManhattanDistance(tile, eTile);
-    if (d < minEnemyDist) {
-        minEnemyDist = d;
-    }
+    if (d < minEnemyDist) minEnemyDist = d;
   });
 
-  // Scouting Behavior (If no enemies visible in Fog)
+  const pathToEnemy = enemyDistField.get(tile.id);
+  const pathToBase = baseDistField.get(tile.id);
+
   if (fogEnabled && enemies.length === 0) {
-      // Conquer Mode: Scout towards enemy base
-      if (victoryMode === 'CONQUER' && targetBase) {
-          const distToBase = getManhattanDistance(tile, targetBase);
-          score -= distToBase * 4; // Heavily weight moving to base
+      if (victoryMode === 'CONQUER' && pathToBase !== undefined) {
+          score -= pathToBase * 4;
       } else {
-          // Deathmatch: Move to center/patrol
-          const centerDist = Math.abs(tile.x - gridSize/2) + Math.abs(tile.y - gridSize/2);
-          score -= centerDist * 2;
-          
-          // Visit POIs to find enemies
-          if (tile.type === 'BUILDING' || tile.type === 'BANK') score += 20;
+          const centerDist = Math.abs(tile.x - gridSize / 2) + Math.abs(tile.y - gridSize / 2);
+          score -= centerDist * 2.5;
+          if (tile.type === 'BUILDING' && tile.owner !== unit.owner) score += 25;
+          if (tile.type === 'BANK' && (tile.hackProgress || 0) < 100) score += 25;
       }
   } else if (enemies.length > 0) {
-      // Default Combat Logic
       if (difficulty === 'EASY') {
-          score += Math.random() * 20;
-          if (minEnemyDist === 1) score += 10;
+          score += Math.random() * 25;
+          if (pathToEnemy !== undefined) score -= pathToEnemy * 1.5;
       } else {
           const optimalRange = unitStats.range;
 
           if (unit.type === 'SNIPER') {
-              if (minEnemyDist < 3) score -= 60; // DANGER
-              else if (minEnemyDist <= optimalRange) score += 40; 
-              else score -= (minEnemyDist - optimalRange) * 5; 
+              if (minEnemyDist < 3) score -= 60;
+              else if (minEnemyDist <= optimalRange && canUnitAttackFromTile(unit, tile)) score += 60;
+              else if (pathToEnemy !== undefined) score -= pathToEnemy * 3;
           } else if (unit.type === 'ASSAULTER') {
               if (minEnemyDist <= 2) score += 40;
-              else score -= minEnemyDist * 3; 
+              else if (pathToEnemy !== undefined) score -= pathToEnemy * 4;
+              else score -= minEnemyDist * 3;
           } else {
               if (minEnemyDist <= optimalRange) score += 25;
+              else if (pathToEnemy !== undefined) score -= pathToEnemy * 3.5;
               else score -= minEnemyDist * 2;
           }
       }
   }
 
   // E. Objectives
-  // 1. Capture Buildings (Secure)
   if (tile.type === 'BUILDING' && tile.owner !== unit.owner) {
-      score += 70;
+      score += 35;
   }
-  
-  // 2. Heist Banks (Money)
   if (tile.type === 'BANK' && (tile.hackProgress || 0) < 100) {
-      score += 60; 
+      score += 45;
   }
-
-  // 3. Loot Drops (Supplies)
   if (tile.loot) {
-      // AI knows loot goes to inventory now, so it's always valuable to pick up
       score += 80;
   }
 
   // F. Base Siege (Conquer Mode)
   if (victoryMode === 'CONQUER' && targetBase) {
       const distToBase = getManhattanDistance(tile, targetBase);
-      // Being in range of base is HUGE priority in Conquer
-      if (distToBase <= unitStats.range) score += 80; 
-      else score -= distToBase * 2; // Move aggressively to base
-  } 
+      if (distToBase <= unitStats.range && canUnitAttackFromTile(unit, tile)) {
+          score += 85;
+      } else if (pathToBase !== undefined) {
+          score -= pathToBase * 4;
+      } else {
+          score -= distToBase * 2;
+      }
+  }
 
-  // G. Survival (Hard Mode)
-  if (difficulty === 'HARD' && unit.hp < unitStats.hp * 0.4) {
-      if (defense > 0) score += 50; // Seek cover when low
-      if (minEnemyDist < 3) score -= 40; // Run away
+  // G. Survival & Automated Turret Avoidance (Hard Mode)
+  if (difficulty === 'HARD') {
+      if (unit.hp < getUnitMaxHp(unit) * 0.4) {
+          if (defense > 0) score += 45;
+          if (minEnemyDist < 3) score -= 35;
+      }
+
+      const inBankTurretRange = map.some(
+          t => t.type === 'BANK' && (t.hackProgress || 0) < 100 && getManhattanDistance(tile, t) <= BANK_STATS.RANGE
+      );
+      if (inBankTurretRange && tile.type !== 'BANK') {
+          score -= 25;
+      }
+
+      if (victoryMode === 'CONQUER') {
+          const inEnemyArtilleryRange = map.some(
+              t => t.type === 'BASE' && t.owner !== unit.owner && (t.hp || 0) > 0 && getManhattanDistance(tile, t) <= BASE_STATS.RANGE
+          );
+          if (inEnemyArtilleryRange && !(minEnemyDist <= unitStats.range) && (!targetBase || getManhattanDistance(tile, targetBase) > unitStats.range)) {
+              score -= 30;
+          }
+      }
   }
 
   return score;
@@ -171,45 +233,38 @@ const evaluatePosition = (
 // --- 2. SHOP LOGIC (Logistics) ---
 
 const checkShop = (gameState: GameStateProxy, myUnits: Unit[]): AIAction | null => {
-    const { playerGold, playerCp, mapData, difficulty, currentPlayer } = gameState;
-    
-    // AI needs at least 4 CP to LOOT after buying, otherwise it's a waste of a turn/risk
-    // Exception: If we are just stocking up for next turn (Advanced logic, maybe later)
-    if (playerCp < 4 && difficulty !== 'EASY') return null;
+    const { playerGold, playerCp, mapData, difficulty } = gameState;
 
-    // Easy AI doesn't use the shop efficiently
+    if (playerCp < 4 && difficulty !== 'EASY') return null;
     if (difficulty === 'EASY') return null;
 
-    // Check if any unit needs supplies
     for (const unit of myUnits) {
-        const stats = UNIT_STATS[unit.type];
+        const maxHp = getUnitMaxHp(unit);
         const tile = mapData.find(t => t.id === unit.tileId);
         if (!tile) continue;
 
-        // Needs Health?
-        if (unit.hp <= stats.hp * 0.6 && playerGold >= SHOP_ITEMS.MEDKIT.cost) {
+        if (unit.hp <= maxHp * 0.6 && playerGold >= SHOP_ITEMS.MEDKIT.cost) {
             const dropTile = findEmptyAdjacent(tile, mapData);
             if (dropTile) {
-                return { 
-                    type: 'BUY_DROP', 
-                    itemKey: 'MEDKIT', 
-                    tileId: dropTile.id, 
-                    cost: 0, 
-                    goldCost: SHOP_ITEMS.MEDKIT.cost 
+                return {
+                    type: 'BUY_DROP',
+                    itemKey: 'MEDKIT',
+                    tileId: dropTile.id,
+                    cost: 0,
+                    goldCost: SHOP_ITEMS.MEDKIT.cost
                 };
             }
         }
 
-        // Needs Ammo?
         if (unit.ammo <= 1 && playerGold >= SHOP_ITEMS.AMMO_REFILL.cost) {
             const dropTile = findEmptyAdjacent(tile, mapData);
             if (dropTile) {
-                return { 
-                    type: 'BUY_DROP', 
-                    itemKey: 'AMMO_REFILL', 
-                    tileId: dropTile.id, 
-                    cost: 0, 
-                    goldCost: SHOP_ITEMS.AMMO_REFILL.cost 
+                return {
+                    type: 'BUY_DROP',
+                    itemKey: 'AMMO_REFILL',
+                    tileId: dropTile.id,
+                    cost: 0,
+                    goldCost: SHOP_ITEMS.AMMO_REFILL.cost
                 };
             }
         }
@@ -222,31 +277,28 @@ const checkInventory = (gameState: GameStateProxy, myUnits: Unit[]): AIAction | 
     if (playerInventory.length === 0) return null;
 
     for (const unit of myUnits) {
-        const stats = UNIT_STATS[unit.type];
-        
-        // Check for Medkit needs
+        const maxHp = getUnitMaxHp(unit);
+
         const medIndex = playerInventory.indexOf('MEDKIT');
-        if (medIndex !== -1 && unit.hp <= stats.hp * 0.5) {
+        if (medIndex !== -1 && unit.hp <= maxHp * 0.5) {
             return { type: 'USE_ITEM', unitId: unit.id, itemIndex: medIndex, cost: 0 };
         }
 
-        // Check for Ammo needs
         const ammoIndex = playerInventory.indexOf('AMMO');
         if (ammoIndex !== -1 && unit.ammo <= 1) {
             return { type: 'USE_ITEM', unitId: unit.id, itemIndex: ammoIndex, cost: 0 };
         }
     }
     return null;
-}
+};
 
 const findEmptyAdjacent = (center: Tile, map: Tile[]): Tile | null => {
     const adj = getNeighbors(center, map);
-    // Prioritize tiles that provide cover? No, just valid placement.
-    return adj.find(t => 
-        t.type !== 'WATER' && 
-        t.type !== 'BARRIER' && 
-        t.type !== 'BASE' && 
-        t.type !== 'BUILDING' && 
+    return adj.find(t =>
+        t.type !== 'WATER' &&
+        t.type !== 'BARRIER' &&
+        t.type !== 'BASE' &&
+        t.type !== 'BUILDING' &&
         t.type !== 'BANK' &&
         t.type !== 'CANYON' &&
         t.type !== 'QUICKSAND' &&
@@ -258,39 +310,71 @@ const findEmptyAdjacent = (center: Tile, map: Tile[]): Tile | null => {
 // --- 3. REINFORCEMENTS (Spawning) ---
 
 const checkSpawn = (gameState: GameStateProxy): AIAction | null => {
-    const { playerGold, graveyard, mapData, currentPlayer, units, difficulty } = gameState;
-    
+    const { playerGold, playerRespawns = 0, graveyard, mapData, currentPlayer, units, difficulty, gridSize, settings } = gameState;
+
+    if (playerRespawns >= getEffectiveMaxRespawns(settings.mutators)) return null;
+
     const occupied = new Set(units.map(u => u.tileId));
-    const bases = mapData.filter(t => t.type === 'BASE' && t.owner === currentPlayer && !occupied.has(t.id));
+    const safeBases = mapData.filter(
+        t => t.type === 'BASE' && t.owner === currentPlayer && t.hazardState !== 'LAVA'
+    );
 
-    if (bases.length === 0) return null;
+    if (safeBases.length === 0) return null;
 
-    const affordable = graveyard.filter(u => u.owner === currentPlayer && u.turnsUntilRespawn === 0 && playerGold >= UNIT_COSTS[u.type]);
-    
+    // Collect valid spawn tiles (base tile or adjacent safe tile if base is occupied)
+    let spawnTileId: string | null = null;
+    for (const base of safeBases) {
+        if (!occupied.has(base.id)) {
+            spawnTileId = base.id;
+            break;
+        }
+        for (let dy = -1; dy <= 1 && !spawnTileId; dy++) {
+            for (let dx = -1; dx <= 1 && !spawnTileId; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                const nx = base.x + dx;
+                const ny = base.y + dy;
+                if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
+                const t = mapData[ny * gridSize + nx];
+                if (
+                    t &&
+                    t.hazardState !== 'LAVA' &&
+                    t.type !== 'WATER' &&
+                    t.type !== 'BARRIER' &&
+                    t.type !== 'CANYON' &&
+                    !occupied.has(t.id)
+                ) {
+                    spawnTileId = t.id;
+                }
+            }
+        }
+        if (spawnTileId) break;
+    }
+
+    if (!spawnTileId) return null;
+
+    const affordable = graveyard.filter(
+        u => u.owner === currentPlayer && u.turnsUntilRespawn === 0 && playerGold >= UNIT_COSTS[u.type]
+    );
     if (affordable.length === 0) return null;
 
-    // Selection Logic based on Difficulty
     let choice: any = affordable[0];
-
     if (difficulty === 'HARD') {
-        // Hard AI buys the most expensive unit available (usually strongest)
-        affordable.sort((a,b) => UNIT_COSTS[b.type] - UNIT_COSTS[a.type]);
+        affordable.sort((a, b) => UNIT_COSTS[b.type] - UNIT_COSTS[a.type]);
         choice = affordable[0];
     } else if (difficulty === 'MEDIUM') {
         choice = affordable[Math.floor(Math.random() * affordable.length)];
     } else {
-        // Easy AI buys cheapest (swarms)
-        affordable.sort((a,b) => UNIT_COSTS[a.type] - UNIT_COSTS[b.type]);
+        affordable.sort((a, b) => UNIT_COSTS[a.type] - UNIT_COSTS[b.type]);
         choice = affordable[0];
     }
 
-    return { 
-        type: 'SPAWN', 
-        unitType: choice.type, 
-        tileId: bases[0].id, 
-        cost: 0, 
-        goldCost: UNIT_COSTS[choice.type], 
-        deadUnitId: choice.id 
+    return {
+        type: 'SPAWN',
+        unitType: choice.type,
+        tileId: spawnTileId,
+        cost: 0,
+        goldCost: UNIT_COSTS[choice.type],
+        deadUnitId: choice.id
     };
 };
 
@@ -299,48 +383,66 @@ const checkSpawn = (gameState: GameStateProxy): AIAction | null => {
 export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
   const { mapData, units, currentPlayer, playerCp, difficulty, weather, victoryMode, gridSize, settings, totalTurns } = gameState;
   const myUnits = units.filter(u => u.owner === currentPlayer && !u.completed && !u.isRooted);
-  
+
   // FOG OF WAR LOGIC: Filter visible enemies
   let enemyUnits = units.filter(u => u.owner !== currentPlayer);
+  let aiVisibleSet: Set<string> | null = null;
   if (settings.fogOfWar) {
-      // Calculate what AI can see
-      const aiVisible = calculateVisibility(currentPlayer, units, mapData, weather, true, gridSize);
-      enemyUnits = enemyUnits.filter(u => aiVisible.has(u.tileId));
+      aiVisibleSet = calculateVisibility(currentPlayer, units, mapData, weather, true, gridSize);
+      enemyUnits = enemyUnits.filter(u => aiVisibleSet!.has(u.tileId));
   }
+  const hasVisibleEnemyOverwatch = enemyUnits.some(e => e.isOverwatching && e.ammo > 0);
 
   // 0. Use Inventory (Free action)
   const inventoryAction = checkInventory(gameState, myUnits);
   if (inventoryAction) return inventoryAction;
 
-  // 1. Reinforcements (First Priority if rich)
+  // 1. Reinforcements
   const spawnAction = checkSpawn(gameState);
   if (spawnAction) return spawnAction;
 
-  // 2. Logistics (Buy items if needed)
+  // 2. Logistics
   const shopAction = checkShop(gameState, myUnits);
   if (shopAction) return shopAction;
 
   if (myUnits.length === 0) return { type: 'END_TURN' };
 
   let bestAction: AIAction = { type: 'END_TURN' };
-  let bestScore = -Infinity;
+  let bestScore = 0; // Only take actions strictly better than passing (0)
 
-  // Locate Enemy Base
-  const enemyBase = victoryMode === 'CONQUER' ? mapData.find(t => t.type === 'BASE' && t.owner !== currentPlayer && (t.hp||0) > 0) : undefined;
+  // Locate nearest live Enemy Base in Conquer Mode
+  const enemyBases = victoryMode === 'CONQUER'
+      ? mapData.filter(t => t.type === 'BASE' && t.owner !== currentPlayer && (t.hp || 0) > 0)
+      : [];
+
+  // Precompute reverse-BFS path distance fields for true bridge/obstacle routing
+  const enemyTiles = enemyUnits
+      .map(e => mapData.find(t => t.id === e.tileId))
+      .filter((t): t is Tile => Boolean(t));
+  const enemyDistField = computePathDistanceField(enemyTiles, mapData, gridSize);
 
   for (const unit of myUnits) {
     const unitStats = UNIT_STATS[unit.type];
-    const uTile = mapData.find(t => t.id === unit.tileId)!;
-    const adj = [uTile, ...getNeighbors(uTile, mapData)]; 
+    const uTile = mapData.find(t => t.id === unit.tileId);
+    if (!uTile) continue;
+    const adj = [uTile, ...getNeighbors(uTile, mapData)];
 
-    // --- INTERACTION ACTIONS (High Priority) ---
-    
-    // A. Loot (Drone Supplies)
+    // Pick closest enemy base for this unit
+    let targetBase: Tile | undefined;
+    if (enemyBases.length > 0) {
+        targetBase = enemyBases.reduce((best, cur) =>
+            getManhattanDistance(uTile, cur) < getManhattanDistance(uTile, best) ? cur : best
+        );
+    }
+    const baseDistField = targetBase ? computePathDistanceField([targetBase], mapData, gridSize) : new Map<string, number>();
+
+    // --- INTERACTION ACTIONS ---
+
+    // A. Loot Supplies
     if (playerCp >= 4) {
         const lootTile = adj.find(t => t.loot !== null && t.loot !== undefined);
         if (lootTile) {
-            // High priority
-            let priority = 150; 
+            const priority = 150;
             if (priority > bestScore) {
                 bestScore = priority;
                 bestAction = { type: 'LOOT', unitId: unit.id, tileId: lootTile.id, cost: 4 };
@@ -348,108 +450,182 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         }
     }
 
-    // B. Secure Buildings / Heist Banks
-    if (playerCp >= 4) { 
-        const b = adj.find(t => t.type === 'BUILDING' && t.owner !== currentPlayer);
-        if (b && bestScore < 100) { 
-             bestAction = { type: 'SECURE', unitId: unit.id, tileId: b.id, cost: 4 };
-             bestScore = 100; // Securing territory is very important
-        }
-        
-        const bank = adj.find(t => t.type === 'BANK' && (t.hackProgress || 0) < 100);
-        if (bank && bestScore < 110) {
-             bestAction = { type: 'HEIST', unitId: unit.id, tileId: bank.id, cost: 4 };
-             bestScore = 110; // Money is power
+    // B. Emergency Field Reload when out of ammo (Medium & Hard)
+    if (difficulty !== 'EASY' && unit.ammo === 0 && playerCp >= CP_SYSTEM.RELOAD_COST) {
+        const reloadScore = 95;
+        if (reloadScore > bestScore) {
+            bestScore = reloadScore;
+            bestAction = { type: 'RELOAD', unitId: unit.id, cost: CP_SYSTEM.RELOAD_COST };
         }
     }
 
-    // --- COMBAT ACTIONS (Only against Visible Enemies) ---
+    // C. Secure Buildings / Heist Banks (Avoid flipping building back and forth under active close threat)
+    if (playerCp >= 4) {
+        const nearbyThreat = enemyUnits.some(e => {
+            const et = mapData.find(t => t.id === e.tileId);
+            return et ? getManhattanDistance(uTile, et) <= 3 : false;
+        });
 
-    // C. Attack Unit
-    if (playerCp >= unitStats.attackCost && unit.ammo > 0) {
-        const result = findBestTarget(unit, [...myUnits, ...enemyUnits], mapData, difficulty, weather, gridSize);
-        if (result) {
-            if (result.score > bestScore) {
-                bestScore = result.score;
-                bestAction = { type: 'ATTACK', attackerId: unit.id, targetUnitId: result.unit.id, cost: unitStats.attackCost };
+        const b = adj.find(t => t.type === 'BUILDING' && t.owner !== currentPlayer);
+        if (b && (difficulty !== 'EASY' || Math.random() < 0.4)) {
+            const secureScore = nearbyThreat ? 18 : b.owner == null ? 55 : 42;
+            if (secureScore > bestScore) {
+                bestScore = secureScore;
+                bestAction = { type: 'SECURE', unitId: unit.id, tileId: b.id, cost: 4 };
+            }
+        }
+
+        const bank = adj.find(t => t.type === 'BANK' && (t.hackProgress || 0) < 100);
+        if (bank && (difficulty !== 'EASY' || Math.random() < 0.5)) {
+            const heistScore = 115;
+            if (heistScore > bestScore) {
+                bestScore = heistScore;
+                bestAction = { type: 'HEIST', unitId: unit.id, tileId: bank.id, cost: 4 };
             }
         }
     }
 
-    // D. Siege Base (The Winning Move)
-    if (enemyBase && playerCp >= unitStats.attackCost && unit.ammo > 0) {
-         // In Fog of War, you might know WHERE the base is, but you need LOS to shoot it.
-         const dist = getManhattanDistance(uTile, enemyBase);
-         if (dist <= unitStats.range) {
-             const hasLOS = hasLineOfSight(uTile, enemyBase, mapData, unit.type, weather, gridSize);
+    // --- COMBAT ACTIONS (Only against Visible Enemies) ---
+    const canAttackFromHere = canUnitAttackFromTile(unit, uTile);
+    const effectiveRange = getUnitRange(unit, mapData, weather);
+    const attackCost = getUnitAttackCost(unit);
+
+    // D. Attack Unit
+    if (playerCp >= attackCost && unit.ammo > 0 && canAttackFromHere) {
+        const result = findBestTarget(unit, [...myUnits, ...enemyUnits], mapData, difficulty, weather, gridSize);
+        if (result && result.score > bestScore) {
+            bestScore = result.score;
+            bestAction = { type: 'ATTACK', attackerId: unit.id, targetUnitId: result.unit.id, cost: attackCost };
+        }
+    }
+
+    // E. Siege Base
+    if (targetBase && playerCp >= attackCost && unit.ammo > 0 && canAttackFromHere) {
+         const dist = getManhattanDistance(uTile, targetBase);
+         if (dist <= effectiveRange) {
+             const hasLOS = hasLineOfSight(uTile, targetBase, mapData, unit.type, weather, gridSize);
              if (hasLOS) {
-                 let siegeScore = 120; // Base attack > Unit attack usually
-                 if ((enemyBase.hp || 50) <= 5) siegeScore = 9999; // WIN THE GAME NOW
-                 else if (unit.type === 'SNIPER') siegeScore += 50; 
+                 const siegeDmg = calculateSiegeDamage(unit, uTile);
+                 let siegeScore = difficulty === 'EASY' ? 50 : 120;
+                 if ((targetBase.hp || 50) <= siegeDmg) siegeScore = difficulty === 'EASY' ? 90 : 9999;
+                 else if (difficulty !== 'EASY' && unit.type === 'SNIPER') siegeScore += 50;
 
                  if (siegeScore > bestScore) {
                      bestScore = siegeScore;
-                     bestAction = { type: 'SIEGE', unitId: unit.id, tileId: enemyBase.id, cost: unitStats.attackCost };
+                     bestAction = { type: 'SIEGE', unitId: unit.id, tileId: targetBase.id, cost: attackCost };
                  }
              }
          }
     }
 
-    // E. Demolish Barriers
-    if (playerCp >= unitStats.attackCost && unit.ammo > 0) {
-        // Check visible barriers in range
-        const visibleBarriers = mapData.filter(t => 
-            t.type === 'BARRIER' && 
-            t.hp !== undefined && t.hp > 0 && 
-            getManhattanDistance(uTile, t) <= unitStats.range
+    // F. Demolish Barriers
+    if (playerCp >= attackCost && unit.ammo > 0 && canAttackFromHere) {
+        const visibleBarriers = mapData.filter(t =>
+            t.type === 'BARRIER' &&
+            t.hp !== undefined && t.hp > 0 &&
+            getManhattanDistance(uTile, t) <= effectiveRange
         );
-        
+
         for (const barrier of visibleBarriers) {
             const hasLOS = hasLineOfSight(uTile, barrier, mapData, unit.type, weather, gridSize);
             if (hasLOS) {
-                let demolishScore = 20; // Low priority
-                if (unit.type === 'ASSAULTER') demolishScore += 20; // Breachers like destroying barriers
-                
+                let demolishScore = 20;
+                if (unit.type === 'ASSAULTER') demolishScore += 20;
+
                 if (demolishScore > bestScore) {
                     bestScore = demolishScore;
-                    bestAction = { type: 'DEMOLISH', unitId: unit.id, tileId: barrier.id, cost: unitStats.attackCost };
+                    bestAction = { type: 'DEMOLISH', unitId: unit.id, tileId: barrier.id, cost: attackCost };
                 }
             }
         }
     }
 
-    // --- MOVEMENT ACTIONS ---
+    // --- MOVEMENT ACTIONS (Relative improvement over current tile) ---
     if (!unit.hasMoved) {
-        const moveMap = getValidMoves(uTile, playerCp, mapData, units, unit.type, currentPlayer, weather, gridSize);
+        const currentScore = evaluatePosition(
+            uTile, unit, mapData, enemyUnits, difficulty, victoryMode,
+            targetBase, enemyDistField, baseDistField,
+            settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar
+        );
+
+        const moveMap = getValidMoves(uTile, playerCp, mapData, units, unit.type, currentPlayer, weather, gridSize, unit.rank ?? 0);
         for (const [tileId, cost] of moveMap) {
             const destTile = mapData.find(t => t.id === tileId)!;
-            
-            let score = evaluatePosition(
-                destTile, unit, mapData, enemyUnits, difficulty, victoryMode, 
-                enemyBase, settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar
+
+            const destScore = evaluatePosition(
+                destTile, unit, mapData, enemyUnits, difficulty, victoryMode,
+                targetBase, enemyDistField, baseDistField,
+                settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar
             );
-            
-            // Heuristic Adjustments
-            score -= cost * 2; // Penalty for using CP
-            score += 10; // Bias to move rather than idle
 
-            // Check if move puts us in range of interactions
+            // Net positional gain minus tiny CP friction; avoids stepping back onto worse tiles
+            let moveValue = (destScore - currentScore) - cost * 0.5;
+
             const neighbors = getNeighbors(destTile, mapData);
-            if (neighbors.some(n => n.type === 'BANK' && (n.hackProgress||0) < 100)) score += 30;
-            if (neighbors.some(n => n.type === 'BUILDING' && n.owner !== currentPlayer)) score += 30;
+            if (neighbors.some(n => n.type === 'BANK' && (n.hackProgress || 0) < 100)) moveValue += 18;
+            if (neighbors.some(n => n.type === 'BUILDING' && n.owner !== currentPlayer)) moveValue += 12;
 
-            if (score > bestScore) {
-                bestScore = score;
+            // Respect visible enemy Overwatch on HARD difficulty (Elite Breachers resist pin)
+            if (difficulty === 'HARD' && hasVisibleEnemyOverwatch) {
+                const res = resolveMoveWithOverwatch({
+                    movingUnit: unit,
+                    targetTileId: tileId,
+                    mapData,
+                    units,
+                    weather,
+                    gridSize,
+                    fogOfWar: settings.fogOfWar,
+                    maxBudget: playerCp,
+                    knownVisibleTiles: aiVisibleSet
+                });
+                if (res.trigger) {
+                    if (res.trigger.victimDead) moveValue -= 45;
+                    else if (res.trigger.pinResisted) moveValue -= 6;
+                    else moveValue -= (18 + res.trigger.damage);
+                }
+            }
+
+            // Keep Easy AI visibly unfocused and prone to suboptimal moves
+            if (difficulty === 'EASY') {
+                moveValue += (Math.random() - 0.5) * 35;
+            }
+
+            // Require clear net progress (> 2) so units don't jitter back and forth
+            if (moveValue > 2 && moveValue > bestScore) {
+                bestScore = moveValue;
                 bestAction = { type: 'MOVE', unitId: unit.id, targetTileId: tileId, cost: cost };
             }
         }
     }
-  }
 
-  // Pass Turn Logic
-  // If the best action is a move, but the score is low, just end turn to save CP for next round
-  if (difficulty === 'HARD' && bestScore < 20 && bestAction.type === 'MOVE') {
-      return { type: 'END_TURN' };
+    // --- OVERWATCH STANCE (Medium & Hard AI tactical zoning) ---
+    if (difficulty !== 'EASY' && canUnitEnterOverwatch(unit, uTile, playerCp)) {
+        const uZoneWeather = uTile.zone !== undefined ? weather.playerZones[uTile.zone] || 'CLEAR' : 'CLEAR';
+        if (uZoneWeather !== 'FOG' && uZoneWeather !== 'SANDSTORM') {
+            let minEnemyDist = 999;
+            for (const e of enemyUnits) {
+                const et = mapData.find(t => t.id === e.tileId);
+                if (et) minEnemyDist = Math.min(minEnemyDist, getManhattanDistance(uTile, et));
+            }
+            const watchingApproach =
+                minEnemyDist <= effectiveRange + 4 ||
+                (settings.fogOfWar && minEnemyDist === 999 && (uTile.type === 'BUILDING' || canUnitAttackFromTile(unit, uTile)));
+
+            if (watchingApproach) {
+                const owCost = OVERWATCH_STATS[unit.type].cost;
+                const otherReadyCount = myUnits.filter(u => u.id !== unit.id && !u.completed).length;
+                let owScore = unit.type === 'SNIPER' ? 32 : unit.type === 'ASSAULTER' ? 28 : 24;
+                if (unit.hasMoved) owScore += 6;
+                if (adj.some(t => t.type === 'BANK' || t.type === 'BUILDING' || t.type === 'BASE')) owScore += 8;
+                owScore -= otherReadyCount * 8;
+
+                if (owScore > bestScore && playerCp >= owCost) {
+                    bestScore = owScore;
+                    bestAction = { type: 'OVERWATCH', unitId: unit.id, cost: owCost };
+                }
+            }
+        }
+    }
   }
 
   return bestAction;

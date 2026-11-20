@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { useGameStore } from '../store/useGameStore';
-import { UNIT_STATS, TERRAIN_DEFENSE, TERRAIN_COSTS, UNIT_COSTS, CP_SYSTEM, BASE_STATS, BANK_STATS } from '../core/constants/Config';
+import { UNIT_STATS, TERRAIN_DEFENSE, TERRAIN_COSTS, UNIT_COSTS, CP_SYSTEM, BASE_STATS, BANK_STATS, VETERANCY_CONFIG, OVERWATCH_STATS } from '../core/constants/Config';
 import { UnitType } from '../core/types';
 
 const TabButton = ({ label, active, onClick }: { label: string, active: boolean, onClick: () => void }) => (
@@ -87,7 +87,7 @@ export const HowToPlay = () => {
                         {/* 1. CORE LOOP */}
                         <Section title="1. CORE COMBAT LOOP">
                             <p style={{ lineHeight: '1.6', color: '#ddd', fontSize: '15px' }}>
-                                Commander, your goal is to secure the sector using a squad of elite specialists. The battlefield is grid-based and turn-based. Victory requires careful management of your <strong>Command Points (CP)</strong> and tactical positioning.
+                                Commander, your goal is to secure the sector using a squad of elite specialists. The battlefield is grid-based and turn-based. Victory requires careful management of your <strong>Command Points (CP)</strong> and tactical positioning. (Player 1 starts Round 1 with {CP_SYSTEM.P1_ROUND1_CP} CP to balance opening initiative; all players regenerate {CP_SYSTEM.REGEN_AMOUNT} CP per turn up to {CP_SYSTEM.MAX_CP}.)
                             </p>
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '15px', marginTop: '20px' }}>
                                 <div style={{ background: '#222', padding: '15px', borderRadius: '6px', textAlign: 'center' }}>
@@ -121,7 +121,7 @@ export const HowToPlay = () => {
                                     <p style={{ margin: 0, color: '#ccc', fontSize: '14px' }}>
                                         <strong>Objective:</strong> Destroy the enemy <strong>HEADQUARTERS (BASE)</strong>.
                                         <br/>
-                                        The Enemy Base has <strong>{BASE_STATS.HP} HP</strong>. It is heavily armored but stationary. Siege units (Snipers/Assaulters) are recommended for demolition.
+                                        The Enemy Base has <strong>{BASE_STATS.HP} HP</strong> (20% armored cover). Higher-damage units (Snipers/Breachers) and Watchtower positions deal substantially stronger siege damage.
                                     </p>
                                 </div>
                                 <div>
@@ -211,7 +211,7 @@ export const HowToPlay = () => {
                                             <td style={{ padding: '12px' }}>Rain / Blue Tint</td>
                                             <td style={{ padding: '12px', color: '#ccc' }}>
                                                 Muddy Terrain.
-                                                <div style={{ color: '#90caf9', marginTop:'4px' }}>• Heavy Units (Assaulters) pay +1 Move Cost on all terrain.</div>
+                                                <div style={{ color: '#90caf9', marginTop:'4px' }}>• Heavy Units (Breachers) pay 2x Move Cost on Plains.</div>
                                             </td>
                                         </tr>
                                         <tr style={{ background: '#1a1a1a', borderBottom: '1px solid #333' }}>
@@ -258,11 +258,51 @@ export const HowToPlay = () => {
                             <ul style={{ color: '#ccc', fontSize: '14px', lineHeight: '1.8' }}>
                                 <li><strong>Ammo Drop (50 Gold):</strong> Restores full ammo. Delivered via pod 3-9 tiles from base.</li>
                                 <li><strong>Medkit (100 Gold):</strong> Fully heals a unit. Delivered via pod 3-9 tiles from base.</li>
+                                <li><strong>Field Reload (5 CP):</strong> Emergency unit action restoring 50% max ammo on the spot (ends that unit's turn).</li>
                             </ul>
                             <p style={{ color: '#F44336', fontSize: '12px', fontStyle: 'italic', marginTop: '10px' }}>
                                 <strong>RETRIEVAL PROTOCOL:</strong> <br/>
                                 Supply pods do not activate automatically. A unit must be adjacent to (or on) the pod and spend <strong>4 CP</strong> to execute a "RETRIEVE SUPPLY" action.
                             </p>
+                        </Section>
+
+                        {/* 6. VETERANCY & SEEDS */}
+                        <Section title="6. UNIT VETERANCY & SECTOR SEEDS">
+                            <p style={{ color: '#ddd', fontSize: '14px', lineHeight: '1.6' }}>
+                                Surviving units earn Combat XP from attacks (+1 XP), kills (+2 XP, or +3 XP vs Elite/Ace), Bank Heists (+2 XP), Base Destruction (+2 XP), and first-time Building captures (+1 XP). Respawned units reset to Recruit.
+                            </p>
+                            <ul style={{ color: '#ccc', fontSize: '14px', lineHeight: '1.8' }}>
+                                <li><strong style={{ color: '#FFD700' }}>★ Veteran ({VETERANCY_CONFIG.XP_THRESHOLDS[1]} XP):</strong> +20% Max HP (heals gained HP) and +2 Max Ammo (Scout/Breacher) or +1 Max Ammo (Sniper).</li>
+                                <li><strong style={{ color: '#FFD700' }}>★★ Elite ({VETERANCY_CONFIG.XP_THRESHOLDS[2]} XP):</strong> Scout gains +1 Vision & ignores SCORCHED/MONSOON Plains penalties; Breacher takes -{VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG in cover terrain; Sniper gains +{VETERANCY_CONFIG.ELITE_SNIPER_DMG_BONUS} DMG & 7 CP shots.</li>
+                                <li><strong style={{ color: '#FFD700' }}>★★★ Ace ({VETERANCY_CONFIG.XP_THRESHOLDS[3]} XP):</strong> +20% additional Max HP; Scout +{VETERANCY_CONFIG.ACE_SCOUT_DMG_BONUS} DMG & 2 CP shots; Breacher +{VETERANCY_CONFIG.ACE_BREACHER_DMG_BONUS} DMG & pierces Base Armor; Sniper moves on Mountain/Dunes for 1 CP. Eliminating an Ace pays <strong>+${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} Bounty Gold</strong>.</li>
+                            </ul>
+                            <p style={{ color: '#90CAF9', fontSize: '13px', lineHeight: '1.6', marginTop: '10px' }}>
+                                <strong>Sector Seeds & Scorecard:</strong> Every procedural battlefield uses a shareable Sector Seed displayed in the top-left HUD. Victories are graded S–D on Speed vs Par, Preservation, and Objectives (Easy AI is capped below S-Rank).
+                            </p>
+                        </Section>
+
+                        {/* 7. OVERWATCH */}
+                        <Section title="7. OVERWATCH & FOG AMBUSH">
+                            <p style={{ color: '#ddd', fontSize: '14px', lineHeight: '1.6' }}>
+                                Ready units with ammo (and valid firing terrain for Snipers) can enter <strong>Overwatch (O key)</strong> to ambush moving enemies during the opponent&apos;s turn.
+                            </p>
+                            <ul style={{ color: '#ccc', fontSize: '14px', lineHeight: '1.8' }}>
+                                <li><strong>Stance Costs & Refunds:</strong> Scout {OVERWATCH_STATS.SOLDIER.cost} CP ({OVERWATCH_STATS.SOLDIER.damage} DMG, +{OVERWATCH_STATS.SOLDIER.refund} CP unfired refund) • Breacher {OVERWATCH_STATS.ASSAULTER.cost} CP ({OVERWATCH_STATS.ASSAULTER.damage} DMG, +{OVERWATCH_STATS.ASSAULTER.refund} CP refund) • Sniper {OVERWATCH_STATS.SNIPER.cost} CP ({OVERWATCH_STATS.SNIPER.damage} DMG, +{OVERWATCH_STATS.SNIPER.refund} CP refund, clamped to {CP_SYSTEM.MAX_CP} CP).</li>
+                                <li><strong>Interception & Pinning:</strong> Fires once on the first tile an enemy enters inside your Overwatch line, pinning them on the spot (charging only the CP walked). <strong>★★ Elite Breachers</strong> resist pinning and complete their move.</li>
+                                <li><strong>Counterplay:</strong> Dealing <em>any</em> damage immediately cancels Overwatch (<strong>SUPPRESSED!</strong>). Deployed <strong>Barriers</strong>, <strong>Fog</strong>, and <strong>Sandstorms</strong> block Overwatch fire lines.</li>
+                            </ul>
+                        </Section>
+
+                        {/* 8. TACTICAL OPS & MUTATORS */}
+                        <Section title="8. TACTICAL OPS & SETUP MUTATORS">
+                            <p style={{ color: '#ddd', fontSize: '14px', lineHeight: '1.6' }}>
+                                Test your command skill in the <strong>CHALLENGES</strong> tab across 5 curated asymmetric operations earning <strong>S / A / B Medals</strong>, or customize skirmishes with optional <strong>Game Mutators</strong>:
+                            </p>
+                            <ul style={{ color: '#ccc', fontSize: '14px', lineHeight: '1.8' }}>
+                                <li><strong>Blitz CP:</strong> Increases battery capacity to <strong>30 MAX CP</strong> with <strong>+15 CP/turn</strong> regeneration (22 CP opening turn).</li>
+                                <li><strong>Scarcity:</strong> Cuts unit starting &amp; maximum ammo by <strong>50%</strong> while boosting Bank Heist Gold &amp; CP payouts by <strong>+50%</strong>.</li>
+                                <li><strong>Ironman:</strong> Sets graveyard respawns to <strong>0</strong> — every unit loss is permanent.</li>
+                            </ul>
                         </Section>
                     </div>
                 )}
@@ -285,7 +325,7 @@ export const HowToPlay = () => {
                                         <StatRow label="Vision Radius" value={stats.vision} />
                                         {key === 'SNIPER' && (
                                             <div style={{ marginTop: '10px', fontSize: '11px', color: '#ff9800', fontStyle: 'italic' }}>
-                                                *RESTRICTION: Can only shoot from Mountains or Owned Buildings.
+                                                *RESTRICTION: Can only shoot from Mountains, Dunes, or Owned Buildings.
                                             </div>
                                         )}
                                     </div>

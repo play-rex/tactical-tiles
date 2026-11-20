@@ -1,7 +1,8 @@
 
 import { Unit, Tile, AIDifficulty, WeatherState } from '../types';
-import { UNIT_STATS, TERRAIN_DEFENSE, BUILDING_STATS } from '../constants/Config';
+import { UNIT_STATS } from '../constants/Config';
 import { getManhattanDistance, hasLineOfSight } from '../grid/Pathfinding';
+import { calculateAttackOutcome, canUnitAttackFromTile, getUnitRange } from '../rules/CombatRules';
 
 interface CombatSimulationResult {
     damageDealt: number; 
@@ -13,34 +14,16 @@ interface CombatSimulationResult {
 const simulateCombat = (attacker: Unit, target: Unit, mapData: Tile[]): CombatSimulationResult => {
     const attTile = mapData.find(t => t.id === attacker.tileId);
     const tarTile = mapData.find(t => t.id === target.tileId);
-    
+
     if (!attTile || !tarTile) return { damageDealt: 0, potentialDamage: 0, isKill: false, hitChance: 0 };
 
-    // 1. Defense Calculation
-    let defense = TERRAIN_DEFENSE[tarTile.type] || 0;
-    if (tarTile.type === 'BUILDING' && tarTile.subType === 'BUNKER' && tarTile.owner === target.owner) {
-        defense = BUILDING_STATS.BUNKER.defense;
-    }
+    const { damage: finalDmg } = calculateAttackOutcome(attacker, attTile, tarTile, target.owner, target);
 
-    // 2. Hit Chance (Simple implementation: Mountains give evasion)
-    let hitChance = 1.0;
-    // Note: In Config.ts TERRAIN_DEFENSE handles damage reduction, 
-    // but typically turn-based games have % hit chance. 
-    // This engine seems deterministic on damage, so hitChance acts as a heuristic modifier.
-
-    // 3. Damage Output
-    let dmg = UNIT_STATS[attacker.type].damage;
-    if (attTile.type === 'BUILDING' && attTile.subType === 'WATCHTOWER' && attTile.owner === attacker.owner) {
-        dmg *= BUILDING_STATS.WATCHTOWER.damageBonus;
-    }
-
-    const finalDmg = Math.floor(dmg * (1 - defense));
-    
     return {
         damageDealt: finalDmg,
         potentialDamage: finalDmg,
         isKill: finalDmg >= target.hp,
-        hitChance
+        hitChance: 1.0
     };
 };
 
@@ -54,9 +37,9 @@ export const findBestTarget = (
 ): { unit: Unit, score: number } | null => {
     const enemies = allUnits.filter(u => u.owner !== attacker.owner);
     const attTile = mapData.find(t => t.id === attacker.tileId);
-    if (!attTile) return null;
+    if (!attTile || !canUnitAttackFromTile(attacker, attTile)) return null;
 
-    const unitStats = UNIT_STATS[attacker.type];
+    const effectiveRange = getUnitRange(attacker, mapData, weather);
 
     // Filter valid targets (Range & LOS)
     const validTargets = enemies.filter(enemy => {
@@ -64,7 +47,7 @@ export const findBestTarget = (
         if (!enemyTile) return false;
         
         const dist = getManhattanDistance(attTile, enemyTile);
-        if (dist > unitStats.range) return false;
+        if (dist > effectiveRange) return false;
 
         return hasLineOfSight(attTile, enemyTile, mapData, attacker.type, weather, gridSize);
     });
@@ -96,11 +79,21 @@ export const findBestTarget = (
             score += sim.damageDealt * 3; // Value damage
         }
 
+        // Prioritize suppressing active enemy Overwatch stances
+        if (target.isOverwatching) {
+            score += 35;
+        }
+
         // 2. TARGET PRIORITY (Hard Mode)
         if (difficulty === 'HARD') {
             if (target.type === 'SNIPER') score += 30; // Eliminate heavy hitters
             if (target.type === 'ASSAULTER') score += 20;
-            
+            if ((target.rank ?? 0) > 0) score += (target.rank ?? 0) * 20; // Hunt promoted Veterans/Aces
+
+            // Focus-fire already wounded enemies to secure kills faster
+            const missingHp = Math.max(0, (UNIT_STATS[target.type].hp || target.hp) - target.hp);
+            score += missingHp * 1.5;
+
             // Don't overkill massively
             if (sim.isKill && target.hp < 3 && sim.damageDealt > 10) {
                 score -= 10; // "Waste" of high damage

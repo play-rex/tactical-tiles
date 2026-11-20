@@ -6,11 +6,6 @@ import { LeftPanel, RightPanel, WinnerOverlay } from './src/components/ui/HUD';
 import { GameSetup } from './src/screens/GameSetup';
 import { MapEditor } from './src/screens/MapEditor';
 import { HowToPlay } from './src/screens/HowToPlay';
-import { ArcadeScreen } from './src/features/arcade/components/ArcadeScreen';
-import { VisionScreen } from './src/features/vision3d/components/VisionScreen';
-import { Iso2DScreen } from './src/features/iso-2d/Iso2DScreen';
-import { Test2DScreen } from './src/features/test-2d/Test2DScreen';
-import { IsoEditor } from './src/features/iso_editor/IsoEditor';
 import { useGameStore } from './src/store/useGameStore';
 import { ViewportProvider } from './src/context/ViewportContext';
 import { MapControls } from './src/components/game/ui/MapControls';
@@ -31,26 +26,6 @@ const App = () => {
       return <HowToPlay />;
   }
 
-  if (currentScreen === 'ARCADE') {
-      return <ArcadeScreen />;
-  }
-
-  if (currentScreen === 'VISION3D') {
-      return <VisionScreen />;
-  }
-
-  if (currentScreen === 'ISO2D') {
-      return <Iso2DScreen />;
-  }
-
-  if (currentScreen === 'TEST2D') {
-      return <Test2DScreen />;
-  }
-
-  if (currentScreen === 'ISO_EDITOR') {
-      return <IsoEditor />;
-  }
-
   // GAME SCREEN
   return (
     <ViewportProvider>
@@ -65,12 +40,12 @@ const App = () => {
       <WinnerOverlay />
       
       {/* Left Column (Player Stats) */}
-      <div style={{ width: '25%', minWidth: '300px', height: '100%' }}>
+      <div style={{ width: 'clamp(165px, 21vw, 300px)', height: '100%', flexShrink: 0, overflow: 'hidden' }}>
         <LeftPanel />
       </div>
 
       {/* Center Column (Fixed Map) */}
-      <div style={{ flex: 1, position: 'relative', height: '100%', borderLeft: '1px solid #222', borderRight: '1px solid #222', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1, minWidth: 0, position: 'relative', height: '100%', borderLeft: '1px solid #222', borderRight: '1px solid #222', display: 'flex', flexDirection: 'column' }}>
         
         {/* LEAVE BUTTON */}
         <div style={{ position: 'absolute', top: '15px', right: '15px', zIndex: 50 }}>
@@ -109,7 +84,7 @@ const App = () => {
       </div>
 
       {/* Right Column (Info & Actions) */}
-      <div style={{ width: '25%', minWidth: '300px', height: '100%' }}>
+      <div style={{ width: 'clamp(175px, 22vw, 310px)', height: '100%', flexShrink: 0, overflow: 'hidden' }}>
         <RightPanel />
       </div>
     </div>

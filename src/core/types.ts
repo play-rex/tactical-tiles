@@ -19,6 +19,12 @@ export interface WeatherState {
   turnsRemaining: number;
 }
 
+export interface GameMutators {
+  blitzCp: boolean;
+  scarcity: boolean;
+  ironman: boolean;
+}
+
 export interface GameSettings {
   playerCount: number; // 2 to 6
   unitCounts: {
@@ -32,6 +38,39 @@ export interface GameSettings {
   gameMode: GameMode; 
   victoryMode?: VictoryMode;
   aiDifficulty: AIDifficulty;
+  mapSeed?: string;
+  mutators?: GameMutators;
+  challengeId?: string;
+}
+
+export interface MissionUnitPlacement {
+  type: UnitType;
+  x: number;
+  y: number;
+  owner: number;
+  rank?: UnitRank;
+  hp?: number;
+}
+
+export interface MissionConfig {
+  id: string;
+  title: string;
+  subtitle: string;
+  briefing: string;
+  difficultyLabel: 'STANDARD' | 'HARD' | 'EXTREME';
+  gridSize: number;
+  seed: string;
+  settings: Partial<GameSettings>;
+  startingRound?: number;
+  startingGold?: Record<number, number>;
+  startingCp?: Record<number, number>;
+  turnLimit?: number;
+  surviveTurns?: number;
+  requiredHeists?: number;
+  targetKillType?: { owner: number; minRank: UnitRank };
+  parRounds: number;
+  buildMap: () => Tile[];
+  placements: MissionUnitPlacement[];
 }
 
 export interface Tile {
@@ -50,6 +89,7 @@ export interface Tile {
   // Building / Bank / Base Logic
   subType?: BuildingSubType; 
   owner?: number | null; // null = Neutral
+  capturedByOwners?: number[]; // Prevents repeat capture XP farming
   hackProgress?: number; // 0-100 for Banks
   
   // Custom Bank Rewards
@@ -77,6 +117,8 @@ export interface SavedMap {
 
 export type UnitType = 'SOLDIER' | 'ASSAULTER' | 'SNIPER';
 
+export type UnitRank = 0 | 1 | 2 | 3;
+
 export interface Unit {
   id: string;
   type: UnitType;
@@ -84,14 +126,53 @@ export interface Unit {
   
   // Stats
   hp: number;
+  maxHp?: number;
   ammo: number;
   maxAmmo: number;
-  owner: number;      
+  owner: number;
+
+  // Veterancy
+  xp?: number;
+  rank?: UnitRank;
+  kills?: number;
+  damageDealt?: number;
   
   // State Flags
   hasMoved: boolean;    
   completed: boolean;
   isRooted?: boolean; // Effect from Quicksand
+  isOverwatching?: boolean;
+}
+
+export interface MatchPlayerStats {
+  kills: number;
+  unitsLost: number;
+  damageDealt: number;
+  heists: number;
+  buildingsSecured: number;
+  acesPromoted: number;
+}
+
+export interface MatchSummary {
+  winner: number;
+  isHumanWin: boolean;
+  rounds: number;
+  parRounds: number;
+  score: number;
+  grade: 'S' | 'A' | 'B' | 'C' | 'D';
+  seed: string;
+  challengeId?: string;
+  challengeMedal?: 'S' | 'A' | 'B';
+  playerStats: Record<number, MatchPlayerStats>;
+  mvp: {
+    unitId: string;
+    unitName: string;
+    unitType: UnitType;
+    owner: number;
+    rank: UnitRank;
+    kills: number;
+    damageDealt: number;
+  } | null;
 }
 
 export interface DeadUnit {

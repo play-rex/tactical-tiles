@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useRef, useCallback } from 'react';
 import { Graphics, useTick } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 
@@ -14,17 +14,16 @@ interface ProjectileRendererProps {
 }
 
 export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data }) => {
-    const [progress, setProgress] = useState(0);
+    const graphicsRef = useRef<PIXI.Graphics>(null);
+    const progressRef = useRef(0);
 
     useTick((delta) => {
-        // Move 20% per tick (Fast bullet)
-        setProgress(p => {
-             const np = p + (0.2 * delta);
-             return np > 1 ? 1 : np; 
-        });
-    });
+        const g = graphicsRef.current;
+        if (!g) return;
 
-    const draw = useCallback((g: PIXI.Graphics) => {
+        progressRef.current = Math.min(1, progressRef.current + 0.2 * delta);
+        const progress = progressRef.current;
+
         g.clear();
         if (progress >= 1) return;
 
@@ -34,14 +33,19 @@ export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data }) 
         g.beginFill(data.color);
         g.drawCircle(currentX, currentY, 4);
         g.endFill();
-        
-        // Trail
+
+        const trailStart = Math.max(0, progress - 0.2);
         g.lineStyle(2, data.color, 0.5);
-        g.moveTo(data.startX + (data.endX - data.startX) * Math.max(0, progress - 0.2), 
-                 data.startY + (data.endY - data.startY) * Math.max(0, progress - 0.2));
+        g.moveTo(
+            data.startX + (data.endX - data.startX) * trailStart,
+            data.startY + (data.endY - data.startY) * trailStart
+        );
         g.lineTo(currentX, currentY);
+    });
 
-    }, [progress, data]);
+    const initialDraw = useCallback((g: PIXI.Graphics) => {
+        g.clear();
+    }, []);
 
-    return <Graphics draw={draw} />;
+    return <Graphics ref={graphicsRef} draw={initialDraw} />;
 };

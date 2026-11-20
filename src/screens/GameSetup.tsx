@@ -1,10 +1,14 @@
 
 import React, { useState, useEffect } from 'react';
 import { useGameStore } from '../store/useGameStore';
-import { GameSettings, UnitType, AIDifficulty, SavedMap } from '../core/types';
+import { GameSettings, UnitType, AIDifficulty, SavedMap, MissionConfig } from '../core/types';
 import { SPRITES } from '../core/assets/SpriteAssets';
 import { PRESET_MAPS } from '../core/assets/Presets';
+import { CHALLENGE_OPERATIONS } from '../core/assets/ChallengeOps';
+import { UNIT_STATS } from '../core/constants/Config';
 import { MapStorage } from '../core/storage/MapStorageManager';
+import { generateSectorSeed } from '../core/utils/SeededRandom';
+import { CareerStorage } from '../core/storage/CareerStatsManager';
 // import { AssetExporter } from '../components/debug/AssetExporter';
 
 interface MapCardProps {
@@ -66,21 +70,19 @@ const MapCard: React.FC<MapCardProps> = ({ map, isSelected, onClick, onDelete, o
 
 export const GameSetup = () => {
     const startGame = useGameStore(state => state.startGame);
+    const startChallenge = useGameStore(state => state.startChallenge);
     const loadMapAndStart = useGameStore(state => state.loadMapAndStart);
     const openEditor = useGameStore(state => state.openEditor);
     const loadMapIntoEditor = useGameStore(state => state.loadMapIntoEditor);
     const openTutorial = useGameStore(state => state.openTutorial);
-    const openArcade = useGameStore(state => state.openArcade);
-    const openVision3d = useGameStore(state => state.openVision3d);
-    const openIso2d = useGameStore(state => state.openIso2d);
-    const openTest2d = useGameStore(state => state.openTest2d);
-    const openIsoEditor = useGameStore(state => state.openIsoEditor);
     const setGameSettings = useGameStore(state => state.setGameSettings);
     
     // UI State
-    const [activeTab, setActiveTab] = useState<'RANDOM' | 'PRESET' | 'CUSTOM'>('RANDOM');
+    const [activeTab, setActiveTab] = useState<'RANDOM' | 'PRESET' | 'CUSTOM' | 'CHALLENGES'>('RANDOM');
     const [selectedMap, setSelectedMap] = useState<SavedMap | null>(null);
+    const [selectedChallenge, setSelectedChallenge] = useState<MissionConfig>(CHALLENGE_OPERATIONS[0]);
     const [customMaps, setCustomMaps] = useState<SavedMap[]>([]);
+    const career = CareerStorage.get();
 
     // Game Config State
     const [settings, setSettings] = useState<GameSettings>({
@@ -91,7 +93,9 @@ export const GameSetup = () => {
         doomsdayEnabled: false,
         gameMode: 'PVP',
         victoryMode: 'CONQUER',
-        aiDifficulty: 'MEDIUM'
+        aiDifficulty: 'MEDIUM',
+        mapSeed: '',
+        mutators: { blitzCp: false, scarcity: false, ironman: false }
     });
 
     // Load custom maps on mount or tab switch
@@ -114,6 +118,10 @@ export const GameSetup = () => {
     };
 
     const handleDeploy = () => {
+        if (activeTab === 'CHALLENGES') {
+            startChallenge(selectedChallenge.id);
+            return;
+        }
         setGameSettings(settings);
         if (activeTab === 'RANDOM') {
             startGame();
@@ -252,67 +260,7 @@ export const GameSetup = () => {
             }} />
             
             {/* HOW TO PLAY BUTTON (Top Right) */}
-            <div style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 20, display: 'flex', gap: '10px' }}>
-                <button
-                    onClick={openTest2d}
-                    style={{
-                        padding: '12px 24px', background: 'rgba(50, 205, 50, 0.2)', border: '1px solid #32CD32',
-                        color: '#90EE90', borderRadius: '30px', fontWeight: 'bold', cursor: 'pointer',
-                        backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', gap: '8px'
-                    }}
-                >
-                    <span style={{ fontSize: '16px' }}>🧪</span>
-                    TEST-2D
-                </button>
-
-                <button
-                    onClick={openArcade}
-                    style={{
-                        padding: '12px 24px', background: 'rgba(255,100,0,0.2)', border: '1px solid #FF5722',
-                        color: '#ffccbc', borderRadius: '30px', fontWeight: 'bold', cursor: 'pointer',
-                        backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', gap: '8px'
-                    }}
-                >
-                    <span style={{ fontSize: '16px' }}>🕹️</span>
-                    ARCADE
-                </button>
-                
-                <button
-                    onClick={openVision3d}
-                    style={{
-                        padding: '12px 24px', background: 'rgba(33, 150, 243, 0.2)', border: '1px solid #2196F3',
-                        color: '#BBDEFB', borderRadius: '30px', fontWeight: 'bold', cursor: 'pointer',
-                        backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', gap: '8px'
-                    }}
-                >
-                    <span style={{ fontSize: '16px' }}>👁️</span>
-                    VISION 3D
-                </button>
-
-                <button
-                    onClick={openIso2d}
-                    style={{
-                        padding: '12px 24px', background: 'rgba(76, 175, 80, 0.2)', border: '1px solid #4CAF50',
-                        color: '#C8E6C9', borderRadius: '30px', fontWeight: 'bold', cursor: 'pointer',
-                        backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', gap: '8px'
-                    }}
-                >
-                    <span style={{ fontSize: '16px' }}>📐</span>
-                    ISO 2D
-                </button>
-
-                <button
-                    onClick={openIsoEditor}
-                    style={{
-                        padding: '12px 24px', background: 'rgba(233, 30, 99, 0.2)', border: '1px solid #E91E63',
-                        color: '#F8BBD0', borderRadius: '30px', fontWeight: 'bold', cursor: 'pointer',
-                        backdropFilter: 'blur(5px)', display: 'flex', alignItems: 'center', gap: '8px'
-                    }}
-                >
-                    <span style={{ fontSize: '16px' }}>🏗️</span>
-                    ISO EDITOR
-                </button>
-
+            <div style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 20 }}>
                 <button
                     onClick={openTutorial}
                     style={{
@@ -327,7 +275,7 @@ export const GameSetup = () => {
             </div>
 
             <div style={{ 
-                width: '800px', height: '600px', display: 'flex',
+                width: 'min(860px, 94vw)', height: 'min(620px, 90vh)', display: 'flex',
                 background: 'rgba(20,20,20,0.95)', 
                 border: '1px solid #333', borderRadius: '16px', boxShadow: '0 20px 60px rgba(0,0,0,0.8)',
                 position: 'relative', zIndex: 10, overflow: 'hidden'
@@ -349,16 +297,80 @@ export const GameSetup = () => {
                     </div>
 
                     <div style={{ display: 'flex', borderBottom: '1px solid #333' }}>
-                        <button onClick={() => setActiveTab('RANDOM')} style={{ flex: 1, padding: '12px', border: 'none', background: activeTab === 'RANDOM' ? '#333' : 'transparent', color: activeTab === 'RANDOM' ? '#fff' : '#666', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>RANDOM</button>
-                        <button onClick={() => setActiveTab('PRESET')} style={{ flex: 1, padding: '12px', border: 'none', background: activeTab === 'PRESET' ? '#333' : 'transparent', color: activeTab === 'PRESET' ? '#fff' : '#666', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>PRESETS</button>
-                        <button onClick={() => setActiveTab('CUSTOM')} style={{ flex: 1, padding: '12px', border: 'none', background: activeTab === 'CUSTOM' ? '#333' : 'transparent', color: activeTab === 'CUSTOM' ? '#fff' : '#666', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>MY MAPS</button>
+                        <button onClick={() => setActiveTab('RANDOM')} style={{ flex: 1, padding: '10px 4px', border: 'none', background: activeTab === 'RANDOM' ? '#333' : 'transparent', color: activeTab === 'RANDOM' ? '#fff' : '#666', cursor: 'pointer', fontWeight: 'bold', fontSize: '10px' }}>RANDOM</button>
+                        <button onClick={() => setActiveTab('PRESET')} style={{ flex: 1, padding: '10px 4px', border: 'none', background: activeTab === 'PRESET' ? '#333' : 'transparent', color: activeTab === 'PRESET' ? '#fff' : '#666', cursor: 'pointer', fontWeight: 'bold', fontSize: '10px' }}>PRESETS</button>
+                        <button onClick={() => setActiveTab('CUSTOM')} style={{ flex: 1, padding: '10px 4px', border: 'none', background: activeTab === 'CUSTOM' ? '#333' : 'transparent', color: activeTab === 'CUSTOM' ? '#fff' : '#666', cursor: 'pointer', fontWeight: 'bold', fontSize: '10px' }}>MY MAPS</button>
+                        <button onClick={() => setActiveTab('CHALLENGES')} style={{ flex: 1, padding: '10px 4px', border: 'none', background: activeTab === 'CHALLENGES' ? '#FF9800' : 'transparent', color: activeTab === 'CHALLENGES' ? '#000' : '#FFB74D', cursor: 'pointer', fontWeight: 'bold', fontSize: '10px' }}>CHALLENGES</button>
                     </div>
 
                     <div style={{ flex: 1, overflowY: 'auto', padding: '15px' }}>
                         {activeTab === 'RANDOM' && (
-                            <div style={{ padding: '20px', textAlign: 'center', color: '#888', fontStyle: 'italic' }}>
-                                A new procedural map will be generated for each match.
-                                <div style={{ fontSize: '40px', marginTop: '20px' }}>🎲</div>
+                            <div style={{ padding: '16px 10px', textAlign: 'center', color: '#888' }}>
+                                <div style={{ fontSize: '34px', marginBottom: '10px' }}>🎲</div>
+                                <div style={{ fontSize: '12px', fontStyle: 'italic', marginBottom: '16px' }}>
+                                    Enter a 6-character Sector Seed to share or replay an exact battlefield, or leave blank for a new random sector.
+                                </div>
+                                <div style={{ textAlign: 'left', background: 'rgba(255,255,255,0.04)', border: '1px solid #333', borderRadius: '8px', padding: '10px' }}>
+                                    <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#888', letterSpacing: '1px', marginBottom: '6px' }}>SECTOR SEED</div>
+                                    <div style={{ display: 'flex', gap: '6px' }}>
+                                        <input
+                                            type="text"
+                                            maxLength={12}
+                                            placeholder="RANDOM SEED"
+                                            value={settings.mapSeed || ''}
+                                            onChange={(e) => setSettings({ ...settings, mapSeed: e.target.value.toUpperCase() })}
+                                            style={{
+                                                flex: 1,
+                                                minWidth: 0,
+                                                padding: '8px 10px',
+                                                background: '#111',
+                                                border: '1px solid #444',
+                                                borderRadius: '6px',
+                                                color: '#FFD700',
+                                                fontFamily: 'monospace',
+                                                fontSize: '13px',
+                                                fontWeight: 'bold',
+                                                letterSpacing: '1px',
+                                                outline: 'none'
+                                            }}
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setSettings({ ...settings, mapSeed: generateSectorSeed() })}
+                                            title="Roll Sector Seed"
+                                            style={{
+                                                padding: '0 12px',
+                                                background: '#222',
+                                                border: '1px solid #555',
+                                                borderRadius: '6px',
+                                                color: '#fff',
+                                                cursor: 'pointer',
+                                                fontSize: '14px',
+                                                fontWeight: 'bold'
+                                            }}
+                                        >
+                                            🎲
+                                        </button>
+                                    </div>
+                                    {settings.mapSeed && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setSettings({ ...settings, mapSeed: '' })}
+                                            style={{
+                                                marginTop: '6px',
+                                                background: 'transparent',
+                                                border: 'none',
+                                                color: '#888',
+                                                fontSize: '10px',
+                                                cursor: 'pointer',
+                                                padding: 0,
+                                                textDecoration: 'underline'
+                                            }}
+                                        >
+                                            Clear seed (generate fresh on deploy)
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                         )}
 
@@ -401,8 +413,56 @@ export const GameSetup = () => {
                                 </button>
                             </div>
                         )}
+
+                        {activeTab === 'CHALLENGES' && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                {CHALLENGE_OPERATIONS.map(op => {
+                                    const isSel = selectedChallenge.id === op.id;
+                                    const medal = career.challengeMedals?.[op.id];
+                                    const diffColor = op.difficultyLabel === 'EXTREME' ? '#EF5350' : op.difficultyLabel === 'HARD' ? '#FF9800' : '#4CAF50';
+                                    return (
+                                        <div
+                                            key={op.id}
+                                            onClick={() => setSelectedChallenge(op)}
+                                            style={{
+                                                background: isSel ? 'rgba(255, 152, 0, 0.22)' : 'rgba(255,255,255,0.05)',
+                                                border: isSel ? '1px solid #FF9800' : '1px solid #444',
+                                                borderRadius: '8px',
+                                                padding: '10px 12px',
+                                                cursor: 'pointer',
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                gap: '4px'
+                                            }}
+                                        >
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
+                                                <span style={{ fontWeight: 'bold', color: isSel ? '#FFE082' : '#eee', fontSize: '13px' }}>{op.title}</span>
+                                                <span style={{ fontSize: '10px', fontWeight: 'bold', color: medal ? '#FFD700' : diffColor }}>
+                                                    {medal ? `🏅 ${medal}` : op.difficultyLabel}
+                                                </span>
+                                            </div>
+                                            <div style={{ fontSize: '10px', color: '#aaa' }}>{op.subtitle}</div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
                     
+                    {(career.gamesPlayed > 0 || Object.keys(career.challengeMedals || {}).length > 0) && (
+                        <div style={{ padding: '10px 15px', borderTop: '1px solid #333', background: 'rgba(255,215,0,0.04)' }}>
+                            <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#FFD700', letterSpacing: '1px', marginBottom: '6px' }}>
+                                CAREER RECORD ({career.wins}W - {career.losses}L • {Object.keys(career.challengeMedals || {}).length}/{CHALLENGE_OPERATIONS.length} OPS)
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 10px', fontSize: '11px', color: '#bbb' }}>
+                                <span>Best Grade: <strong style={{ color: '#fff' }}>{career.bestGrade ?? '-'}</strong></span>
+                                <span>Best Streak: <strong style={{ color: '#4CAF50' }}>{career.bestStreak}</strong></span>
+                                <span>Fastest Win: <strong style={{ color: '#90CAF9' }}>{career.fastestWinRounds ? `${career.fastestWinRounds}R` : '-'}</strong></span>
+                                <span>Aces: <strong style={{ color: '#FFD700' }}>{career.totalAcesPromoted}</strong></span>
+                            </div>
+                        </div>
+                    )}
+
                     <div style={{ padding: '15px', borderTop: '1px solid #333' }}>
                         <button 
                             onClick={openEditor}
@@ -420,6 +480,66 @@ export const GameSetup = () => {
 
                 {/* RIGHT SIDE: CONFIG */}
                 <div style={{ width: '60%', padding: '30px', display: 'flex', flexDirection: 'column' }}>
+                    {activeTab === 'CHALLENGES' ? (() => {
+                        const p0Units = selectedChallenge.placements.filter(p => p.owner === 0);
+                        const p1Units = selectedChallenge.placements.filter(p => p.owner === 1);
+                        const earnedMedal = career.challengeMedals?.[selectedChallenge.id];
+                        const muts = selectedChallenge.settings.mutators;
+                        const activeRuleTags = [
+                            selectedChallenge.settings.fogOfWar ? 'FOG OF WAR' : null,
+                            selectedChallenge.settings.doomsdayEnabled ? `DOOMSDAY R${(selectedChallenge.startingRound ?? 0) + 1}` : null,
+                            muts?.blitzCp ? 'BLITZ CP (30/+15)' : null,
+                            muts?.scarcity ? 'SCARCITY (50% AMMO)' : null,
+                            muts?.ironman ? 'IRONMAN (0 RESPAWNS)' : null,
+                            `AI: ${selectedChallenge.settings.aiDifficulty || 'HARD'}`
+                        ].filter(Boolean) as string[];
+
+                        const formatRoster = (list: typeof p0Units) =>
+                            list.map(u => `${UNIT_STATS[u.type].name}${u.rank ? ` ${'★'.repeat(u.rank)}` : ''}`).join(', ');
+
+                        return (
+                            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <span style={{ fontSize: '11px', fontWeight: 'bold', letterSpacing: '1px', color: '#FF9800' }}>TACTICAL OPERATION BRIEFING</span>
+                                    {earnedMedal && (
+                                        <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#FFD700', background: 'rgba(255,215,0,0.12)', border: '1px solid rgba(255,215,0,0.4)', padding: '3px 10px', borderRadius: '12px' }}>
+                                            🏅 BEST: {earnedMedal}-MEDAL
+                                        </span>
+                                    )}
+                                </div>
+                                <div>
+                                    <h2 style={{ margin: '0 0 4px 0', color: '#fff', fontSize: '22px' }}>{selectedChallenge.title}</h2>
+                                    <div style={{ fontSize: '12px', color: '#90CAF9', fontWeight: 'bold' }}>{selectedChallenge.subtitle}</div>
+                                </div>
+                                <div style={{ padding: '14px', background: 'rgba(255,255,255,0.04)', border: '1px solid #333', borderRadius: '8px', color: '#ddd', fontSize: '13px', lineHeight: '1.6' }}>
+                                    {selectedChallenge.briefing}
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                                    <span style={{ fontSize: '10px', padding: '4px 8px', borderRadius: '4px', background: '#222', border: '1px solid #444', color: '#ccc', fontWeight: 'bold' }}>
+                                        {selectedChallenge.gridSize}x{selectedChallenge.gridSize} SECTOR
+                                    </span>
+                                    <span style={{ fontSize: '10px', padding: '4px 8px', borderRadius: '4px', background: '#222', border: '1px solid #444', color: '#FFD700', fontWeight: 'bold' }}>
+                                        PAR: {selectedChallenge.parRounds} ROUNDS
+                                    </span>
+                                    {activeRuleTags.map(tag => (
+                                        <span key={tag} style={{ fontSize: '10px', padding: '4px 8px', borderRadius: '4px', background: 'rgba(255,152,0,0.15)', border: '1px solid rgba(255,152,0,0.4)', color: '#FFB74D', fontWeight: 'bold' }}>
+                                            {tag}
+                                        </span>
+                                    ))}
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '10px' }}>
+                                    <div style={{ background: 'rgba(229,57,53,0.1)', border: '1px solid rgba(229,57,53,0.3)', padding: '10px 12px', borderRadius: '8px' }}>
+                                        <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#EF9A9A', marginBottom: '4px' }}>YOUR STRIKE TEAM ({p0Units.length} UNITS)</div>
+                                        <div style={{ fontSize: '12px', color: '#eee' }}>{formatRoster(p0Units)}</div>
+                                    </div>
+                                    <div style={{ background: 'rgba(30,136,229,0.1)', border: '1px solid rgba(30,136,229,0.3)', padding: '10px 12px', borderRadius: '8px' }}>
+                                        <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#90CAF9', marginBottom: '4px' }}>HOSTILE GARRISON ({p1Units.length} UNITS)</div>
+                                        <div style={{ fontSize: '12px', color: '#eee' }}>{formatRoster(p1Units)}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })() : (
                     <div style={{ flex: 1, overflowY: 'auto' }}>
                         
                         <div style={{ marginBottom: '25px' }}>
@@ -508,29 +628,63 @@ export const GameSetup = () => {
                             <UnitCounter type="SNIPER" label="SNIPER" max={3} />
                         </div>
 
-                        <div>
+                        <div style={{ marginBottom: '25px' }}>
                             <h3 style={{ color: '#888', fontSize: '11px', fontWeight:'bold', letterSpacing:'1px', marginBottom: '10px' }}>ENVIRONMENT</h3>
                             <Toggle label="Dynamic Weather" value={settings.dynamicWeather} onChange={(v) => setSettings({...settings, dynamicWeather: v})} />
                             <Toggle label="Fog of War" value={settings.fogOfWar} onChange={(v) => setSettings({...settings, fogOfWar: v})} />
                         </div>
-                    </div>
 
-                    <button 
-                        onClick={handleDeploy}
-                        disabled={activeTab !== 'RANDOM' && !selectedMap}
-                        style={{
-                            width: '100%', padding: '18px', marginTop: '20px',
-                            background: (activeTab === 'RANDOM' || selectedMap) ? 'linear-gradient(180deg, #2E7D32, #1B5E20)' : '#333', 
-                            border: (activeTab === 'RANDOM' || selectedMap) ? '1px solid #4CAF50' : '1px solid #444', 
-                            borderRadius: '8px',
-                            color: (activeTab === 'RANDOM' || selectedMap) ? 'white' : '#666', fontSize: '16px', fontWeight: 'bold', 
-                            cursor: (activeTab === 'RANDOM' || selectedMap) ? 'pointer' : 'not-allowed',
-                            boxShadow: (activeTab === 'RANDOM' || selectedMap) ? '0 4px 15px rgba(46, 125, 50, 0.4)' : 'none', letterSpacing: '1px',
-                            textTransform: 'uppercase'
-                        }}
-                    >
-                        {activeTab === 'RANDOM' ? 'INITIATE RANDOM OP' : selectedMap ? `DEPLOY TO ${selectedMap.name}` : 'SELECT A MAP'}
-                    </button>
+                        <div>
+                            <h3 style={{ color: '#888', fontSize: '11px', fontWeight:'bold', letterSpacing:'1px', marginBottom: '10px' }}>GAME MUTATORS</h3>
+                            <Toggle
+                                label="Blitz CP (30 Max / +15 CP/turn)"
+                                value={Boolean(settings.mutators?.blitzCp)}
+                                onChange={(v) => setSettings({ ...settings, mutators: { blitzCp: v, scarcity: Boolean(settings.mutators?.scarcity), ironman: Boolean(settings.mutators?.ironman) } })}
+                            />
+                            <Toggle
+                                label="Scarcity (50% Ammo / +50% Bank Gold)"
+                                value={Boolean(settings.mutators?.scarcity)}
+                                onChange={(v) => setSettings({ ...settings, mutators: { blitzCp: Boolean(settings.mutators?.blitzCp), scarcity: v, ironman: Boolean(settings.mutators?.ironman) } })}
+                            />
+                            <Toggle
+                                label="Ironman (0 Graveyard Respawns)"
+                                value={Boolean(settings.mutators?.ironman)}
+                                onChange={(v) => setSettings({ ...settings, mutators: { blitzCp: Boolean(settings.mutators?.blitzCp), scarcity: Boolean(settings.mutators?.scarcity), ironman: v } })}
+                            />
+                        </div>
+                    </div>
+                    )}
+
+                    {(() => {
+                        const totalUnits = settings.unitCounts.SOLDIER + settings.unitCounts.ASSAULTER + settings.unitCounts.SNIPER;
+                        const canDeploy = activeTab === 'CHALLENGES' || (totalUnits > 0 && (activeTab === 'RANDOM' || Boolean(selectedMap)));
+                        return (
+                            <button 
+                                onClick={handleDeploy}
+                                disabled={!canDeploy}
+                                style={{
+                                    width: '100%', padding: '18px', marginTop: '20px',
+                                    background: canDeploy ? (activeTab === 'CHALLENGES' ? 'linear-gradient(180deg, #F57C00, #E65100)' : 'linear-gradient(180deg, #2E7D32, #1B5E20)') : '#333', 
+                                    border: canDeploy ? (activeTab === 'CHALLENGES' ? '1px solid #FFB300' : '1px solid #4CAF50') : '1px solid #444', 
+                                    borderRadius: '8px',
+                                    color: canDeploy ? 'white' : '#666', fontSize: '16px', fontWeight: 'bold', 
+                                    cursor: canDeploy ? 'pointer' : 'not-allowed',
+                                    boxShadow: canDeploy ? '0 4px 15px rgba(46, 125, 50, 0.4)' : 'none', letterSpacing: '1px',
+                                    textTransform: 'uppercase'
+                                }}
+                            >
+                                {activeTab === 'CHALLENGES'
+                                    ? `DEPLOY OP: ${selectedChallenge.title}`
+                                    : totalUnits === 0
+                                        ? 'ADD AT LEAST 1 UNIT'
+                                        : activeTab === 'RANDOM'
+                                            ? 'INITIATE RANDOM OP'
+                                            : selectedMap
+                                                ? `DEPLOY TO ${selectedMap.name}`
+                                                : 'SELECT A MAP'}
+                            </button>
+                        );
+                    })()}
                 </div>
             </div>
             

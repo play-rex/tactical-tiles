@@ -69,7 +69,7 @@ const RightIntelPanel = ({ mode, brush, brushSettings, activeZone }: { mode: 'PA
     // --- ZONE MODE INTEL ---
     if (mode === 'ZONE') {
         return (
-            <div style={{ width: '320px', background: '#1a1a1a', borderLeft: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ width: 'clamp(200px, 22vw, 280px)', background: '#1a1a1a', borderLeft: '1px solid #333', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
                 <div style={{ padding: '20px', borderBottom: '1px solid #333', background: '#222' }}>
                     <h2 style={{ margin: 0, fontSize: '18px', color: 'white', letterSpacing: '1px' }}>ZONE EDITOR</h2>
                     <div style={{ fontSize: '11px', color: '#888', marginTop: '5px', fontWeight: 'bold' }}>METEOROLOGY & CONTROL</div>
@@ -127,8 +127,8 @@ const RightIntelPanel = ({ mode, brush, brushSettings, activeZone }: { mode: 'PA
             break;
         case 'MOUNTAIN':
             description = "High elevation rocky terrain.";
-            tactical = "High ground. Grants SNIPERS bonus range and damage. Hard to traverse (3 CP).";
-            weatherNotes = "Blocks wind effects partially.";
+            tactical = "High ground. Enables SNIPERS to fire and provides +40% defense cover. Hard to traverse (3 CP).";
+            weatherNotes = "Blocks Line of Sight from lower terrain.";
             break;
         case 'WATER':
             description = "Deep water bodies.";
@@ -189,7 +189,7 @@ const RightIntelPanel = ({ mode, brush, brushSettings, activeZone }: { mode: 'PA
     }
 
     return (
-        <div style={{ width: '320px', background: '#1a1a1a', borderLeft: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ width: 'clamp(200px, 22vw, 280px)', background: '#1a1a1a', borderLeft: '1px solid #333', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
              <div style={{ padding: '20px', borderBottom: '1px solid #333', background: '#222' }}>
                 <h2 style={{ margin: 0, fontSize: '18px', color: 'white', letterSpacing: '1px' }}>INTEL DATABASE</h2>
                 <div style={{ fontSize: '11px', color: '#888', marginTop: '5px', fontWeight: 'bold' }}>TERRAIN ANALYSIS</div>
@@ -262,8 +262,15 @@ export const MapEditor = () => {
     const [isDrawing, setIsDrawing] = useState(false);
     
     const [showClearConfirm, setShowClearConfirm] = useState(false);
+    const [pendingResize, setPendingResize] = useState<number | null>(null);
     const [showSaveModal, setShowSaveModal] = useState(false);
     const [mapName, setMapName] = useState(() => mapToEdit ? mapToEdit.name : '');
+    const [notice, setNotice] = useState<{ text: string; isError: boolean } | null>(null);
+
+    const showNotice = (text: string, isError = false) => {
+        setNotice({ text, isError });
+        setTimeout(() => setNotice(prev => (prev?.text === text ? null : prev)), 3200);
+    };
 
     const [brushSettings, setBrushSettings] = useState({
         bankGold: 200,
@@ -288,7 +295,8 @@ export const MapEditor = () => {
         if (!containerRef.current) return;
         const resize = () => {
             if (!containerRef.current) return;
-            const { clientWidth, clientHeight } = containerRef.current;
+            const clientWidth = Math.max(1, containerRef.current.clientWidth);
+            const clientHeight = Math.max(1, containerRef.current.clientHeight);
             const worldSize = mapSize * TILE_SIZE;
             
             // Calculate scale to fit
@@ -325,11 +333,20 @@ export const MapEditor = () => {
     const handleResize = (size: number) => {
         if (size === mapSize) return;
         if (mapData.some(t => t.type !== 'PLAINS')) {
-             if (!window.confirm(`⚠️ RESIZE WARNING:\n\nChanging to ${size}x${size} will reset the map. Continue?`)) return;
+            setPendingResize(size);
+            return;
         }
         setMapSize(size);
         setMapData(createBlankMap(size));
         setHistory([]);
+    };
+
+    const confirmResize = () => {
+        if (pendingResize === null) return;
+        setMapSize(pendingResize);
+        setMapData(createBlankMap(pendingResize));
+        setHistory([]);
+        setPendingResize(null);
     };
 
     const handlePaint = (e: React.MouseEvent) => {
@@ -413,7 +430,7 @@ export const MapEditor = () => {
     const handleSave = () => {
         const baseCount = mapData.filter(t => t.type === 'BASE').length;
         if (baseCount < 2) {
-            alert("Error: Map must have at least 2 BASES to be playable.");
+            showNotice('Map must have at least 2 BASES to be playable.', true);
             return;
         }
         setShowSaveModal(true);
@@ -432,15 +449,15 @@ export const MapEditor = () => {
             data: mapData,
             baseCount: mapData.filter(t => t.type === 'BASE').length
         });
-        alert('Map Saved to Local Storage!');
         setShowSaveModal(false);
         setMapName('');
+        showNotice('Map saved to Local Storage!');
     };
 
     const handleLoadPlay = () => {
         const baseCount = mapData.filter(t => t.type === 'BASE').length;
         if (baseCount < 2) {
-            alert("Error: Map must have at least 2 BASES to play.");
+            showNotice('Map must have at least 2 BASES to test play.', true);
             return;
         }
         loadMapAndStart(mapData);
@@ -451,7 +468,7 @@ export const MapEditor = () => {
     return (
         <div style={{ width: '100vw', height: '100vh', display: 'flex', background: '#111', color: 'white' }}>
             {/* LEFT PALETTE */}
-            <div style={{ width: '280px', background: '#1a1a1a', borderRight: '1px solid #333', padding: '15px', display: 'flex', flexDirection: 'column', gap: '15px', overflowY: 'auto' }}>
+            <div style={{ width: 'clamp(190px, 20vw, 260px)', background: '#1a1a1a', borderRight: '1px solid #333', padding: '15px', display: 'flex', flexDirection: 'column', gap: '15px', overflowY: 'auto', flexShrink: 0 }}>
                 {/* 1. MAIN ACTIONS */}
                 <div>
                     <div style={{ fontSize: '10px', color: '#888', marginBottom: '5px', textTransform: 'uppercase', fontWeight: 'bold' }}>Actions</div>
@@ -554,7 +571,7 @@ export const MapEditor = () => {
             {/* CENTER CANVAS AREA */}
             <div 
                 ref={containerRef}
-                style={{ flex: 1, height: '100%', position: 'relative', background: '#050505', cursor: 'crosshair', overflow: 'hidden' }}
+                style={{ flex: 1, minWidth: 0, height: '100%', position: 'relative', background: '#050505', cursor: 'crosshair', overflow: 'hidden' }}
                 onMouseDown={handleMouseDown}
                 onMouseMove={(e) => { if (isDrawing) handlePaint(e); }}
                 onMouseUp={() => setIsDrawing(false)}
@@ -665,7 +682,34 @@ export const MapEditor = () => {
                     </Container>
                 </Stage>
 
+                {/* NOTICE BANNER */}
+                {notice && (
+                    <div style={{
+                        position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)',
+                        background: notice.isError ? 'rgba(211, 47, 47, 0.95)' : 'rgba(46, 125, 50, 0.95)',
+                        color: 'white', padding: '10px 18px', borderRadius: '8px',
+                        border: `1px solid ${notice.isError ? '#ef9a9a' : '#81c784'}`,
+                        fontSize: '12px', fontWeight: 'bold', zIndex: 120,
+                        boxShadow: '0 4px 16px rgba(0,0,0,0.6)'
+                    }}>
+                        {notice.text}
+                    </div>
+                )}
+
                 {/* MODALS */}
+                {pendingResize !== null && (
+                    <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
+                        <div style={{ background: '#1a1a1a', border: '1px solid #333', padding: '24px', borderRadius: '12px', width: '320px', textAlign: 'center' }}>
+                            <div style={{ fontSize: '40px', marginBottom: '10px' }}>⚠️</div>
+                            <h3 style={{ color: '#FF9800', marginTop: 0, marginBottom: '10px' }}>RESIZE TO {pendingResize}x{pendingResize}?</h3>
+                            <p style={{ fontSize: '12px', color: '#aaa', marginBottom: '20px' }}>Changing grid size resets the current map.</p>
+                            <div style={{ display: 'flex', gap: '12px' }}>
+                                <button onClick={() => setPendingResize(null)} style={{ flex: 1, padding: '12px', background: '#333', border: '1px solid #444', color: '#ccc', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>CANCEL</button>
+                                <button onClick={confirmResize} style={{ flex: 1, padding: '12px', background: '#FF9800', border: 'none', color: 'black', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>RESIZE</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
                 {showClearConfirm && (
                     <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
                         <div style={{ background: '#1a1a1a', border: '1px solid #333', padding: '24px', borderRadius: '12px', width: '320px', textAlign: 'center' }}>

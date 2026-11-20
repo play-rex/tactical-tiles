@@ -1,6 +1,7 @@
 
-import { Tile, Unit, UnitType, WeatherState, WeatherType } from '../types';
-import { TERRAIN_COSTS, UNIT_STATS, BUILDING_STATS } from '../constants/Config';
+import { Tile, Unit, UnitRank, UnitType, WeatherState } from '../types';
+import { TERRAIN_COSTS, UNIT_STATS } from '../constants/Config';
+import { getUnitVision } from '../rules/CombatRules';
 
 interface MoveNode {
   x: number;
@@ -34,10 +35,17 @@ const isTileVisibleInWeather = (start: Tile, end: Tile, weatherState: WeatherSta
   return true;
 };
 
-// Bresenham's Line Algorithm to check Line of Sight
-export const hasLineOfSight = (start: Tile, end: Tile, mapData: Tile[], unitType: UnitType, weatherState: WeatherState, gridSize: number): boolean => {
+const traceLineOfSight = (
+  start: Tile,
+  end: Tile,
+  mapData: Tile[],
+  weatherState: WeatherState,
+  gridSize: number,
+  options: { blockBarriers?: boolean; checkTargetWeather?: boolean } = {}
+): boolean => {
   // 1. Check Weather Visibility first
   if (!isTileVisibleInWeather(start, end, weatherState)) return false;
+  if (options.checkTargetWeather && !isTileVisibleInWeather(end, start, weatherState)) return false;
 
   let x0 = start.x;
   let y0 = start.y;
@@ -58,25 +66,24 @@ export const hasLineOfSight = (start: Tile, end: Tile, mapData: Tile[], unitType
     const tileIdx = y0 * gridSize + x0;
     const tile = mapData[tileIdx];
 
-    if (x0 !== start.x || y0 !== start.y) {
+    if (tile && (x0 !== start.x || y0 !== start.y)) {
        // Buildings always block LOS unless you are on top of one
        if (tile.type === 'BUILDING' && tile.id !== start.id && tile.id !== end.id) {
            return false;
        }
+       // Barriers block Overwatch reaction lines
+       if (options.blockBarriers && tile.type === 'BARRIER' && tile.id !== start.id && tile.id !== end.id) {
+           return false;
+       }
 
-       // Canyon Logic: Canyons are low ground (usually Height 0 or treated specially)
-       // but here we just ensure they don't block LOS like Mountains do.
-       // Since Canyons are defined as same height as Plains usually, they don't block.
-       // Only block if tile.height > attackerHeight.
-       
        if (tile.height > attackerHeight) {
            return false;
        }
-       
+
        if (tile.type === 'MOUNTAIN' && attackerHeight < tile.height) {
            return false;
        }
-       
+
        // DUNES block LOS (Height 2)
        if (tile.type === 'DUNES' && attackerHeight < tile.height) {
            return false;
@@ -97,14 +104,35 @@ export const hasLineOfSight = (start: Tile, end: Tile, mapData: Tile[], unitType
   return true;
 };
 
-const getWeatherMoveCost = (tile: Tile, unitType: UnitType, baseCost: number, weatherState: WeatherState): number => {
+// Bresenham's Line Algorithm to check Line of Sight
+export const hasLineOfSight = (start: Tile, end: Tile, mapData: Tile[], _unitType: UnitType, weatherState: WeatherState, gridSize: number): boolean => {
+  return traceLineOfSight(start, end, mapData, weatherState, gridSize);
+};
+
+// Overwatch Line of Sight: additionally blocked by Barriers and bidirectional Fog/Sandstorm caps
+export const hasOverwatchLineOfSight = (start: Tile, end: Tile, mapData: Tile[], _unitType: UnitType, weatherState: WeatherState, gridSize: number): boolean => {
+  return traceLineOfSight(start, end, mapData, weatherState, gridSize, {
+    blockBarriers: true,
+    checkTargetWeather: true
+  });
+};
+
+const getWeatherMoveCost = (
+    tile: Tile,
+    unitType: UnitType,
+    baseCost: number,
+    weatherState: WeatherState,
+    unitRank: UnitRank = 0
+): number => {
     // 1. Identify Weather
     const zoneId = tile.zone !== undefined ? tile.zone : -1;
     const weather = zoneId >= 0 && weatherState.playerZones[zoneId] ? weatherState.playerZones[zoneId] : 'CLEAR';
     
+    const ignorePlainsSlow = unitType === 'SOLDIER' && unitRank >= 2;
+
     // 2. Apply Effects
     if (tile.type === 'PLAINS') {
-        if (weather === 'SCORCHED') return 2;
+        if (weather === 'SCORCHED' && !ignorePlainsSlow) return 2;
         if (weather === 'MONSOON' && unitType === 'ASSAULTER') return 2;
         if (weather === 'TAILWIND') return 0.5;
     }
@@ -117,7 +145,29 @@ const getWeatherMoveCost = (tile: Tile, unitType: UnitType, baseCost: number, we
     return baseCost;
 };
 
-export const getValidMoves = (
+export const getStepCost = (
+    tile: Tile,
+    unitType: UnitType,
+    currentPlayer: number,
+    weatherState: WeatherState,
+    unitRank: UnitRank = 0
+): number | null => {
+    if (tile.hazardState === 'LAVA') return null;
+    if (unitType === 'SNIPER' && tile.type === 'BUILDING' && tile.owner !== currentPlayer) return null;
+
+    // Ace Sniper climbs high ground effortlessly (1 CP per Mountain/Dunes tile)
+    if (unitType === 'SNIPER' && unitRank >= 3 && (tile.type === 'MOUNTAIN' || tile.type === 'DUNES')) {
+        return 1;
+    }
+
+    const terrainBaseCost = TERRAIN_COSTS[tile.type];
+    if (terrainBaseCost >= 90) return null;
+
+    const terrainMod = getWeatherMoveCost(tile, unitType, terrainBaseCost, weatherState, unitRank);
+    return terrainMod * UNIT_STATS[unitType].moveCost;
+};
+
+const runDijkstra = (
   startTile: Tile,
   currentGlobalCp: number,
   mapData: Tile[],
@@ -125,15 +175,16 @@ export const getValidMoves = (
   unitType: UnitType,
   currentPlayer: number,
   weatherState: WeatherState,
-  gridSize: number
-): Map<string, number> => {
+  gridSize: number,
+  unitRank: UnitRank = 0
+): { validMoves: Map<string, number>; parents: Map<string, string> } => {
   const validMoves = new Map<string, number>();
+  const parents = new Map<string, string>();
   
   // ROOTED CHECK (From Quicksand)
   const myUnit = units.find(u => u.tileId === startTile.id);
   if (myUnit && myUnit.isRooted) {
-      // Unit cannot move
-      return validMoves; 
+      return { validMoves, parents };
   }
 
   const visited = new Map<string, number>(); 
@@ -148,12 +199,12 @@ export const getValidMoves = (
   visited.set(startTile.id, 0);
 
   const directions = [{dx:0, dy:-1}, {dx:0, dy:1}, {dx:-1, dy:0}, {dx:1, dy:0}];
-  const unitStats = UNIT_STATS[unitType];
 
   while (queue.length > 0) {
     queue.sort((a, b) => a.cost - b.cost);
     const current = queue.shift();
     if (!current) break;
+    const currentId = `${current.x},${current.y}`;
 
     for (const dir of directions) {
       const nx = current.x + dir.dx;
@@ -166,22 +217,9 @@ export const getValidMoves = (
       const tile = mapData[tileIndex];
       if (!tile) continue;
 
-      // DOOMSDAY CHECK
-      if (tile.hazardState === 'LAVA') continue;
+      const moveCost = getStepCost(tile, unitType, currentPlayer, weatherState, unitRank);
+      if (moveCost === null) continue;
 
-      // RULE: Snipers cannot enter Neutral or Enemy Buildings
-      if (unitType === 'SNIPER' && tile.type === 'BUILDING') {
-          if (tile.owner !== currentPlayer) continue;
-      }
-
-      const terrainBaseCost = TERRAIN_COSTS[tile.type];
-      
-      // Impassable Check (Water, Canyon, Barrier)
-      if (terrainBaseCost >= 90) continue;
-
-      const terrainMod = getWeatherMoveCost(tile, unitType, terrainBaseCost, weatherState);
-      
-      const moveCost = terrainMod * unitStats.moveCost;
       const newCost = current.cost + moveCost;
 
       if (newCost > currentGlobalCp) continue;
@@ -189,6 +227,7 @@ export const getValidMoves = (
       if (visited.has(nId) && visited.get(nId)! <= newCost) continue;
 
       visited.set(nId, newCost);
+      parents.set(nId, currentId);
       if (!occupiedTiles.has(nId)) {
         validMoves.set(nId, newCost); 
       }
@@ -196,7 +235,59 @@ export const getValidMoves = (
     }
   }
 
-  return validMoves;
+  return { validMoves, parents };
+};
+
+export const getValidMoves = (
+  startTile: Tile,
+  currentGlobalCp: number,
+  mapData: Tile[],
+  units: Unit[],
+  unitType: UnitType,
+  currentPlayer: number,
+  weatherState: WeatherState,
+  gridSize: number,
+  unitRank: UnitRank = 0
+): Map<string, number> => {
+  return runDijkstra(startTile, currentGlobalCp, mapData, units, unitType, currentPlayer, weatherState, gridSize, unitRank).validMoves;
+};
+
+export const getMovePath = (
+  startTile: Tile,
+  targetTileId: string,
+  currentGlobalCp: number,
+  mapData: Tile[],
+  units: Unit[],
+  unitType: UnitType,
+  currentPlayer: number,
+  weatherState: WeatherState,
+  gridSize: number,
+  unitRank: UnitRank = 0
+): Tile[] => {
+  const { validMoves, parents } = runDijkstra(
+      startTile,
+      currentGlobalCp,
+      mapData,
+      units,
+      unitType,
+      currentPlayer,
+      weatherState,
+      gridSize,
+      unitRank
+  );
+  if (!validMoves.has(targetTileId)) return [];
+
+  const path: Tile[] = [];
+  let cursor: string | undefined = targetTileId;
+  let guard = 0;
+  while (cursor && cursor !== startTile.id && guard < gridSize * gridSize) {
+      const t = mapData.find(tile => tile.id === cursor);
+      if (t) path.unshift(t);
+      cursor = parents.get(cursor);
+      guard++;
+  }
+  path.unshift(startTile);
+  return path;
 };
 
 export const calculateVisibility = (player: number, units: Unit[], mapData: Tile[], weather: WeatherState, fogEnabled: boolean, gridSize: number): Set<string> => {
@@ -210,7 +301,7 @@ export const calculateVisibility = (player: number, units: Unit[], mapData: Tile
     myUnits.forEach(unit => {
         const uTile = mapData.find(t => t.id === unit.tileId);
         if (!uTile) return;
-        let vision = UNIT_STATS[unit.type].vision;
+        let vision = getUnitVision(unit);
         
         // Sandstorm reduces all vision
         const zoneId = uTile.zone !== undefined ? uTile.zone : -1;

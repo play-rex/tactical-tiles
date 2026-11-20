@@ -2,7 +2,8 @@ import React, { useRef, useEffect } from 'react';
 import { useTick, Container, Graphics } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 import { SafeSprite } from '../SafeSprite';
-import { TILE_SIZE, UNIT_STATS } from '../../../core/constants/Config';
+import { TILE_SIZE } from '../../../core/constants/Config';
+import { getUnitMaxHp } from '../../../core/rules/CombatRules';
 
 // Helper lerp
 const lerp = (start: number, end: number, alpha: number) => start + (end - start) * alpha;
@@ -79,6 +80,28 @@ export const UnitSprite: React.FC<UnitSpriteProps> = ({ texture, x, y, isSelecte
                 onPointerDown?.();
             }}
         >
+            {/* Overwatch Stance Ring */}
+            {unit.isOverwatching && (
+                <Graphics
+                    draw={g => {
+                        g.clear();
+                        g.lineStyle(2, 0xFFB300, 0.9);
+                        g.drawCircle(TILE_SIZE / 2, TILE_SIZE / 2, TILE_SIZE * 0.42);
+                    }}
+                />
+            )}
+
+            {/* Ace Veterancy Gold Aura */}
+            {(unit.rank ?? 0) >= 3 && (
+                <Graphics
+                    draw={g => {
+                        g.clear();
+                        g.lineStyle(2, 0xF59E0B, 0.9);
+                        g.drawRoundedRect(2, 2, TILE_SIZE - 4, TILE_SIZE - 4, 6);
+                    }}
+                />
+            )}
+
              {/* Selection Halo */}
             {isSelected && (
                 <Graphics 
@@ -102,12 +125,12 @@ export const UnitSprite: React.FC<UnitSpriteProps> = ({ texture, x, y, isSelecte
                 y={TILE_SIZE / 2}
             />
             
-            {/* HP Bar */}
+            {/* HP Bar, Ammo & Rank Chevrons */}
              <Graphics 
                 draw={g => {
                     g.clear();
-                    const maxHp = UNIT_STATS[unit.type].hp;
-                    const pct = Math.max(0, unit.hp / maxHp);
+                    const maxHp = getUnitMaxHp(unit);
+                    const pct = Math.min(1, Math.max(0, unit.hp / maxHp));
                     const color = pct > 0.5 ? 0x00FF00 : pct > 0.25 ? 0xFFA500 : 0xFF0000;
                     
                     g.beginFill(0x000000, 0.8);
@@ -124,6 +147,39 @@ export const UnitSprite: React.FC<UnitSpriteProps> = ({ texture, x, y, isSelecte
                             g.drawRect(8 + (i*5), TILE_SIZE - 16, 4, 4);
                         }
                         g.endFill();
+                    }
+
+                    // Veterancy Rank Pips (1..3 gold diamonds at top-left)
+                    const rank = unit.rank ?? 0;
+                    if (rank > 0) {
+                        for (let i = 0; i < rank; i++) {
+                            const cx = 10 + i * 8;
+                            const cy = 9;
+                            g.lineStyle(1, 0x000000, 0.9);
+                            g.beginFill(0xFFD700, 1);
+                            g.drawPolygon([
+                                cx, cy - 3.5,
+                                cx + 3, cy,
+                                cx, cy + 3.5,
+                                cx - 3, cy
+                            ]);
+                            g.endFill();
+                        }
+                    }
+
+                    // Overwatch Reticle Badge (top-right)
+                    if (unit.isOverwatching) {
+                        const bx = TILE_SIZE - 10;
+                        const by = 10;
+                        g.lineStyle(1.5, 0x000000, 0.9);
+                        g.beginFill(0xFFB300, 1);
+                        g.drawCircle(bx, by, 5);
+                        g.endFill();
+                        g.lineStyle(1.5, 0x111111, 1);
+                        g.moveTo(bx - 3, by);
+                        g.lineTo(bx + 3, by);
+                        g.moveTo(bx, by - 3);
+                        g.lineTo(bx, by + 3);
                     }
                 }}
             />

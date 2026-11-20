@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useRef, useMemo } from 'react';
 import { Text, useTick } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 
@@ -13,59 +13,54 @@ interface DamageTextProps {
 }
 
 export const DamageText: React.FC<DamageTextProps> = ({ data }) => {
-    const [age, setAge] = useState(0);
-    const [yOffset, setYOffset] = useState(0);
-    const [scale, setScale] = useState(0.5);
-    const [alpha, setAlpha] = useState(1);
+    const textRef = useRef<PIXI.Text>(null);
+    const ageRef = useRef(0);
+    const yOffsetRef = useRef(0);
+
+    const style = useMemo(() => new PIXI.TextStyle({
+        fontFamily: 'Arial',
+        fontSize: 24,
+        fontWeight: 'bold',
+        fill: [data.color, '#eeeeee'],
+        stroke: '#000000',
+        strokeThickness: 4,
+        dropShadow: true,
+        dropShadowColor: '#000000',
+        dropShadowBlur: 2,
+        dropShadowAngle: Math.PI / 6,
+        dropShadowDistance: 2,
+    }), [data.color]);
 
     useTick((delta) => {
-        const newAge = age + delta;
-        setAge(newAge);
+        if (!textRef.current) return;
 
-        // Float up (1px per tick roughly)
-        setYOffset(prev => prev - (1 * delta));
+        ageRef.current += delta;
+        yOffsetRef.current -= delta;
+        textRef.current.y = data.y + yOffsetRef.current;
 
-        // Scale Pop Logic (Elastic out effect simplified)
-        // 0 to 10 frames: Grow
-        if (newAge < 10) {
-            setScale(0.5 + (0.7 * (newAge / 10))); // 0.5 -> 1.2
-        } 
-        // 10 to 20 frames: Settle
-        else if (newAge < 20) {
-            setScale(1.2 - (0.2 * ((newAge - 10) / 10))); // 1.2 -> 1.0
+        const age = ageRef.current;
+        if (age < 10) {
+            textRef.current.scale.set(0.5 + 0.7 * (age / 10));
+        } else if (age < 20) {
+            textRef.current.scale.set(1.2 - 0.2 * ((age - 10) / 10));
         } else {
-            setScale(1.0);
+            textRef.current.scale.set(1.0);
         }
 
-        // Fade out in last 30 frames (assuming ~60 frames per sec, 1s life)
-        // Life is managed by store timeout (1000ms), which is approx 60 ticks.
-        if (newAge > 30) {
-            const fade = 1 - ((newAge - 30) / 30);
-            setAlpha(Math.max(0, fade));
+        if (age > 30) {
+            textRef.current.alpha = Math.max(0, 1 - (age - 30) / 30);
         }
     });
 
     return (
         <Text
+            ref={textRef}
             text={data.value}
             x={data.x}
-            y={data.y + yOffset}
+            y={data.y}
             anchor={0.5}
-            scale={scale}
-            alpha={alpha}
-            style={new PIXI.TextStyle({
-                fontFamily: 'Arial', // or config font
-                fontSize: 24,
-                fontWeight: 'bold',
-                fill: [data.color, '#eeeeee'], // Gradient for sheen
-                stroke: '#000000',
-                strokeThickness: 4,
-                dropShadow: true,
-                dropShadowColor: '#000000',
-                dropShadowBlur: 2,
-                dropShadowAngle: Math.PI / 6,
-                dropShadowDistance: 2,
-            })}
+            scale={0.5}
+            style={style}
         />
     );
 };

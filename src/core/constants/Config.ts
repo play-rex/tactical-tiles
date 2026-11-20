@@ -34,14 +34,14 @@ export const DOOMSDAY_SETTINGS = {
 // Command Point (Battery) System
 export const CP_SYSTEM = {
   MAX_CP: 20,
-  REGEN_AMOUNT: 8, // 40% of 20
+  REGEN_AMOUNT: 10,
+  P1_ROUND1_CP: 15,
+  RELOAD_COST: 5,
 };
 
 export const GOLD_SETTINGS = {
-  INITIAL_GOLD: 150, // Higher starting gold to test shop
-  INCOME_PER_TURN: 5, // NERFED from 50
-  BASE_INCOME: 50,
-  BANK_INCOME: 100, 
+  INITIAL_GOLD: 150,
+  INCOME_PER_TURN: 10,
   HEIST_REWARD_GOLD: 200,
   HEIST_REWARD_CP: 10,
 };
@@ -162,7 +162,7 @@ export const UNIT_STATS = {
     name: 'Breacher' 
   },
   SNIPER: { 
-    moveCost: 3, 
+    moveCost: 2, 
     attackCost: 8, 
     hp: 10, 
     damage: 20, 
@@ -171,6 +171,44 @@ export const UNIT_STATS = {
     maxAmmo: 3,
     vision: 5,
     name: 'Sniper' 
+  },
+};
+
+export const VETERANCY_CONFIG = {
+  XP_THRESHOLDS: [0, 2, 5, 9] as const,
+  RANK_NAMES: ['Recruit', 'Veteran', 'Elite', 'Ace'] as const,
+  RANK_LABELS: ['', '★ VETERAN', '★★ ELITE', '★★★ ACE'] as const,
+  RANK_HP_MULT: 0.2,
+  AMMO_BONUS_RANK1: {
+    SOLDIER: 2,
+    ASSAULTER: 2,
+    SNIPER: 1,
+  },
+  ACE_BOUNTY_GOLD: 75,
+  ELITE_BREACHER_COVER_DR: 2,
+  ELITE_SNIPER_DMG_BONUS: 2,
+  ACE_SCOUT_DMG_BONUS: 2,
+  ACE_BREACHER_DMG_BONUS: 2,
+};
+
+export const OVERWATCH_STATS: Record<'SOLDIER' | 'ASSAULTER' | 'SNIPER', { cost: number; damage: number; refund: number }> = {
+  SOLDIER: { cost: 3, damage: 4, refund: 1 },
+  ASSAULTER: { cost: 4, damage: 7, refund: 2 },
+  SNIPER: { cost: 6, damage: 14, refund: 3 },
+};
+
+export const MUTATOR_CONFIG = {
+  BLITZ_CP: {
+    MAX_CP: 30,
+    REGEN_AMOUNT: 15,
+    P1_ROUND1_CP: 22,
+  },
+  SCARCITY: {
+    AMMO_MULT: 0.5,
+    BANK_REWARD_MULT: 1.5,
+  },
+  IRONMAN: {
+    MAX_RESPAWNS: 0,
   },
 };
 

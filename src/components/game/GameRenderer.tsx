@@ -7,7 +7,7 @@ import { GameViewport } from './renderer/GameViewport';
 import * as PIXI from 'pixi.js';
 import { useGameStore } from '../../store/useGameStore';
 import { Tile } from '../../core/types';
-import { TILE_SIZE, UI_COLORS, UNIT_STATS, PLAYER_COLORS } from '../../core/constants/Config';
+import { TILE_SIZE, UI_COLORS, UNIT_STATS, PLAYER_COLORS, BANK_STATS, BASE_STATS } from '../../core/constants/Config';
 import { preloadTextures, getTexture } from '../../core/graphics/TextureManager';
 import { useAssetLoader } from '../../hooks/useAssetLoader';
 import { useViewportContext } from '../../context/ViewportContext';
@@ -16,6 +16,9 @@ import { DamageText } from './renderer/DamageText';
 import { ProjectileRenderer } from './renderer/ProjectileRenderer';
 import { WeatherSystem } from './renderer/WeatherSystem.tsx'; // Explicit .tsx extension
 import { useEffectStore } from '../../store/useEffectStore';
+import { canConstructOnTile } from '../../core/rules/CombatRules';
+import { getOverwatchCoverageTiles, resolveMoveWithOverwatch } from '../../core/rules/OverwatchRules';
+import { getMovePath } from '../../core/grid/Pathfinding';
 import { AdvancedBloomFilter } from 'pixi-filters';
 import { useMemo } from 'react';
 
@@ -23,11 +26,11 @@ import { useMemo } from 'react';
 
 // 1. Grid & Highlights Layer
 const OverlayLayer = ({ 
-    width, height, 
+    mapData, units, currentPlayer, settings, weather, visibleTiles,
     validMoveTiles, validAttackTargets, validSpawnTiles, 
     selectedTileId, hoveredTileId, placementMode,
     validSecureTile, validHeistTile, validSiegeTile, validDemolishTile, validLootTile,
-    gridSize 
+    hoverPath, hoverMoveResolution, gridSize 
 }: any) => {
     const draw = useCallback((g: PIXI.Graphics) => {
         g.clear();
@@ -47,6 +50,10 @@ const OverlayLayer = ({
             else if (colorStr === '#F44336') color = 0xF44336;
             else if (colorStr === '#D32F2F') color = 0xD32F2F;
             else if (colorStr === '#4CAF50') color = 0x4CAF50;
+            else if (colorStr === '#00BCD4') color = 0x00BCD4;
+            else if (colorStr === '#FF9800') color = 0xFF9800;
+            else if (colorStr === '#FFB300') color = 0xFFB300;
+            else if (colorStr === '#FF5722') color = 0xFF5722;
             else if (colorStr.includes('255, 165, 0')) color = 0xFFA500; // Action
 
             g.beginFill(color, alpha);
@@ -60,16 +67,107 @@ const OverlayLayer = ({
             }
         };
 
+        if (placementMode && placementMode.active && Array.isArray(mapData)) {
+            mapData.forEach((tile: Tile) => {
+                if (canConstructOnTile(placementMode.itemKey, tile, units || [])) {
+                    drawHighlight(tile.id, '#00BCD4', 0.25, true);
+                }
+            });
+        }
+
         validMoveTiles.forEach((id: string) => drawHighlight(id, UI_COLORS.MOVE_HIGHLIGHT));
         validSpawnTiles.forEach((id: string) => drawHighlight(id, UI_COLORS.SPAWN_HIGHLIGHT));
-        validAttackTargets.forEach((id: string) => drawHighlight(id, '#FF0000', 0.4, true)); // FIXED: Show Attack Targets
+        validAttackTargets.forEach((unitId: string) => {
+            const targetUnit = Array.isArray(units) ? units.find((u: any) => u.id === unitId) : null;
+            if (targetUnit) drawHighlight(targetUnit.tileId, '#FF0000', 0.4, true);
+        });
         
         // Action Highlights
         if (validSecureTile) drawHighlight(validSecureTile, UI_COLORS.ACTION_HIGHLIGHT, 0.2, true);
         if (validHeistTile) drawHighlight(validHeistTile, '#F44336', 0.2, true);
-        if (validSiegeTile) drawHighlight(validSiegeTile, '#D32F2F', 0.2, true);
-        if (validDemolishTile) drawHighlight(validDemolishTile, '#D32F2F', 0.2, true);
+        if (validSiegeTile) drawHighlight(validSiegeTile, '#D32F2F', 0.35, true);
+        if (validDemolishTile) drawHighlight(validDemolishTile, '#D32F2F', 0.35, true);
         if (validLootTile) drawHighlight(validLootTile, '#4CAF50', 0.2, true);
+
+        // Automated Turret / Base Artillery Danger Range Ring on Hover
+        if (hoveredTileId && Array.isArray(mapData)) {
+            const hTile = mapData.find((t: Tile) => t.id === hoveredTileId);
+            if (hTile) {
+                let dangerRange = 0;
+                if (hTile.type === 'BANK' && (hTile.hackProgress || 0) < 100) {
+                    dangerRange = BANK_STATS.RANGE;
+                } else if (
+                    hTile.type === 'BASE' &&
+                    settings?.victoryMode === 'CONQUER' &&
+                    hTile.owner !== currentPlayer &&
+                    (hTile.hp || 0) > 0
+                ) {
+                    dangerRange = BASE_STATS.RANGE;
+                }
+
+                if (dangerRange > 0) {
+                    mapData.forEach((t: Tile) => {
+                        const d = Math.abs(t.x - hTile.x) + Math.abs(t.y - hTile.y);
+                        if (d > 0 && d <= dangerRange) {
+                            drawHighlight(t.id, '#FF9800', 0.14, true);
+                        }
+                    });
+                }
+            }
+        }
+
+        // Visible Overwatcher Coverage Ring on Hover or Selection
+        const inspectTileId = hoveredTileId || selectedTileId;
+        if (inspectTileId && Array.isArray(units) && Array.isArray(mapData) && weather) {
+            const inspectedOverwatcher = units.find((u: any) =>
+                u.tileId === inspectTileId &&
+                u.isOverwatching &&
+                u.ammo > 0 &&
+                (!settings?.fogOfWar || u.owner === currentPlayer || visibleTiles?.has(u.tileId))
+            );
+            if (inspectedOverwatcher) {
+                const covered = getOverwatchCoverageTiles(inspectedOverwatcher, mapData, weather, gridSize || 20);
+                covered.forEach((tid: string) => drawHighlight(tid, '#FFB300', 0.14, true));
+            }
+        }
+
+        // Hover Movement Path Preview (warns on visible enemy Overwatch interception)
+        if (Array.isArray(hoverPath) && hoverPath.length > 1) {
+            const trig = hoverMoveResolution?.trigger;
+            const safeEndIdx = trig ? Math.min(hoverPath.length - 1, trig.interceptIndex) : hoverPath.length - 1;
+
+            g.lineStyle(4, 0x00E5FF, 0.9);
+            hoverPath.slice(0, safeEndIdx + 1).forEach((pt: Tile, idx: number) => {
+                const cx = pt.x * TILE_SIZE + TILE_SIZE / 2;
+                const cy = pt.y * TILE_SIZE + TILE_SIZE / 2;
+                if (idx === 0) g.moveTo(cx, cy);
+                else g.lineTo(cx, cy);
+            });
+            g.lineStyle(0);
+
+            if (trig && safeEndIdx < hoverPath.length - 1) {
+                g.lineStyle(4, 0xFF5722, 0.9);
+                hoverPath.slice(safeEndIdx).forEach((pt: Tile, idx: number) => {
+                    const cx = pt.x * TILE_SIZE + TILE_SIZE / 2;
+                    const cy = pt.y * TILE_SIZE + TILE_SIZE / 2;
+                    if (idx === 0) g.moveTo(cx, cy);
+                    else g.lineTo(cx, cy);
+                });
+                g.lineStyle(0);
+            }
+
+            hoverPath.slice(1).forEach((pt: Tile, idx: number) => {
+                const stepIndex = idx + 1;
+                const cx = pt.x * TILE_SIZE + TILE_SIZE / 2;
+                const cy = pt.y * TILE_SIZE + TILE_SIZE / 2;
+                const isIntercept = trig && stepIndex === trig.interceptIndex;
+                const isDest = stepIndex === hoverPath.length - 1;
+                const dotColor = isIntercept ? 0xFF5722 : isDest ? 0x00E5FF : 0xFFFFFF;
+                g.beginFill(dotColor, isIntercept || isDest ? 0.95 : 0.75);
+                g.drawCircle(cx, cy, isIntercept || isDest ? 7 : 4);
+                g.endFill();
+            });
+        }
 
         // Selection
         if (selectedTileId) {
@@ -82,11 +180,7 @@ const OverlayLayer = ({
         // Hover
         if (hoveredTileId) {
             const [x, y] = hoveredTileId.split(',').map(Number);
-            let color = 0xFFFFFF;
-            
-            if (placementMode && placementMode.active) {
-                color = 0xFFFFFF;
-            }
+            const color = 0xFFFFFF;
 
             g.beginFill(color, 0.15);
             g.drawRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
@@ -107,7 +201,7 @@ const OverlayLayer = ({
         }
         g.lineStyle(0);
 
-    }, [validMoveTiles, validSpawnTiles, selectedTileId, hoveredTileId, placementMode, validSecureTile, validHeistTile, validSiegeTile, gridSize]);
+    }, [mapData, units, currentPlayer, settings, weather, visibleTiles, validMoveTiles, validAttackTargets, validSpawnTiles, selectedTileId, hoveredTileId, placementMode, validSecureTile, validHeistTile, validSiegeTile, validDemolishTile, validLootTile, hoverPath, hoverMoveResolution, gridSize]);
 
     return <Graphics draw={draw} eventMode="none" />;
 };
@@ -196,11 +290,15 @@ export const GameRenderer = () => {
     
     // Highlights
     const validMoveTiles = useGameStore(state => state.validMoveTiles);
+    const validMoveCosts = useGameStore(state => state.validMoveCosts);
     const validAttackTargets = useGameStore(state => state.validAttackTargets);
     const validSpawnTiles = useGameStore(state => state.validSpawnTiles);
     const selectedTileId = useGameStore(state => state.selectedTileId);
     const hoveredTileId = useGameStore(state => state.hoveredTileId);
     const placementMode = useGameStore(state => state.placementMode);
+    const playerCp = useGameStore(state => state.playerCp);
+    const selectNextReadyUnit = useGameStore(state => state.selectNextReadyUnit);
+    const enterOverwatch = useGameStore(state => state.enterOverwatch);
     
     // Actions
     const validSecureTile = useGameStore(state => state.validSecureTile);
@@ -208,11 +306,9 @@ export const GameRenderer = () => {
     const validSiegeTile = useGameStore(state => state.validSiegeTile);
     const validDemolishTile = useGameStore(state => state.validDemolishTile);
 
-    // Phase 3: Visual Effects
+    // Visual Effects
     const damagePopups = useEffectStore(state => state.damagePopups);
     const projectiles = useEffectStore(state => state.projectiles);
-    const addDamagePopup = useEffectStore(state => state.addDamagePopup);
-    const triggerScreenShake = useEffectStore(state => state.triggerScreenShake);
 
     // Phase 4: Atmosphere
     const bloomFilter = useMemo(() => new AdvancedBloomFilter({
@@ -233,6 +329,58 @@ export const GameRenderer = () => {
     
     const weather = useGameStore(state => state.weather);
     const { isLoaded, progress } = useAssetLoader();
+
+    const hoverMoveResolution = useMemo(() => {
+        if (!selectedUnit || selectedUnit.owner !== currentPlayer || selectedUnit.hasMoved) return null;
+        if (!hoveredTileId || !validMoveCosts.has(hoveredTileId)) return null;
+        return resolveMoveWithOverwatch({
+            movingUnit: selectedUnit,
+            targetTileId: hoveredTileId,
+            mapData,
+            units,
+            weather,
+            gridSize,
+            fogOfWar: settings.fogOfWar,
+            maxBudget: playerCp[currentPlayer] ?? 0,
+            knownVisibleTiles: settings.fogOfWar ? visibleTiles : null
+        });
+    }, [selectedUnit, currentPlayer, hoveredTileId, validMoveCosts, mapData, units, weather, gridSize, settings.fogOfWar, playerCp, visibleTiles]);
+
+    const hoverPath = useMemo(() => {
+        if (hoverMoveResolution) return hoverMoveResolution.path;
+        if (!selectedUnit || selectedUnit.owner !== currentPlayer || selectedUnit.hasMoved) return [];
+        if (!hoveredTileId || !validMoveCosts.has(hoveredTileId)) return [];
+        const startTile = mapData.find(t => t.id === selectedUnit.tileId);
+        if (!startTile) return [];
+        return getMovePath(
+            startTile,
+            hoveredTileId,
+            playerCp[currentPlayer] ?? 0,
+            mapData,
+            units,
+            selectedUnit.type,
+            currentPlayer,
+            weather,
+            gridSize,
+            selectedUnit.rank ?? 0
+        );
+    }, [hoverMoveResolution, selectedUnit, currentPlayer, hoveredTileId, validMoveCosts, mapData, playerCp, units, weather, gridSize]);
+
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            const targetTag = (e.target as HTMLElement | null)?.tagName;
+            if (targetTag === 'INPUT' || targetTag === 'TEXTAREA') return;
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                selectNextReadyUnit();
+            } else if ((e.key === 'o' || e.key === 'O') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+                e.preventDefault();
+                enterOverwatch();
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [selectNextReadyUnit, enterOverwatch]);
 
     // Initial Load (Legacy + New)
     useEffect(() => {
@@ -298,15 +446,8 @@ export const GameRenderer = () => {
     if (!loaded && !isLoaded) return <div style={{color:'white'}}>Initializing Neural Interface... {Math.round(progress*100)}%</div>;
 
     const onTileClick = (x: number, y: number) => {
-        // Phase 3 Test: Click unit to show damage
-        const clickedUnit = units.find(u => u.tileId === `${x},${y}`);
-        if (clickedUnit) {
-            addDamagePopup((x * TILE_SIZE) + (TILE_SIZE / 2), (y * TILE_SIZE), "-10", "#ff0000");
-            triggerScreenShake(15);
-        }
-
         handleTileClick(x, y);
-    }
+    };
 
     return (
         <div ref={parentRef} style={{ width: '100%', height: '100%', background: '#050505', overflow: 'hidden' }}>
@@ -358,11 +499,12 @@ export const GameRenderer = () => {
 
                     {/* 3. GRID & HIGHLIGHTS */}
                     <OverlayLayer 
-                        width={gridSize * TILE_SIZE} 
-                        height={gridSize * TILE_SIZE} // Not using parent height/width but world size? 
-                        // OverlayLayer uses these for drawing grid lines. 
-                        // It should use world size, not screen size.
-                        // I'll update it to check logic.
+                        mapData={mapData}
+                        units={units}
+                        currentPlayer={currentPlayer}
+                        settings={settings}
+                        weather={weather}
+                        visibleTiles={visibleTiles}
                         validMoveTiles={validMoveTiles}
                         validAttackTargets={validAttackTargets}
                         validSpawnTiles={validSpawnTiles}
@@ -374,6 +516,8 @@ export const GameRenderer = () => {
                         validSiegeTile={validSiegeTile}
                         validDemolishTile={validDemolishTile}
                         validLootTile={validLootTile}
+                        hoverPath={hoverPath}
+                        hoverMoveResolution={hoverMoveResolution}
                         gridSize={gridSize}
                     />
 
