@@ -13,7 +13,7 @@
   --op-well: #DDE3EC;
   --op-card-top: #FFFFFF;
   --op-card-bot: #F0F3F8;
-  --op-backplate: #C1CAD8;
+  --op-backplate: #B5C0D2;
 
   --acc-blue: #1D5EFF;
   --acc-blue-soft: #DCE6FF;
@@ -42,6 +42,11 @@
   background-size: 16px 16px;
   color: var(--op-ink);
   font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.opgeo-stage input,
+.opgeo-stage textarea {
+  user-select: text;
 }
 
 /* Custom Anodized Scrollbars */
@@ -61,11 +66,10 @@
   background: #8794AA;
 }
 
-/* Outer Chamfered Hardware Card */
+/* Outer Chamfered Hardware Card (zero expensive CSS filter blur; depth via machined backplate) */
 .geo-drop {
   position: relative;
   min-width: 0;
-  filter: drop-shadow(0 5px 10px rgba(20, 24, 33, 0.13));
 }
 .geo-drop.geo-fill {
   display: flex;
@@ -135,40 +139,40 @@
   clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
 }
 
-/* Chamfered Keycap Button */
+/* Chamfered Keycap Button (3D bevel skirt baked in rim — zero CSS filter compositing lag) */
 .geo-btn-wrap {
   display: inline-flex;
   border: 0;
   padding: 0;
   margin: 0;
   background: transparent;
-  filter: drop-shadow(0 3px 0 #AEB7C7);
-  transition: transform 0.08s ease, filter 0.08s ease, opacity 0.15s ease;
+  transition: transform 0.08s ease, opacity 0.15s ease;
   cursor: pointer;
   font-family: inherit;
+  user-select: none;
 }
 .geo-btn-wrap.full {
   width: 100%;
 }
 .geo-btn-wrap:hover:not(:disabled) {
   transform: translateY(-1px);
-  filter: drop-shadow(0 4px 0 #8F9CB2);
 }
 .geo-btn-wrap:active:not(:disabled) {
   transform: translateY(2px);
-  filter: drop-shadow(0 1px 0 #8F9CB2);
 }
 .geo-btn-wrap:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-  filter: drop-shadow(0 2px 0 #BFC7D4);
 }
 .geo-btn-rim {
   width: 100%;
   display: inline-flex;
-  padding: 1.5px;
-  background: linear-gradient(180deg, #D5DCE7 0%, #98A3B6 100%);
+  padding: 1.5px 1.5px 3.5px 1.5px;
+  background: linear-gradient(180deg, #D5DCE7 0%, #8C98AD 100%);
   clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+}
+.geo-btn-wrap:active:not(:disabled) > .geo-btn-rim {
+  padding-bottom: 1.5px;
 }
 .geo-btn-core {
   width: 100%;

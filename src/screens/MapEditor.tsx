@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { Stage, Container, Graphics, Text } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 import { SafeSprite } from '../components/game/SafeSprite';
@@ -14,9 +14,13 @@ import {
   BASE_STATS,
   BANK_STATS,
 } from '../core/constants/Config';
-import { preloadTextures, getTexture } from '../core/graphics/TextureManager';
+import { preloadTextures } from '../core/graphics/TextureManager';
+import { bakeTacticalReconBoard, computeTerrainSignature } from '../core/graphics/TacticalReconRenderer';
 import { MapStorage } from '../core/storage/MapStorageManager';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from '../components/ui/GeoPrimitives';
+
+const EDITOR_ZONE_STYLE = new PIXI.TextStyle({ fill: '#FFFFFF', stroke: '#0F172A', strokeThickness: 3, fontSize: 13, fontWeight: 'bold' });
+const EDITOR_BANK_STYLE = new PIXI.TextStyle({ fill: '#FDE047', stroke: '#0F172A', strokeThickness: 3, fontSize: 11, fontWeight: 'bold' });
 
 const createBlankMap = (size: number): Tile[] =>
   Array(size * size)
@@ -272,6 +276,50 @@ export const MapEditor: React.FC = () => {
   useEffect(() => {
     preloadTextures().then(() => setImagesLoaded(true));
   }, []);
+
+  const editorTerrainSig = useMemo(() => computeTerrainSignature(mapData, mapSize), [mapData, mapSize]);
+  const bakedEditorBoard = useMemo(() => bakeTacticalReconBoard(mapData, mapSize), [editorTerrainSig]);
+
+  useEffect(() => {
+    return () => {
+      bakedEditorBoard.terrainTexture.destroy(true);
+      bakedEditorBoard.waterMaskTexture.destroy(true);
+    };
+  }, [bakedEditorBoard]);
+
+  const drawEditorFrame = useCallback((g: PIXI.Graphics) => {
+    const totalPx = mapSize * TILE_SIZE;
+    g.clear();
+    g.beginFill(0x273041, 0.25);
+    g.drawRect(10, 12, totalPx, totalPx);
+    g.endFill();
+    g.beginFill(0x1b2230);
+    g.drawRect(0, 0, totalPx, totalPx);
+    g.endFill();
+    g.lineStyle(3, 0x273041, 1);
+    g.drawRect(-1.5, -1.5, totalPx + 3, totalPx + 3);
+  }, [mapSize]);
+
+  const drawZonesAndGrid = useCallback((g: PIXI.Graphics) => {
+    g.clear();
+    mapData.forEach(tile => {
+      if (tile.zone === undefined) return;
+      const colorStr = PLAYER_COLORS[tile.zone % 6] || '#ffffff';
+      const color = parseInt(colorStr.replace('#', '0x'), 16);
+      g.beginFill(color, 0.25);
+      g.drawRect(tile.x * TILE_SIZE, tile.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+      g.endFill();
+    });
+    g.lineStyle(1, 0xffffff, 0.08);
+    const totalPx = mapSize * TILE_SIZE;
+    for (let i = 0; i <= mapSize; i++) {
+      g.moveTo(i * TILE_SIZE, 0);
+      g.lineTo(i * TILE_SIZE, totalPx);
+      g.moveTo(0, i * TILE_SIZE);
+      g.lineTo(totalPx, i * TILE_SIZE);
+    }
+    g.lineStyle(0);
+  }, [mapData, mapSize]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -603,90 +651,48 @@ export const MapEditor: React.FC = () => {
                 onMouseLeave={() => setIsDrawing(false)}
               >
                 <div style={{ position: 'absolute', inset: 0 }}>
-                  <Stage width={layout.width} height={layout.height} options={{ backgroundAlpha: 0, antialias: true }}>
+                  <Stage
+                    width={layout.width}
+                    height={layout.height}
+                    options={{ backgroundAlpha: 0, antialias: false, autoDensity: true, resolution: Math.min(window.devicePixelRatio || 1, 1.5) }}
+                  >
                   <Container x={layout.offsetX} y={layout.offsetY} scale={layout.scale}>
-                    <Graphics
-                      draw={g => {
-                        g.clear();
-                        g.beginFill(0x273041, 0.25);
-                        g.drawRect(10, 12, mapSize * TILE_SIZE, mapSize * TILE_SIZE);
-                        g.endFill();
-                        g.beginFill(0x1b2230);
-                        g.drawRect(0, 0, mapSize * TILE_SIZE, mapSize * TILE_SIZE);
-                        g.endFill();
-                        g.lineStyle(3, 0x273041, 1);
-                        g.drawRect(-1.5, -1.5, mapSize * TILE_SIZE + 3, mapSize * TILE_SIZE + 3);
-                      }}
+                    <Graphics draw={drawEditorFrame} />
+
+                    <SafeSprite
+                      texture={bakedEditorBoard.terrainTexture}
+                      x={0}
+                      y={0}
+                      width={mapSize * TILE_SIZE}
+                      height={mapSize * TILE_SIZE}
                     />
 
-                    {mapData.map(tile => {
-                      const texKey = `TERRAIN_${tile.type}`;
-                      return (
-                        <Container key={tile.id} x={tile.x * TILE_SIZE} y={tile.y * TILE_SIZE}>
-                          <SafeSprite texture={getTexture(texKey)} width={TILE_SIZE} height={TILE_SIZE} tint={0xffffff} />
+                    <Graphics eventMode="none" draw={drawZonesAndGrid} />
 
-                          {tile.height !== 1 && (
-                            <Graphics
-                              eventMode="none"
-                              draw={g => {
-                                g.clear();
-                                if (tile.height === 0) {
-                                  g.beginFill(0x000000, 0.4);
-                                  g.drawRect(0, 0, TILE_SIZE, TILE_SIZE);
-                                  g.endFill();
-                                } else if (tile.height === 2) {
-                                  g.beginFill(0xffffff, 0.1);
-                                  g.drawRect(0, 0, TILE_SIZE, TILE_SIZE);
-                                  g.endFill();
-                                  g.lineStyle(2, 0xffffff, 0.5);
-                                  g.drawRect(1, 1, TILE_SIZE - 2, TILE_SIZE - 2);
-                                }
-                              }}
-                            />
-                          )}
+                    {mode === 'ZONE' && mapData.map(tile =>
+                      tile.zone !== undefined ? (
+                        <Text
+                          key={`z_${tile.id}`}
+                          text={`Z${tile.zone + 1}`}
+                          x={tile.x * TILE_SIZE + 5}
+                          y={tile.y * TILE_SIZE + 6}
+                          style={EDITOR_ZONE_STYLE}
+                        />
+                      ) : null
+                    )}
 
-                          {tile.zone !== undefined && (
-                            <>
-                              <Graphics
-                                eventMode="none"
-                                draw={g => {
-                                  const colorStr = PLAYER_COLORS[tile.zone! % 6] || '#ffffff';
-                                  const color = parseInt(colorStr.replace('#', '0x'), 16);
-                                  g.beginFill(color, 0.25);
-                                  g.drawRect(0, 0, TILE_SIZE, TILE_SIZE);
-                                  g.endFill();
-                                }}
-                              />
-                              {mode === 'ZONE' && (
-                                <Text
-                                  text={`Z${tile.zone + 1}`}
-                                  x={4}
-                                  y={14}
-                                  style={new PIXI.TextStyle({ fill: 'rgba(255,255,255,0.7)', fontSize: 12, fontWeight: 'bold' })}
-                                />
-                              )}
-                            </>
-                          )}
-
-                          {tile.type === 'BANK' && (
-                            <Text
-                              text={`$${tile.bankGoldReward || 200}`}
-                              x={34}
-                              y={58}
-                              anchor={0.5}
-                              style={new PIXI.TextStyle({ fill: 'black', fontSize: 8, fontWeight: 'bold' })}
-                            />
-                          )}
-
-                          <Graphics
-                            draw={g => {
-                              g.lineStyle(1, 0xffffff, 0.05);
-                              g.drawRect(0, 0, TILE_SIZE, TILE_SIZE);
-                            }}
-                          />
-                        </Container>
-                      );
-                    })}
+                    {mapData.map(tile =>
+                      tile.type === 'BANK' ? (
+                        <Text
+                          key={`b_${tile.id}`}
+                          text={`$${tile.bankGoldReward || 200}`}
+                          x={tile.x * TILE_SIZE + 32}
+                          y={tile.y * TILE_SIZE + 54}
+                          anchor={0.5}
+                          style={EDITOR_BANK_STYLE}
+                        />
+                      ) : null
+                    )}
                   </Container>
                 </Stage>
                 </div>

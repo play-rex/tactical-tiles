@@ -39,7 +39,7 @@ const TopBattleGuidanceBar: React.FC = () => {
   const selectedUnitTile = selectedUnit ? mapData.find(t => t.id === selectedUnit.tileId) : undefined;
   const pTheme = PLAYER_UI_THEME[currentPlayer] || PLAYER_UI_THEME[0];
 
-  let guidance = 'Select a friendly unit to command (or press TAB).';
+  let guidance = 'Select a unit to command, or press TAB.';
   if (winner !== null) {
     guidance = `Match complete — P${winner + 1} victorious.`;
   } else if (isAiTurn) {

@@ -368,6 +368,9 @@ export const GameSetup: React.FC = () => {
                         onEdit={e => handleEditMap(e, map)}
                       />
                     ))}
+                    <GeoWell coreStyle={{ padding: '10px 12px', fontSize: '12px', color: 'var(--op-ink-muted)', lineHeight: 1.4 }}>
+                      <strong>Tactical Recon: Iron Confluence</strong> showcases every procedural HD biome, auto-tiled river, canyon gorge, mountain ridge, forest grove, bunker &amp; road network.
+                    </GeoWell>
                   </div>
                 )}
 

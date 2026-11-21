@@ -120,11 +120,10 @@ class ZoneWeatherEngine {
     }
 
     public update(delta: number) {
+        if (!this.viewportRef || (this.graphics as any).destroyed) return;
         this.graphics.clear();
         
-        if (!this.viewportRef) return;
-        
-        const dt = delta || 1;
+        const dt = Math.min(3, delta || 1);
         
         const vp = this.viewportRef;
         const centerX = vp.center.x;
@@ -138,18 +137,18 @@ class ZoneWeatherEngine {
         const visTop = centerY - viewH;
         const visBottom = centerY + viewH;
         
-        // Spawn particles for each zone based on its weather
-        this.zoneBounds.forEach((bounds, zoneId) => {
-            const weather = this.zoneWeather[zoneId] || 'CLEAR';
-            
-            // Only spawn if zone is at least partially visible
-            if (bounds.maxX < visLeft || bounds.minX > visRight ||
-                bounds.maxY < visTop || bounds.minY > visBottom) {
-                return;
-            }
-            
-            this.spawnZoneParticles(dt, zoneId, bounds, weather);
-        });
+        // Spawn particles for each zone based on its weather (capped at 70 total to avoid GPU fill lag)
+        if (this.particles.length < 70) {
+            this.zoneBounds.forEach((bounds, zoneId) => {
+                if (this.particles.length >= 70) return;
+                const weather = this.zoneWeather[zoneId] || 'CLEAR';
+                if (bounds.maxX < visLeft || bounds.minX > visRight ||
+                    bounds.maxY < visTop || bounds.minY > visBottom) {
+                    return;
+                }
+                this.spawnZoneParticles(dt, zoneId, bounds, weather);
+            });
+        }
         
         // Update and draw particles
         for (let i = this.particles.length - 1; i >= 0; i--) {
@@ -210,9 +209,9 @@ class ZoneWeatherEngine {
         
         switch (weather) {
             case 'MONSOON':
-                // Heavy rain - spawns at random positions INSIDE zone tiles
-                if (Math.random() < 1.0 * areaFactor) {
-                    for (let i = 0; i < 8; i++) {
+                // Heavy rain - spawns cleanly inside zone tiles without overflowing particle budget
+                if (Math.random() < 0.7 * areaFactor) {
+                    for (let i = 0; i < 2; i++) {
                         const pos = getPos();
                         if (!pos) continue;
                         this.particles.push({
@@ -221,8 +220,8 @@ class ZoneWeatherEngine {
                             y: pos.y,
                             vx: 0.5,
                             vy: 5 + Math.random() * 2,
-                            life: 0.3,
-                            maxLife: 0.3,
+                            life: 0.35,
+                            maxLife: 0.35,
                             size: 10 + Math.random() * 6,
                             color: 0x7dd3fc,
                             alpha: 0.5 + Math.random() * 0.3,
@@ -230,8 +229,7 @@ class ZoneWeatherEngine {
                         });
                     }
                 }
-                // Mist/splash inside zone
-                if (Math.random() < 0.06 * areaFactor) {
+                if (Math.random() < 0.03 * areaFactor) {
                     const pos = getPos();
                     if (pos) {
                         this.particles.push({
@@ -529,13 +527,19 @@ export const WeatherSystem: React.FC<WeatherSystemProps> = ({ width, height, vie
         }
     }, [mapData, weather]);
 
-    // Attach to ticker
+    // Attach to ticker (~30fps updates keep GPU graphics clear/draw light)
     useEffect(() => {
         if (!app || !engineRef.current) return;
         
         const engine = engineRef.current;
-        const update = (ticker: any) => {
-            engine.update(ticker.deltaTime);
+        let accum = 0;
+        const update = (deltaTime: number) => {
+            const dt = typeof deltaTime === 'number' ? deltaTime : 1;
+            accum += dt;
+            if (accum < 2) return;
+            const step = accum;
+            accum = 0;
+            engine.update(step);
         };
         
         app.ticker.add(update);
@@ -551,3 +555,5 @@ export const WeatherSystem: React.FC<WeatherSystemProps> = ({ width, height, vie
         <Container ref={containerRef} name="weather-zones" zIndex={9999} />
     );
 };
+
+export const WeatherSystemMemo = React.memo(WeatherSystem);

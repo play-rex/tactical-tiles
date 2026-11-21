@@ -190,6 +190,19 @@ test('AI Targeting & Brain: AI Snipers cannot shoot off Plains and use effective
 });
 
 test('Preset Maps: Bridges and Bases remain intact and navigable', () => {
+    const recon = PRESET_MAPS.find(m => m.id === 'campaign_recon');
+    assert.ok(recon);
+    const reconBridges = recon.data.filter(t => t.type === 'BRIDGE' || t.type === 'BRIDGE_V');
+    assert.ok(reconBridges.length >= 6);
+    const reconBases = recon.data.filter(t => t.type === 'BASE');
+    assert.equal(reconBases.length, 4);
+    const reconBank = recon.data.find(t => t.type === 'BANK');
+    assert.ok(reconBank);
+    for (const base of reconBases) {
+        const pathToBank = getMovePath(base, reconBank.id, 999, recon.data, [], 'SOLDIER', base.owner ?? 0, clearWeather, recon.width);
+        assert.ok(pathToBank.length > 0, `Base ${base.id} should reach Bank ${reconBank.id}`);
+    }
+
     const canyon = PRESET_MAPS.find(m => m.id === 'campaign_canyon');
     assert.ok(canyon);
     const canyonBridges = canyon.data.filter(t => t.type === 'BRIDGE' || t.type === 'BRIDGE_V');
