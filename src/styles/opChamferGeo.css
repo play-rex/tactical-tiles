@@ -81,6 +81,21 @@
   display: flex;
   flex-direction: column;
 }
+.geo-drop.geo-hug {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 0;
+}
+.geo-drop.geo-hug > .geo-rim,
+.geo-drop.geo-hug > .geo-rim > .geo-body {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+}
 .geo-backplate {
   position: absolute;
   inset: 4px -3px -4px 4px;
@@ -173,18 +188,22 @@
   clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
 }
 
-/* Chamfered Dark OLED Bezel Around 2D Pixi Canvas */
+/* Chamfered Machined Steel Bezel Around 2D Pixi Canvas */
 .geo-frame-rim {
   min-width: 0;
   min-height: 0;
   padding: 3px;
-  background: #273041;
+  background: linear-gradient(135deg, #68758D 0%, #4A5468 100%);
   clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
 }
 .geo-frame-core {
   min-width: 0;
   min-height: 0;
-  background: #0B0E14;
+  background-color: #CFD7E4;
+  background-image:
+    linear-gradient(to right, rgba(20, 24, 33, 0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(20, 24, 33, 0.055) 1px, transparent 1px);
+  background-size: 20px 20px;
   clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
 }
 

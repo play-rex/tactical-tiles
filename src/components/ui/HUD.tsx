@@ -1,14 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useGameStore } from '../../store/useGameStore';
 import {
-  PLAYER_COLORS,
   UNIT_STATS,
   TERRAIN_DEFENSE,
   CP_SYSTEM,
   UNIT_COSTS,
   SHOP_ITEMS,
   BUILDING_STATS,
-  GOLD_SETTINGS,
   BARRIER_STATS,
   BANK_STATS,
   BASE_STATS,
@@ -232,7 +230,7 @@ const BuildingInfoPanel: React.FC<{ tile: Tile }> = ({ tile }) => {
   );
 };
 
-const WeatherIcon: React.FC<{ type: WeatherType }> = ({ type }) => {
+const WeatherIcon: React.FC<{ type: WeatherType; zoneNum?: number }> = ({ type, zoneNum }) => {
   let icon = '☀️';
   switch (type) {
     case 'SCORCHED': icon = '🔥'; break;
@@ -241,7 +239,14 @@ const WeatherIcon: React.FC<{ type: WeatherType }> = ({ type }) => {
     case 'TAILWIND': icon = '🍃'; break;
     case 'SANDSTORM': icon = '🌪️'; break;
   }
-  return <span style={{ fontSize: '13px', marginLeft: '4px' }}>{icon}</span>;
+  return (
+    <span
+      title={zoneNum !== undefined ? `Zone ${zoneNum} Weather: ${type || 'CLEAR'}` : `Weather: ${type || 'CLEAR'}`}
+      style={{ fontSize: '13px', marginLeft: '4px' }}
+    >
+      {icon}
+    </span>
+  );
 };
 
 const CpSegMeter: React.FC<{ cp: number; maxCp: number }> = ({ cp, maxCp }) => {
@@ -275,18 +280,23 @@ export const LeftPanel: React.FC = () => {
   const playerRespawns = useGameStore(state => state.playerRespawns);
   const playerStatus = useGameStore(state => state.playerStatus);
   const playerInventory = useGameStore(state => state.playerInventory);
-  const graveyard = useGameStore(state => state.graveyard);
   const handleGraveyardSelect = useGameStore(state => state.handleGraveyardSelect);
   const selectedGraveyardUnitId = useGameStore(state => state.selectedGraveyardUnitId);
   const selectInventoryItem = useGameStore(state => state.selectInventoryItem);
   const selectedInventoryItemIndex = useGameStore(state => state.selectedInventoryItemIndex);
+  const graveyard = useGameStore(state => state.graveyard);
   const weather = useGameStore(state => state.weather);
   const settings = useGameStore(state => state.settings);
   const mapData = useGameStore(state => state.mapData);
   const units = useGameStore(state => state.units);
+  const isAiTurn = useGameStore(state => state.isAiTurn);
+  const buyShopItem = useGameStore(state => state.buyShopItem);
+  const placementMode = useGameStore(state => state.placementMode);
+  const cancelPlacement = useGameStore(state => state.cancelPlacement);
 
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const maxCp = settings.mutators?.blitzCp ? MUTATOR_CONFIG.BLITZ_CP.MAX_CP : CP_SYSTEM.MAX_CP;
+  const isMyTurn = !isAiTurn;
 
   useEffect(() => {
     if (playerCount > 4) {
@@ -323,8 +333,8 @@ export const LeftPanel: React.FC = () => {
 
     if (isEliminated) {
       return (
-        <GeoCard key={pid} style={{ opacity: 0.55 }}>
-          <div style={{ padding: '8px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <GeoCard key={pid} style={{ opacity: 0.55, flexShrink: 0 }}>
+          <div style={{ padding: '7px 11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ color: pTheme.ink, fontWeight: 800, fontSize: '13px', textDecoration: 'line-through' }}>
               P{pid + 1} (ELIM)
             </span>
@@ -342,12 +352,12 @@ export const LeftPanel: React.FC = () => {
           if (isCompactMode) setExpandedId(pid);
         }}
         style={{
-          opacity: isCurrent ? 1 : isCompactMode && !isExpanded ? 0.72 : 0.9,
+          opacity: isCurrent ? 1 : isCompactMode && !isExpanded ? 0.72 : 0.92,
           cursor: isCompactMode ? 'pointer' : 'default',
           flexShrink: 0,
         }}
       >
-        <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', gap: '7px' }}>
+        <div style={{ padding: '9px 10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
           {/* Player Header & Objective Counter */}
           <div
             style={{
@@ -355,7 +365,7 @@ export const LeftPanel: React.FC = () => {
               justifyContent: 'space-between',
               alignItems: 'center',
               borderBottom: `1.5px solid ${pTheme.border}40`,
-              paddingBottom: '5px',
+              paddingBottom: '4px',
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
@@ -363,7 +373,7 @@ export const LeftPanel: React.FC = () => {
               <span style={{ fontWeight: 900, fontSize: '14px', color: pTheme.ink }}>
                 P{pid + 1}
               </span>
-              <WeatherIcon type={weather.playerZones[pid]} />
+              <WeatherIcon type={weather.playerZones[pid] || 'CLEAR'} zoneNum={pid + 1} />
             </div>
             <span
               className="geo-chip"
@@ -381,11 +391,11 @@ export const LeftPanel: React.FC = () => {
 
           {/* Gold & CP Recessed Wells */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-            <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <GeoWell coreStyle={{ padding: '4px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>GOLD</span>
               <span style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-amber-ink)' }}>${playerGold[pid]}</span>
             </GeoWell>
-            <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <GeoWell coreStyle={{ padding: '4px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>CP</span>
               <span style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-blue-ink)' }}>
                 {playerCp[pid]}/{maxCp}
@@ -399,7 +409,7 @@ export const LeftPanel: React.FC = () => {
           {isExpanded && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', animation: 'fadeIn 0.25s' }}>
               {inventory.length > 0 && (
-                <div style={{ borderTop: '1px solid var(--op-line)', paddingTop: '6px' }}>
+                <div style={{ borderTop: '1px solid var(--op-line)', paddingTop: '5px' }}>
                   <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 800, marginBottom: '4px' }}>
                     INVENTORY (Click to Use)
                   </div>
@@ -427,13 +437,13 @@ export const LeftPanel: React.FC = () => {
                 </div>
               )}
 
-              <div style={{ borderTop: '1px solid var(--op-line)', paddingTop: '6px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 800, marginBottom: '4px' }}>
-                  <span>CASUALTIES</span>
-                  <span>{respawnsLeft} LEFT</span>
-                </div>
+              {casualties.length > 0 ? (
+                <div style={{ borderTop: '1px solid var(--op-line)', paddingTop: '5px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 800, marginBottom: '4px' }}>
+                    <span>CASUALTIES</span>
+                    <span>{respawnsLeft} LEFT</span>
+                  </div>
 
-                {casualties.length > 0 ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '110px', overflowY: 'auto' }} className="opgeo-scroll">
                     {casualties.map(unit => {
                       const cost = UNIT_COSTS[unit.type];
@@ -482,12 +492,24 @@ export const LeftPanel: React.FC = () => {
                       );
                     })}
                   </div>
-                ) : (
-                  <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontStyle: 'italic' }}>
-                    No Casualties
-                  </div>
-                )}
-              </div>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    borderTop: '1px solid var(--op-line)',
+                    paddingTop: '5px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    fontSize: '12px',
+                    color: 'var(--op-ink-muted)',
+                    fontWeight: 700,
+                  }}
+                >
+                  <span>CASUALTIES • Clear</span>
+                  <span style={{ fontWeight: 800 }}>{respawnsLeft} LEFT</span>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -495,20 +517,86 @@ export const LeftPanel: React.FC = () => {
     );
   };
 
+  const activeBuyerTheme = PLAYER_UI_THEME[currentPlayer] || PLAYER_UI_THEME[0];
+
   return (
-    <div
-      className="opgeo-scroll"
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        gap: '10px',
-        overflowY: 'auto',
-        paddingRight: '4px',
-        paddingBottom: '4px',
-      }}
-    >
-      {Array.from({ length: playerCount }).map((_, i) => renderPlayerSection(i))}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '8px' }}>
+      {/* Scrollable Faction Roster Stack (2P–6P) */}
+      <div
+        className="opgeo-scroll"
+        style={{
+          flex: '1 1 0%',
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+          overflowY: 'auto',
+          paddingRight: '4px',
+          paddingBottom: '2px',
+        }}
+      >
+        {Array.from({ length: playerCount }).map((_, i) => renderPlayerSection(i))}
+      </div>
+
+      {/* Pinned Left-Bottom Economy Panel: FIELD SHOP (Cursor-Zone Dock Layout) */}
+      <GeoCard armed={Boolean(placementMode?.active)} style={{ flexShrink: 0, marginRight: '4px' }}>
+        <div style={{ padding: '9px 10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)', letterSpacing: '0.5px' }}>
+              FIELD SHOP
+            </span>
+            {isMyTurn ? (
+              <span
+                className="geo-chip"
+                style={{
+                  background: activeBuyerTheme.badgeBg,
+                  color: activeBuyerTheme.badgeText,
+                  fontSize: '12px',
+                  fontWeight: 800,
+                  padding: '2px 7px',
+                }}
+              >
+                P{currentPlayer + 1} • ${playerGold[currentPlayer] ?? 0}
+              </span>
+            ) : (
+              <GeoChip variant="default" style={{ fontSize: '12px', padding: '2px 7px' }}>
+                AI TURN
+              </GeoChip>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+            {Object.entries(SHOP_ITEMS).map(([key, item]) => {
+              const canBuy = isMyTurn && (playerGold[currentPlayer] ?? 0) >= item.cost;
+              const isPlacingThis = Boolean(placementMode?.active && placementMode.itemKey === key);
+              return (
+                <GeoButton
+                  key={key}
+                  variant={isPlacingThis ? 'amber' : 'default'}
+                  onClick={() => buyShopItem(key)}
+                  disabled={!canBuy}
+                  fullWidth
+                  title={`${item.name} ($${item.cost}) — ${item.type === 'CONSUMABLE' ? 'Delivered via Drop Pod near base' : 'Select placement tile on map'}`}
+                  coreStyle={{ padding: '6px 8px', justifyContent: 'space-between' }}
+                >
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {item.name.replace('Deploy ', '').replace(' Drop', '').replace(' (Full Heal)', '')}
+                  </span>
+                  <span style={{ color: isPlacingThis ? '#1C1200' : 'var(--acc-amber-ink)', fontFamily: 'monospace' }}>
+                    ${item.cost}
+                  </span>
+                </GeoButton>
+              );
+            })}
+          </div>
+
+          {placementMode && placementMode.active && isMyTurn && (
+            <GeoButton variant="red" fullWidth onClick={cancelPlacement} coreStyle={{ padding: '6px 10px' }}>
+              CANCEL BUILD
+            </GeoButton>
+          )}
+        </div>
+      </GeoCard>
     </div>
   );
 };
@@ -562,8 +650,11 @@ const TurnStatusBar: React.FC = () => {
               </span>
             )}
           </span>
-          <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--acc-blue-ink)' }}>
-            {dynamicWeather ? `${zoneWeather} • ${weather.turnsRemaining}t` : 'CLEAR'}
+          <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--acc-blue-ink)', display: 'inline-flex', alignItems: 'center' }}>
+            <WeatherIcon type={dynamicWeather ? zoneWeather : 'CLEAR'} />
+            <span style={{ marginLeft: '4px' }}>
+              {dynamicWeather ? `${zoneWeather} • ${weather.turnsRemaining}t` : 'CLEAR'}
+            </span>
           </span>
         </div>
 
@@ -661,8 +752,8 @@ export const RightPanel: React.FC = () => {
   const validMoveCosts = useGameStore(state => state.validMoveCosts);
   const mapData = useGameStore(state => state.mapData);
   const units = useGameStore(state => state.units);
+  const gameLog = useGameStore(state => state.gameLog);
   const currentPlayer = useGameStore(state => state.currentPlayer);
-  const playerGold = useGameStore(state => state.playerGold);
   const playerCp = useGameStore(state => state.playerCp);
   const weather = useGameStore(state => state.weather);
   const gridSize = useGameStore(state => state.gridSize);
@@ -670,11 +761,8 @@ export const RightPanel: React.FC = () => {
   const fogOfWar = useGameStore(state => state.settings.fogOfWar);
   const victoryMode = useGameStore(state => state.settings.victoryMode);
   const isAiTurn = useGameStore(state => state.isAiTurn);
-  const endTurn = useGameStore(state => state.endTurn);
-  const selectNextReadyUnit = useGameStore(state => state.selectNextReadyUnit);
   const reloadUnit = useGameStore(state => state.reloadUnit);
   const enterOverwatch = useGameStore(state => state.enterOverwatch);
-  const buyShopItem = useGameStore(state => state.buyShopItem);
   const cancelPlacement = useGameStore(state => state.cancelPlacement);
   const placementMode = useGameStore(state => state.placementMode);
   const bankRewardPending = useGameStore(state => state.bankRewardPending);
@@ -690,8 +778,6 @@ export const RightPanel: React.FC = () => {
   const validSiegeTile = useGameStore(state => state.validSiegeTile);
   const validLootTile = useGameStore(state => state.validLootTile);
   const validDemolishTile = useGameStore(state => state.validDemolishTile);
-
-  const [activeTab, setActiveTab] = useState<'INTEL' | 'LOG'>('INTEL');
 
   const selectedUnit = units.find(u => u.id === selectedUnitId);
   const selectedTile = mapData.find(t => t.id === selectedTileId);
@@ -746,7 +832,6 @@ export const RightPanel: React.FC = () => {
     }
   }
 
-  const readyUnitCount = units.filter(u => u.owner === currentPlayer && !u.completed).length;
   const sniperCanFire = selectedUnit?.type === 'SNIPER' ? canUnitAttackFromTile(selectedUnit, selectedUnitTile) : true;
 
   const movePreviewCost =
@@ -791,341 +876,343 @@ export const RightPanel: React.FC = () => {
   }
 
   const isMyTurn = !isAiTurn;
+  const intelBadge = selectedUnit?.isOverwatching
+    ? { label: 'OVERWATCH', variant: 'amber' as const }
+    : selectedUnit
+    ? { label: UNIT_STATS[selectedUnit.type].name.toUpperCase(), variant: 'softBlue' as const }
+    : selectedTile
+    ? { label: selectedTile.type, variant: 'softMint' as const }
+    : { label: 'STANDBY', variant: 'default' as const };
 
-  if (bankRewardPending && bankRewardPending.playerId === currentPlayer) {
-    return <BankRewardModal />;
-  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '8px', paddingRight: '4px' }}>
+      <TurnStatusBar />
 
-  if (placementMode && placementMode.active) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', paddingRight: '4px' }}>
-        <GeoCard fill armed style={{ flex: 1 }}>
-          <div style={{ flex: 1, padding: '20px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', gap: '14px' }}>
-            <div style={{ fontSize: '16px', fontWeight: 900, color: 'var(--acc-amber-ink)' }}>CONSTRUCTION MODE</div>
-            <p style={{ margin: 0, fontSize: '13px', color: 'var(--op-ink-muted)' }}>
+      {/* ARMED CONSTRUCTION MODE PROMPT */}
+      {placementMode && placementMode.active && isMyTurn && (
+        <GeoCard armed style={{ flexShrink: 0 }}>
+          <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px', textAlign: 'center' }}>
+            <div style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-amber-ink)' }}>CONSTRUCTION MODE</div>
+            <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600 }}>
               Click any highlighted cyan tile on the battlefield to deploy.
-            </p>
-            <GeoWell style={{ width: '100%' }}>
-              <div style={{ fontSize: '13px', fontWeight: 800 }}>
+            </div>
+            <GeoWell coreStyle={{ padding: '6px 10px' }}>
+              <div style={{ fontSize: '12px', fontWeight: 900 }}>
                 {SHOP_ITEMS[placementMode.itemKey as keyof typeof SHOP_ITEMS]?.name} (${placementMode.cost})
               </div>
             </GeoWell>
-            <GeoButton variant="red" fullWidth onClick={cancelPlacement} coreStyle={{ padding: '10px 14px' }}>
+            <GeoButton variant="red" fullWidth onClick={cancelPlacement} coreStyle={{ padding: '7px 10px' }}>
               CANCEL BUILD
             </GeoButton>
           </div>
         </GeoCard>
-      </div>
-    );
-  }
+      )}
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '8px', paddingRight: '4px' }}>
-      <TurnStatusBar />
-
-      {/* INTEL / LOGS CARD */}
-      <GeoCard fill armed={Boolean(selectedUnit?.isOverwatching)} style={{ flex: 1, minHeight: 0 }}>
-        <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '8px' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', flexShrink: 0 }}>
-            <GeoButton
-              variant={activeTab === 'INTEL' ? 'blue' : 'default'}
-              fullWidth
-              onClick={() => setActiveTab('INTEL')}
-              coreStyle={{ padding: '6px' }}
-            >
-              INTEL
-            </GeoButton>
-            <GeoButton
-              variant={activeTab === 'LOG' ? 'blue' : 'default'}
-              fullWidth
-              onClick={() => setActiveTab('LOG')}
-              coreStyle={{ padding: '6px' }}
-            >
-              LOGS
-            </GeoButton>
+      {/* TACTICAL INTEL CARD (Content-Hugging: Zero Empty White Void, Scrolls Only If Stacked Tall) */}
+      <GeoCard hug armed={Boolean(selectedUnit?.isOverwatching)} style={{ maxHeight: '58%' }}>
+        <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', minHeight: 0, maxHeight: '100%', gap: '7px' }}>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '6px',
+              paddingBottom: '5px',
+              borderBottom: '1px solid var(--op-line)',
+              flexShrink: 0,
+            }}
+          >
+            <span style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)', letterSpacing: '0.6px' }}>
+              TACTICAL INTEL
+            </span>
+            <GeoChip variant={intelBadge.variant} style={{ padding: '1px 7px' }}>
+              {intelBadge.label}
+            </GeoChip>
           </div>
 
-          <div className="opgeo-scroll" style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingRight: '3px' }}>
-            {activeTab === 'INTEL' ? (
-              <>
-                {selectedUnit ? (() => {
-                  const rank = selectedUnit.rank ?? 0;
-                  const xp = selectedUnit.xp ?? 0;
-                  const nextThreshold = rank < 3 ? VETERANCY_CONFIG.XP_THRESHOLDS[rank + 1] : null;
-                  const maxHp = getUnitMaxHp(selectedUnit);
-                  const baseDmg = getUnitBaseDamage(selectedUnit);
-                  const atkCost = getUnitAttackCost(selectedUnit);
-                  const uTheme = PLAYER_UI_THEME[selectedUnit.owner] || PLAYER_UI_THEME[0];
-                  const rankPerkSummary = rank === 0
-                    ? null
-                    : [
-                        `+20% Max HP & +${VETERANCY_CONFIG.AMMO_BONUS_RANK1[selectedUnit.type]} Max Ammo`,
-                        rank >= 2 && selectedUnit.type === 'SOLDIER' ? '+1 Vision & Clear Weather Plains' : null,
-                        rank >= 2 && selectedUnit.type === 'ASSAULTER' ? `Cover Armor (-${VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG in Cover)` : null,
-                        rank >= 2 && selectedUnit.type === 'SNIPER' ? `+${VETERANCY_CONFIG.ELITE_SNIPER_DMG_BONUS} DMG & ${atkCost} CP Shot` : null,
-                        rank >= 3 ? '+20% Ace Max HP' : null,
-                        rank >= 3 && selectedUnit.type === 'SOLDIER' ? `+${VETERANCY_CONFIG.ACE_SCOUT_DMG_BONUS} DMG & ${atkCost} CP Shot` : null,
-                        rank >= 3 && selectedUnit.type === 'ASSAULTER' ? `+${VETERANCY_CONFIG.ACE_BREACHER_DMG_BONUS} DMG & Siege Armor Pierce` : null,
-                        rank >= 3 && selectedUnit.type === 'SNIPER' ? '1 CP Mountain/Dunes Move' : null,
-                      ].filter(Boolean).join(' • ');
+          <div className="opgeo-scroll" style={{ flex: '0 1 auto', overflowY: 'auto', minHeight: 0, paddingRight: '3px' }}>
+            {selectedUnit ? (() => {
+              const rank = selectedUnit.rank ?? 0;
+              const xp = selectedUnit.xp ?? 0;
+              const nextThreshold = rank < 3 ? VETERANCY_CONFIG.XP_THRESHOLDS[rank + 1] : null;
+              const maxHp = getUnitMaxHp(selectedUnit);
+              const baseDmg = getUnitBaseDamage(selectedUnit);
+              const atkCost = getUnitAttackCost(selectedUnit);
+              const uTheme = PLAYER_UI_THEME[selectedUnit.owner] || PLAYER_UI_THEME[0];
+              const unitCfg = UNIT_STATS[selectedUnit.type];
+              const standingDef = selectedUnitTile
+                ? selectedUnitTile.type === 'BUILDING' && selectedUnitTile.subType
+                  ? Math.round(BUILDING_STATS[selectedUnitTile.subType].defense * 100)
+                  : Math.round((TERRAIN_DEFENSE[selectedUnitTile.type] || 0) * 100)
+                : 0;
+              const standingTerrainName = selectedUnitTile
+                ? selectedUnitTile.type === 'BUILDING' && selectedUnitTile.subType
+                  ? BUILDING_STATS[selectedUnitTile.subType].name.toUpperCase()
+                  : selectedUnitTile.type
+                : '';
+              const rankPerkSummary = rank === 0
+                ? null
+                : [
+                    `+20% Max HP & +${VETERANCY_CONFIG.AMMO_BONUS_RANK1[selectedUnit.type]} Max Ammo`,
+                    rank >= 2 && selectedUnit.type === 'SOLDIER' ? '+1 Vision & Clear Weather Plains' : null,
+                    rank >= 2 && selectedUnit.type === 'ASSAULTER' ? `Cover Armor (-${VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG in Cover)` : null,
+                    rank >= 2 && selectedUnit.type === 'SNIPER' ? `+${VETERANCY_CONFIG.ELITE_SNIPER_DMG_BONUS} DMG & ${atkCost} CP Shot` : null,
+                    rank >= 3 ? '+20% Ace Max HP' : null,
+                    rank >= 3 && selectedUnit.type === 'SOLDIER' ? `+${VETERANCY_CONFIG.ACE_SCOUT_DMG_BONUS} DMG & ${atkCost} CP Shot` : null,
+                    rank >= 3 && selectedUnit.type === 'ASSAULTER' ? `+${VETERANCY_CONFIG.ACE_BREACHER_DMG_BONUS} DMG & Siege Armor Pierce` : null,
+                    rank >= 3 && selectedUnit.type === 'SNIPER' ? '1 CP Mountain/Dunes Move' : null,
+                  ].filter(Boolean).join(' • ');
 
-                  return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', animation: 'fadeIn 0.2s' }}>
-                      {/* Unit Identity Header */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <div
-                          className="geo-chip"
-                          style={{
-                            width: '36px',
-                            height: '36px',
-                            background: uTheme.badgeBg,
-                            color: uTheme.badgeText,
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontWeight: 900,
-                            fontSize: '13px',
-                            flexShrink: 0,
-                          }}
-                        >
-                          {UNIT_STATS[selectedUnit.type].name.substring(0, 2).toUpperCase()}
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
-                            <span style={{ fontSize: '14px', fontWeight: 900, color: 'var(--op-ink)' }}>
-                              {UNIT_STATS[selectedUnit.type].name.toUpperCase()}
-                            </span>
-                            <GeoChip variant={rank > 0 ? 'softAmber' : 'default'} style={{ padding: '2px 6px' }}>
-                              {rank > 0 ? VETERANCY_CONFIG.RANK_LABELS[rank] : 'RECRUIT'}
-                            </GeoChip>
-                          </div>
-                          <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600, display: 'flex', justifyContent: 'space-between', marginTop: '2px' }}>
-                            <span>{selectedUnit.owner === currentPlayer ? 'Your Unit' : `P${selectedUnit.owner + 1} Unit`}</span>
-                            <span>{nextThreshold !== null ? `XP ${xp}/${nextThreshold}` : `MAX (${xp})`} • {selectedUnit.kills ?? 0}K</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      {rankPerkSummary && (
-                        <GeoChip variant="softAmber" style={{ display: 'block', padding: '5px 8px', lineHeight: 1.35 }}>
-                          {rankPerkSummary}
-                        </GeoChip>
-                      )}
-
-                      {/* 2x2 Stat Wells */}
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-                        <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>HP</span>
-                          <span style={{ fontSize: '12px', fontWeight: 900, color: selectedUnit.hp < 5 ? 'var(--acc-red-ink)' : 'var(--op-ink)' }}>
-                            {selectedUnit.hp}/{maxHp}
-                          </span>
-                        </GeoWell>
-                        <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>AMMO</span>
-                          <span style={{ fontSize: '12px', fontWeight: 900, color: selectedUnit.ammo === 0 ? 'var(--acc-red-ink)' : 'var(--op-ink)' }}>
-                            {selectedUnit.ammo}/{selectedUnit.maxAmmo}
-                          </span>
-                        </GeoWell>
-                        <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>DMG</span>
-                          <span style={{ fontSize: '12px', fontWeight: 900 }}>{baseDmg}</span>
-                        </GeoWell>
-                        <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>SHOT</span>
-                          <span style={{ fontSize: '12px', fontWeight: 900 }}>{atkCost} CP</span>
-                        </GeoWell>
-                      </div>
-
-                      {selectedUnit.type === 'SNIPER' && selectedUnit.owner === currentPlayer && (
-                        <GeoChip variant={sniperCanFire ? 'softMint' : 'softAmber'} style={{ display: 'block', padding: '5px 8px' }}>
-                          {sniperCanFire ? '🎯 High-Ground Firing Ready' : '⚠️ Move to Mountain, Dunes, or Owned Building to Fire'}
-                        </GeoChip>
-                      )}
-
-                      {selectedUnit.owner === currentPlayer && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                          {selectedUnit.isOverwatching && (
-                            <GeoChip variant="amber" style={{ display: 'block', padding: '7px 9px', fontWeight: 900 }}>
-                              🎯 OVERWATCH ARMED ({OVERWATCH_STATS[selectedUnit.type].damage} DMG • +{OVERWATCH_STATS[selectedUnit.type].refund} CP refund)
-                            </GeoChip>
-                          )}
-
-                          {!selectedUnit.completed && !selectedUnit.isOverwatching && (() => {
-                            const owCfg = OVERWATCH_STATS[selectedUnit.type];
-                            const canOw = canUnitEnterOverwatch(selectedUnit, selectedUnitTile, playerCp[currentPlayer] ?? 0);
-                            return (
-                              <GeoButton
-                                variant={canOw ? 'softAmber' : 'default'}
-                                fullWidth
-                                disabled={!canOw}
-                                onClick={enterOverwatch}
-                                coreStyle={{ padding: '8px 10px' }}
-                              >
-                                SET OVERWATCH ({owCfg.cost} CP • {owCfg.damage} DMG) • O
-                              </GeoButton>
-                            );
-                          })()}
-
-                          {selectedUnit.ammo < selectedUnit.maxAmmo && !selectedUnit.completed && (
-                            <GeoButton
-                              variant="softBlue"
-                              fullWidth
-                              disabled={(playerCp[currentPlayer] ?? 0) < CP_SYSTEM.RELOAD_COST}
-                              onClick={reloadUnit}
-                              coreStyle={{ padding: '8px 10px' }}
-                            >
-                              FIELD RELOAD (+{Math.max(1, Math.ceil(selectedUnit.maxAmmo / 2))} AMMO • {CP_SYSTEM.RELOAD_COST} CP)
-                            </GeoButton>
-                          )}
-
-                          {validSecureTile && (
-                            <GeoButton variant="amber" fullWidth onClick={secureBuilding} coreStyle={{ padding: '8px 10px' }}>
-                              SECURE BUILDING (4 CP)
-                            </GeoButton>
-                          )}
-                          {validHeistTile && (
-                            <GeoButton variant="amber" fullWidth onClick={heistBank} coreStyle={{ padding: '8px 10px' }}>
-                              HEIST BANK (4 CP)
-                            </GeoButton>
-                          )}
-                          {validSiegeTile && (
-                            <GeoButton variant="red" fullWidth onClick={siegeBase} coreStyle={{ padding: '8px 10px' }}>
-                              SIEGE BASE
-                            </GeoButton>
-                          )}
-                          {validDemolishTile && (
-                            <GeoButton variant="red" fullWidth onClick={demolishBarrier} coreStyle={{ padding: '8px 10px' }}>
-                              DEMOLISH BARRIER
-                            </GeoButton>
-                          )}
-                          {validLootTile && (
-                            <GeoButton variant="mint" fullWidth onClick={lootSupply} coreStyle={{ padding: '8px 10px' }}>
-                              RETRIEVE SUPPLY (4 CP)
-                            </GeoButton>
-                          )}
-                        </div>
-                      )}
-
-                      {combatPreview && (
-                        <GeoChip variant="softRed" style={{ display: 'block', padding: '8px 10px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '3px' }}>
-                            <span>TARGET PREVIEW</span>
-                            {combatPreview.hpAfter === 0 && (
-                              <span className="geo-chip" style={{ background: 'var(--acc-red)', color: '#fff', padding: '1px 5px' }}>LETHAL</span>
-                            )}
-                          </div>
-                          <div style={{ fontWeight: 900 }}>{combatPreview.title}</div>
-                          <div>
-                            DMG: <strong>-{combatPreview.damage}</strong> • HP: {combatPreview.hpBefore} → <strong>{combatPreview.hpAfter}</strong>
-                          </div>
-                          {combatPreview.notes.map((n, idx) => (
-                            <div key={idx} style={{ fontWeight: 600 }}>• {n}</div>
-                          ))}
-                        </GeoChip>
-                      )}
-
-                      {movePreviewCost !== null && hoveredTile && !combatPreview && (
-                        <GeoChip variant="softBlue" style={{ display: 'block', padding: '8px 10px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '2px' }}>
-                            <span>MOVE TO ({hoveredTile.x},{hoveredTile.y})</span>
-                            <span>{movePreviewCost} CP</span>
-                          </div>
-                          {movePreviewWarnings.map((w, idx) => (
-                            <div key={idx} style={{ fontWeight: 600 }}>• {w}</div>
-                          ))}
-                        </GeoChip>
-                      )}
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '7px', animation: 'fadeIn 0.2s' }}>
+                  {/* Unit Identity Header */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div
+                      className="geo-chip"
+                      style={{
+                        width: '34px',
+                        height: '34px',
+                        background: uTheme.badgeBg,
+                        color: uTheme.badgeText,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontWeight: 900,
+                        fontSize: '13px',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {unitCfg.name.substring(0, 2).toUpperCase()}
                     </div>
-                  );
-                })() : selectedTile ? (() => {
-                  const tileUnit = units.find(
-                    u => u.tileId === selectedTile.id && (!fogOfWar || u.owner === currentPlayer || visibleTiles.has(u.tileId))
-                  );
-                  const tuTheme = tileUnit ? PLAYER_UI_THEME[tileUnit.owner] : null;
-                  return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {tileUnit && tuTheme && (
-                        <GeoWell coreStyle={{ padding: '8px 10px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '12px', fontWeight: 900, color: tuTheme.ink }}>
-                              P{tileUnit.owner + 1} {UNIT_STATS[tileUnit.type].name.toUpperCase()}
-                            </span>
-                            <span style={{ fontSize: '12px', fontWeight: 800 }}>
-                              HP {tileUnit.hp}/{getUnitMaxHp(tileUnit)}
-                            </span>
-                          </div>
-                          {tileUnit.isOverwatching && (
-                            <div style={{ fontSize: '12px', fontWeight: 800, color: 'var(--acc-amber-ink)', marginTop: '3px' }}>
-                              🎯 OVERWATCH ACTIVE ({OVERWATCH_STATS[tileUnit.type].damage} DMG reaction)
-                            </div>
-                          )}
-                        </GeoWell>
-                      )}
-                      <BuildingInfoPanel tile={selectedTile} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
+                        <span style={{ fontSize: '14px', fontWeight: 900, color: 'var(--op-ink)' }}>
+                          {unitCfg.name.toUpperCase()}
+                        </span>
+                        <GeoChip variant={rank > 0 ? 'softAmber' : 'default'} style={{ padding: '2px 6px' }}>
+                          {rank > 0 ? VETERANCY_CONFIG.RANK_LABELS[rank] : 'RECRUIT'}
+                        </GeoChip>
+                      </div>
+                      <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600, display: 'flex', justifyContent: 'space-between', marginTop: '2px' }}>
+                        <span>{selectedUnit.owner === currentPlayer ? 'Your Unit' : `P${selectedUnit.owner + 1} Unit`}</span>
+                        <span>{nextThreshold !== null ? `XP ${xp}/${nextThreshold}` : `MAX (${xp})`} • {selectedUnit.kills ?? 0}K</span>
+                      </div>
                     </div>
-                  );
-                })() : (
-                  <div style={{ color: 'var(--op-ink-muted)', fontStyle: 'italic', textAlign: 'center', marginTop: '24px', fontSize: '12px' }}>
-                    Select a unit or tile for tactical analysis.
                   </div>
-                )}
-              </>
-            ) : (
-              <LogView />
+
+                  {rankPerkSummary && (
+                    <GeoChip variant="softAmber" style={{ display: 'block', padding: '5px 8px', lineHeight: 1.35 }}>
+                      {rankPerkSummary}
+                    </GeoChip>
+                  )}
+
+                  {/* 2x2 Stat Wells */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                    <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>HP</span>
+                      <span style={{ fontSize: '12px', fontWeight: 900, color: selectedUnit.hp < 5 ? 'var(--acc-red-ink)' : 'var(--op-ink)' }}>
+                        {selectedUnit.hp}/{maxHp}
+                      </span>
+                    </GeoWell>
+                    <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>AMMO</span>
+                      <span style={{ fontSize: '12px', fontWeight: 900, color: selectedUnit.ammo === 0 ? 'var(--acc-red-ink)' : 'var(--op-ink)' }}>
+                        {selectedUnit.ammo}/{selectedUnit.maxAmmo}
+                      </span>
+                    </GeoWell>
+                    <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>DMG</span>
+                      <span style={{ fontSize: '12px', fontWeight: 900 }}>{baseDmg}</span>
+                    </GeoWell>
+                    <GeoWell coreStyle={{ padding: '5px 8px', display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>SHOT</span>
+                      <span style={{ fontSize: '12px', fontWeight: 900 }}>{atkCost} CP</span>
+                    </GeoWell>
+                  </div>
+
+                  {/* Standing Tile Cover & Base Range/Move Strip */}
+                  {selectedUnitTile && (
+                    <GeoWell coreStyle={{ padding: '4px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px', gap: '6px' }}>
+                      <span style={{ fontWeight: 700, color: 'var(--op-ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        ({selectedUnitTile.x},{selectedUnitTile.y}) {standingTerrainName}
+                        {standingDef !== 0 && (
+                          <span style={{ color: standingDef > 0 ? 'var(--acc-mint-ink)' : 'var(--acc-red-ink)', marginLeft: '4px', fontWeight: 800 }}>
+                            {standingDef > 0 ? `+${standingDef}%` : `${standingDef}%`}
+                          </span>
+                        )}
+                      </span>
+                      <span style={{ fontWeight: 800, color: 'var(--op-ink-muted)', fontFamily: 'monospace', flexShrink: 0 }}>
+                        RNG {unitCfg.range} • MOV {unitCfg.moveCost}
+                      </span>
+                    </GeoWell>
+                  )}
+
+                  {selectedUnit.type === 'SNIPER' && selectedUnit.owner === currentPlayer && (
+                    <GeoChip variant={sniperCanFire ? 'softMint' : 'softAmber'} style={{ display: 'block', padding: '5px 8px' }}>
+                      {sniperCanFire ? '🎯 High-Ground Firing Ready' : '⚠️ Move to Mountain, Dunes, or Owned Building to Fire'}
+                    </GeoChip>
+                  )}
+
+                  {selectedUnit.owner === currentPlayer && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {selectedUnit.isOverwatching && (
+                        <GeoChip variant="amber" style={{ display: 'block', padding: '7px 9px', fontWeight: 900 }}>
+                          🎯 OVERWATCH ARMED ({OVERWATCH_STATS[selectedUnit.type].damage} DMG • +{OVERWATCH_STATS[selectedUnit.type].refund} CP refund)
+                        </GeoChip>
+                      )}
+
+                      {!selectedUnit.completed && !selectedUnit.isOverwatching && (() => {
+                        const owCfg = OVERWATCH_STATS[selectedUnit.type];
+                        const canOw = canUnitEnterOverwatch(selectedUnit, selectedUnitTile, playerCp[currentPlayer] ?? 0);
+                        return (
+                          <GeoButton
+                            variant={canOw ? 'softAmber' : 'default'}
+                            fullWidth
+                            disabled={!canOw}
+                            onClick={enterOverwatch}
+                            coreStyle={{ padding: '7px 10px' }}
+                          >
+                            SET OVERWATCH ({owCfg.cost} CP • {owCfg.damage} DMG) • O
+                          </GeoButton>
+                        );
+                      })()}
+
+                      {selectedUnit.ammo < selectedUnit.maxAmmo && !selectedUnit.completed && (
+                        <GeoButton
+                          variant="softBlue"
+                          fullWidth
+                          disabled={(playerCp[currentPlayer] ?? 0) < CP_SYSTEM.RELOAD_COST}
+                          onClick={reloadUnit}
+                          coreStyle={{ padding: '7px 10px' }}
+                        >
+                          FIELD RELOAD (+{Math.max(1, Math.ceil(selectedUnit.maxAmmo / 2))} AMMO • {CP_SYSTEM.RELOAD_COST} CP)
+                        </GeoButton>
+                      )}
+
+                      {validSecureTile && (
+                        <GeoButton variant="amber" fullWidth onClick={secureBuilding} coreStyle={{ padding: '7px 10px' }}>
+                          SECURE BUILDING (4 CP)
+                        </GeoButton>
+                      )}
+                      {validHeistTile && (
+                        <GeoButton variant="amber" fullWidth onClick={heistBank} coreStyle={{ padding: '7px 10px' }}>
+                          HEIST BANK (4 CP)
+                        </GeoButton>
+                      )}
+                      {validSiegeTile && (
+                        <GeoButton variant="red" fullWidth onClick={siegeBase} coreStyle={{ padding: '7px 10px' }}>
+                          SIEGE BASE
+                        </GeoButton>
+                      )}
+                      {validDemolishTile && (
+                        <GeoButton variant="red" fullWidth onClick={demolishBarrier} coreStyle={{ padding: '7px 10px' }}>
+                          DEMOLISH BARRIER
+                        </GeoButton>
+                      )}
+                      {validLootTile && (
+                        <GeoButton variant="mint" fullWidth onClick={lootSupply} coreStyle={{ padding: '7px 10px' }}>
+                          RETRIEVE SUPPLY (4 CP)
+                        </GeoButton>
+                      )}
+                    </div>
+                  )}
+
+                  {combatPreview && (
+                    <GeoChip variant="softRed" style={{ display: 'block', padding: '7px 10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '3px' }}>
+                        <span>TARGET PREVIEW</span>
+                        {combatPreview.hpAfter === 0 && (
+                          <span className="geo-chip" style={{ background: 'var(--acc-red)', color: '#fff', padding: '1px 5px' }}>LETHAL</span>
+                        )}
+                      </div>
+                      <div style={{ fontWeight: 900 }}>{combatPreview.title}</div>
+                      <div>
+                        DMG: <strong>-{combatPreview.damage}</strong> • HP: {combatPreview.hpBefore} → <strong>{combatPreview.hpAfter}</strong>
+                      </div>
+                      {combatPreview.notes.map((n, idx) => (
+                        <div key={idx} style={{ fontWeight: 600 }}>• {n}</div>
+                      ))}
+                    </GeoChip>
+                  )}
+
+                  {movePreviewCost !== null && hoveredTile && !combatPreview && (
+                    <GeoChip variant="softBlue" style={{ display: 'block', padding: '7px 10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '2px' }}>
+                        <span>MOVE TO ({hoveredTile.x},{hoveredTile.y})</span>
+                        <span>{movePreviewCost} CP</span>
+                      </div>
+                      {movePreviewWarnings.map((w, idx) => (
+                        <div key={idx} style={{ fontWeight: 600 }}>• {w}</div>
+                      ))}
+                    </GeoChip>
+                  )}
+                </div>
+              );
+            })() : selectedTile ? (() => {
+              const tileUnit = units.find(
+                u => u.tileId === selectedTile.id && (!fogOfWar || u.owner === currentPlayer || visibleTiles.has(u.tileId))
+              );
+              const tuTheme = tileUnit ? PLAYER_UI_THEME[tileUnit.owner] : null;
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {tileUnit && tuTheme && (
+                    <GeoWell coreStyle={{ padding: '8px 10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: '12px', fontWeight: 900, color: tuTheme.ink }}>
+                          P{tileUnit.owner + 1} {UNIT_STATS[tileUnit.type].name.toUpperCase()}
+                        </span>
+                        <span style={{ fontSize: '12px', fontWeight: 800 }}>
+                          HP {tileUnit.hp}/{getUnitMaxHp(tileUnit)}
+                        </span>
+                      </div>
+                      {tileUnit.isOverwatching && (
+                        <div style={{ fontSize: '12px', fontWeight: 800, color: 'var(--acc-amber-ink)', marginTop: '3px' }}>
+                          🎯 OVERWATCH ACTIVE ({OVERWATCH_STATS[tileUnit.type].damage} DMG reaction)
+                        </div>
+                      )}
+                    </GeoWell>
+                  )}
+                  <BuildingInfoPanel tile={selectedTile} />
+                </div>
+              );
+            })() : (
+              <div style={{ color: 'var(--op-ink-muted)', fontStyle: 'italic', textAlign: 'center', padding: '12px 6px', fontSize: '12px' }}>
+                Select a unit or tile for tactical analysis. Hover targets to preview damage &amp; CP.
+              </div>
             )}
           </div>
         </div>
       </GeoCard>
 
-      {/* FIELD SHOP (Compact 2x2 Grid Preserves Max Space for Intel) */}
-      {isMyTurn && (
-        <GeoCard style={{ flexShrink: 0 }}>
-          <div style={{ padding: '9px 10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <div style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)', letterSpacing: '0.5px' }}>
-              FIELD SHOP (REQUISITION)
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-              {Object.entries(SHOP_ITEMS).map(([key, item]) => {
-                const canBuy = (playerGold[currentPlayer] ?? 0) >= item.cost;
-                return (
-                  <GeoButton
-                    key={key}
-                    onClick={() => buyShopItem(key)}
-                    disabled={!canBuy}
-                    fullWidth
-                    title={item.type === 'CONSUMABLE' ? 'Delivered via Drop Pod near base' : 'Select placement tile'}
-                    coreStyle={{ padding: '6px 8px', justifyContent: 'space-between' }}
-                  >
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {item.name.replace('Deploy ', '').replace(' Drop', '').replace(' (Full Heal)', '')}
-                    </span>
-                    <span style={{ color: 'var(--acc-amber-ink)', fontFamily: 'monospace' }}>${item.cost}</span>
-                  </GeoButton>
-                );
-              })}
-            </div>
+      {/* ALWAYS-VISIBLE LIVE MISSION LOGS (Expands to Fill Remaining Right-Column Height) */}
+      <GeoCard fill style={{ flex: '1 1 0%', minHeight: '140px' }}>
+        <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '7px' }}>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '6px',
+              paddingBottom: '5px',
+              borderBottom: '1px solid var(--op-line)',
+              flexShrink: 0,
+            }}
+          >
+            <span style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)', letterSpacing: '0.6px' }}>
+              LIVE MISSION LOGS
+            </span>
+            <GeoChip variant="softBlue" style={{ padding: '1px 7px', fontFamily: 'monospace' }}>
+              {gameLog.length}
+            </GeoChip>
           </div>
-        </GeoCard>
-      )}
 
-      {/* NEXT READY UNIT + END TURN */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '7px', flexShrink: 0 }}>
-        {isMyTurn && readyUnitCount > 0 && (
-          <GeoButton variant="softBlue" fullWidth onClick={selectNextReadyUnit} coreStyle={{ padding: '8px 10px' }}>
-            NEXT READY UNIT ({readyUnitCount}) • TAB
-          </GeoButton>
-        )}
+          <div className="opgeo-scroll" style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingRight: '3px' }}>
+            <LogView />
+          </div>
+        </div>
+      </GeoCard>
 
-        <GeoButton
-          variant={isMyTurn ? 'mint' : 'default'}
-          fullWidth
-          disabled={!isMyTurn}
-          onClick={endTurn}
-          coreStyle={{ padding: '12px 14px', fontSize: '15px', fontWeight: 900, letterSpacing: '1px' }}
-        >
-          {isMyTurn ? 'END TURN →' : 'ENEMY TURN...'}
-        </GeoButton>
-      </div>
+      {bankRewardPending && bankRewardPending.playerId === currentPlayer && <BankRewardModal />}
     </div>
   );
 };

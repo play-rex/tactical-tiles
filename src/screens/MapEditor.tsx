@@ -603,16 +603,19 @@ export const MapEditor: React.FC = () => {
                 onMouseLeave={() => setIsDrawing(false)}
               >
                 <div style={{ position: 'absolute', inset: 0 }}>
-                  <Stage width={layout.width} height={layout.height} options={{ background: 0x0b0e14, antialias: true }}>
+                  <Stage width={layout.width} height={layout.height} options={{ backgroundAlpha: 0, antialias: true }}>
                   <Container x={layout.offsetX} y={layout.offsetY} scale={layout.scale}>
                     <Graphics
                       draw={g => {
                         g.clear();
-                        g.beginFill(0x111111);
+                        g.beginFill(0x273041, 0.25);
+                        g.drawRect(10, 12, mapSize * TILE_SIZE, mapSize * TILE_SIZE);
+                        g.endFill();
+                        g.beginFill(0x1b2230);
                         g.drawRect(0, 0, mapSize * TILE_SIZE, mapSize * TILE_SIZE);
                         g.endFill();
-                        g.lineStyle(1, 0x444444, 1);
-                        g.drawRect(0, 0, mapSize * TILE_SIZE, mapSize * TILE_SIZE);
+                        g.lineStyle(3, 0x273041, 1);
+                        g.drawRect(-1.5, -1.5, mapSize * TILE_SIZE + 3, mapSize * TILE_SIZE + 3);
                       }}
                     />
 

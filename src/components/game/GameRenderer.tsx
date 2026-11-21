@@ -444,19 +444,25 @@ export const GameRenderer = () => {
         };
     }, []);
 
-    if (!loaded && !isLoaded) return <div style={{color:'white'}}>Initializing Neural Interface... {Math.round(progress*100)}%</div>;
+    if (!loaded && !isLoaded) {
+        return (
+            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--op-ink)', fontWeight: 800, fontSize: '13px' }}>
+                Initializing Neural Interface... {Math.round(progress * 100)}%
+            </div>
+        );
+    }
 
     const onTileClick = (x: number, y: number) => {
         handleTileClick(x, y);
     };
 
     return (
-        <div ref={parentRef} style={{ width: '100%', height: '100%', position: 'relative', background: '#050505', overflow: 'hidden' }}>
+        <div ref={parentRef} style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
             <div style={{ position: 'absolute', inset: 0 }}>
             <Stage 
                 width={dimensions.width} 
                 height={dimensions.height} 
-                options={{ background: 0x050505, antialias: true, autoDensity: true, resolution: window.devicePixelRatio || 1 }}
+                options={{ backgroundAlpha: 0, antialias: true, autoDensity: true, resolution: window.devicePixelRatio || 1 }}
             >
                 <GameViewport
                     width={dimensions.width}
@@ -465,6 +471,18 @@ export const GameRenderer = () => {
                     worldHeight={gridSize * TILE_SIZE}
                     setViewport={setViewport}
                 >
+                    {/* 0. WORLD BOARD INSET FRAME */}
+                    <Graphics
+                        eventMode="none"
+                        draw={g => {
+                            const totalSize = gridSize * TILE_SIZE;
+                            g.clear();
+                            g.lineStyle(4, 0x273041, 0.95);
+                            g.drawRect(-2, -2, totalSize + 4, totalSize + 4);
+                            g.lineStyle(0);
+                        }}
+                    />
+
                     {/* 1. TERRAIN LAYER */}
                     <Container name="terrain">
                         {mapData.map(tile => {

@@ -42,6 +42,7 @@ interface GeoCardProps {
   armed?: boolean;
   accentColor?: string;
   fill?: boolean;
+  hug?: boolean;
   style?: React.CSSProperties;
   bodyStyle?: React.CSSProperties;
   className?: string;
@@ -54,6 +55,7 @@ export const GeoCard: React.FC<GeoCardProps> = ({
   armed = false,
   accentColor,
   fill = false,
+  hug = false,
   style,
   bodyStyle,
   className = '',
@@ -66,7 +68,7 @@ export const GeoCard: React.FC<GeoCardProps> = ({
   return (
     <div
       onClick={onClick}
-      className={`geo-drop ${fill ? 'geo-fill' : ''} ${className}`}
+      className={`geo-drop ${fill ? 'geo-fill' : ''} ${hug ? 'geo-hug' : ''} ${className}`}
       style={style}
     >
       <div className="geo-backplate" />

@@ -39,26 +39,26 @@ const TopBattleGuidanceBar: React.FC = () => {
   const selectedUnitTile = selectedUnit ? mapData.find(t => t.id === selectedUnit.tileId) : undefined;
   const pTheme = PLAYER_UI_THEME[currentPlayer] || PLAYER_UI_THEME[0];
 
-  let guidance = 'Select a friendly unit to command, or press TAB for next ready unit.';
+  let guidance = 'Select a friendly unit to command (or press TAB).';
   if (winner !== null) {
     guidance = `Match complete — P${winner + 1} victorious.`;
   } else if (isAiTurn) {
     guidance = `Enemy Commander (P${currentPlayer + 1}) is executing moves...`;
   } else if (bankRewardPending && bankRewardPending.playerId === currentPlayer) {
-    guidance = 'Vault Breached! Choose Gold or Command Points loot in the right panel.';
+    guidance = 'Vault Breached! Choose Gold or CP loot.';
   } else if (placementMode && placementMode.active) {
-    guidance = 'Construction Mode: Click a highlighted cyan tile on the map to deploy, or Cancel.';
+    guidance = 'Construction Mode: Click a cyan tile to deploy, or Cancel.';
   } else if (selectedInventoryItemIndex !== null) {
-    guidance = 'Inventory Supply Armed: Click a friendly unit on the map to apply item.';
+    guidance = 'Supply Armed: Click a friendly unit to apply.';
   } else if (selectedGraveyardUnitId) {
-    guidance = 'Reinforcement Selected: Click any green tile near your HQ to respawn.';
+    guidance = 'Reinforcement: Click a green tile near HQ to respawn.';
   } else if (selectedUnit && selectedUnit.owner === currentPlayer) {
     if (selectedUnit.isOverwatching) {
       guidance = 'Overwatch Armed: Traps first entering enemy next turn.';
     } else if (selectedUnit.type === 'SNIPER' && !canUnitAttackFromTile(selectedUnit, selectedUnitTile)) {
-      guidance = 'Sniper Restriction: Move to Mountain, Dunes, or an owned Building to fire.';
+      guidance = 'Sniper: Move to Mountain, Dunes, or Building to fire.';
     } else {
-      guidance = 'Click BLUE tile to Move • RED target to Attack • O Overwatch • TAB Next Unit';
+      guidance = 'BLUE Move • RED Attack • O Overwatch • TAB Next';
     }
   }
 
@@ -143,13 +143,14 @@ const App = () => {
     return <HowToPlay />;
   }
 
-  // LIVE BATTLE SCREEN (OP-Chamfer Geo tuned for 20x20 / 25x25 / 30x30 maps)
+  // LIVE BATTLE SCREEN (OP-Chamfer Geo Tight 1:1 Map + Cursor-Zone Dock)
   return (
     <ViewportProvider>
       <div
         className="opgeo-stage"
         style={{
           display: 'flex',
+          justifyContent: 'center',
           width: '100vw',
           height: '100vh',
           overflow: 'hidden',
@@ -159,15 +160,24 @@ const App = () => {
       >
         <WinnerOverlay />
 
-        {/* Left Column: Disciplined width (210-255px) maximizes 25x25 square canvas area */}
-        <div style={{ width: 'clamp(210px, 18vw, 255px)', height: '100%', flexShrink: 0, minHeight: 0 }}>
+        {/* Left Column: Faction Roster Stack + Pinned Field Shop */}
+        <div
+          style={{
+            flex: '1 1 240px',
+            minWidth: '235px',
+            maxWidth: '450px',
+            height: '100%',
+            minHeight: 0,
+          }}
+        >
           <LeftPanel />
         </div>
 
-        {/* Center Column: Slim Top Bar + Maximized Square Pixi Stage + Compact Bottom Controls */}
+        {/* Center Column: Top Bar + Tight 1:1 Steel-Tray Map + Cursor-Zone Dock */}
         <div
           style={{
-            flex: 1,
+            width: 'clamp(430px, min(calc(100vh - 148px), calc(100vw - 546px)), 1200px)',
+            flexShrink: 0,
             minWidth: 0,
             minHeight: 0,
             height: '100%',
@@ -197,8 +207,16 @@ const App = () => {
           <MapControls />
         </div>
 
-        {/* Right Column: Disciplined width (240-290px) for Turn Info, Intel/Logs, Shop & Actions */}
-        <div style={{ width: 'clamp(240px, 21vw, 290px)', height: '100%', flexShrink: 0, minHeight: 0 }}>
+        {/* Right Column: Turn Status + Self-Sizing Tactical Intel + Always-Visible Live Logs */}
+        <div
+          style={{
+            flex: '1.12 1 275px',
+            minWidth: '265px',
+            maxWidth: '505px',
+            height: '100%',
+            minHeight: 0,
+          }}
+        >
           <RightPanel />
         </div>
       </div>
