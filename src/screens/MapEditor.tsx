@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { Stage, Container, Graphics, Text } from '@pixi/react';
+import { Stage, Container, Graphics, Text, useApp } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 import { SafeSprite } from '../components/game/SafeSprite';
 import { useGameStore } from '../store/useGameStore';
@@ -21,6 +21,20 @@ import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from '../compon
 
 const EDITOR_ZONE_STYLE = new PIXI.TextStyle({ fill: '#FFFFFF', stroke: '#0F172A', strokeThickness: 3, fontSize: 13, fontWeight: 'bold' });
 const EDITOR_BANK_STYLE = new PIXI.TextStyle({ fill: '#FDE047', stroke: '#0F172A', strokeThickness: 3, fontSize: 11, fontWeight: 'bold' });
+
+/** Triggers a single coalesced WebGL render only when editor state changes (0% idle GPU). */
+const StaticEditorRenderer: React.FC<{ deps: unknown[] }> = ({ deps }) => {
+  const app = useApp();
+  useEffect(() => {
+    const rafId = requestAnimationFrame(() => {
+      if (!(app.renderer as any)?.destroyed) {
+        app.renderer.render(app.stage);
+      }
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [app, ...deps]);
+  return null;
+};
 
 const createBlankMap = (size: number): Tile[] =>
   Array(size * size)
@@ -654,8 +668,18 @@ export const MapEditor: React.FC = () => {
                   <Stage
                     width={layout.width}
                     height={layout.height}
-                    options={{ backgroundAlpha: 0, antialias: false, autoDensity: true, resolution: Math.min(window.devicePixelRatio || 1, 1.5) }}
+                    raf={false}
+                    renderOnComponentChange={false}
+                    options={{
+                      background: 0xCFD7E4,
+                      backgroundAlpha: 1,
+                      antialias: false,
+                      autoDensity: true,
+                      powerPreference: 'low-power',
+                      resolution: Math.min(window.devicePixelRatio || 1, 1.25),
+                    }}
                   >
+                  <StaticEditorRenderer deps={[layout, bakedEditorBoard, mapData, mode]} />
                   <Container x={layout.offsetX} y={layout.offsetY} scale={layout.scale}>
                     <Graphics draw={drawEditorFrame} />
 

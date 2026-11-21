@@ -9,6 +9,60 @@ interface MoveNode {
   cost: number;
 }
 
+/** O(1) tile lookup by "x,y" id for row-major grids, falling back safely to linear scan. */
+export const getTileByIdFast = (mapData: Tile[], id: string, gridSize?: number): Tile | undefined => {
+  if (gridSize && gridSize > 0) {
+    const comma = id.indexOf(',');
+    if (comma > 0) {
+      const x = Number(id.slice(0, comma));
+      const y = Number(id.slice(comma + 1));
+      if (x >= 0 && x < gridSize && y >= 0 && y < gridSize) {
+        const candidate = mapData[y * gridSize + x];
+        if (candidate && candidate.id === id) return candidate;
+      }
+    }
+  }
+  return mapData.find(t => t.id === id);
+};
+
+const heapPush = (heap: MoveNode[], node: MoveNode) => {
+  heap.push(node);
+  let i = heap.length - 1;
+  while (i > 0) {
+    const p = (i - 1) >> 1;
+    if (heap[p].cost <= heap[i].cost) break;
+    const tmp = heap[p];
+    heap[p] = heap[i];
+    heap[i] = tmp;
+    i = p;
+  }
+};
+
+const heapPop = (heap: MoveNode[]): MoveNode | undefined => {
+  const n = heap.length;
+  if (n === 0) return undefined;
+  const top = heap[0];
+  const last = heap.pop()!;
+  if (n > 1) {
+    heap[0] = last;
+    let i = 0;
+    const len = heap.length;
+    while (true) {
+      let smallest = i;
+      const l = (i << 1) + 1;
+      const r = l + 1;
+      if (l < len && heap[l].cost < heap[smallest].cost) smallest = l;
+      if (r < len && heap[r].cost < heap[smallest].cost) smallest = r;
+      if (smallest === i) break;
+      const tmp = heap[i];
+      heap[i] = heap[smallest];
+      heap[smallest] = tmp;
+      i = smallest;
+    }
+  }
+  return top;
+};
+
 export const getManhattanDistance = (t1: Tile, t2: Tile): number => {
   return Math.abs(t1.x - t2.x) + Math.abs(t1.y - t2.y);
 };
@@ -201,10 +255,10 @@ const runDijkstra = (
   const directions = [{dx:0, dy:-1}, {dx:0, dy:1}, {dx:-1, dy:0}, {dx:1, dy:0}];
 
   while (queue.length > 0) {
-    queue.sort((a, b) => a.cost - b.cost);
-    const current = queue.shift();
+    const current = heapPop(queue);
     if (!current) break;
     const currentId = `${current.x},${current.y}`;
+    if (current.cost > (visited.get(currentId) ?? Infinity)) continue;
 
     for (const dir of directions) {
       const nx = current.x + dir.dx;
@@ -223,19 +277,58 @@ const runDijkstra = (
       const newCost = current.cost + moveCost;
 
       if (newCost > currentGlobalCp) continue;
-      if (enemyTiles.has(nId)) continue; 
+      if (enemyTiles.has(nId)) continue;
       if (visited.has(nId) && visited.get(nId)! <= newCost) continue;
 
       visited.set(nId, newCost);
       parents.set(nId, currentId);
       if (!occupiedTiles.has(nId)) {
-        validMoves.set(nId, newCost); 
+        validMoves.set(nId, newCost);
       }
-      queue.push({ x: nx, y: ny, cost: newCost });
+      heapPush(queue, { x: nx, y: ny, cost: newCost });
     }
   }
 
   return { validMoves, parents };
+};
+
+export const getValidMovesWithParents = (
+  startTile: Tile,
+  currentGlobalCp: number,
+  mapData: Tile[],
+  units: Unit[],
+  unitType: UnitType,
+  currentPlayer: number,
+  weatherState: WeatherState,
+  gridSize: number,
+  unitRank: UnitRank = 0
+): { validMoves: Map<string, number>; parents: Map<string, string> } => {
+  return runDijkstra(startTile, currentGlobalCp, mapData, units, unitType, currentPlayer, weatherState, gridSize, unitRank);
+};
+
+export const reconstructMovePathFromParents = (
+  startTile: Tile,
+  targetTileId: string,
+  validMoves: Map<string, number>,
+  parents: Map<string, string>,
+  mapData: Tile[],
+  gridSize: number
+): Tile[] => {
+  if (!validMoves.has(targetTileId)) return [];
+
+  const path: Tile[] = [];
+  let cursor: string | undefined = targetTileId;
+  let guard = 0;
+  const maxSteps = gridSize * gridSize;
+  while (cursor && cursor !== startTile.id && guard < maxSteps) {
+    const t = getTileByIdFast(mapData, cursor, gridSize);
+    if (t) path.push(t);
+    cursor = parents.get(cursor);
+    guard++;
+  }
+  path.push(startTile);
+  path.reverse();
+  return path;
 };
 
 export const getValidMoves = (
@@ -275,19 +368,7 @@ export const getMovePath = (
       gridSize,
       unitRank
   );
-  if (!validMoves.has(targetTileId)) return [];
-
-  const path: Tile[] = [];
-  let cursor: string | undefined = targetTileId;
-  let guard = 0;
-  while (cursor && cursor !== startTile.id && guard < gridSize * gridSize) {
-      const t = mapData.find(tile => tile.id === cursor);
-      if (t) path.unshift(t);
-      cursor = parents.get(cursor);
-      guard++;
-  }
-  path.unshift(startTile);
-  return path;
+  return reconstructMovePathFromParents(startTile, targetTileId, validMoves, parents, mapData, gridSize);
 };
 
 export const calculateVisibility = (player: number, units: Unit[], mapData: Tile[], weather: WeatherState, fogEnabled: boolean, gridSize: number): Set<string> => {
@@ -299,7 +380,7 @@ export const calculateVisibility = (player: number, units: Unit[], mapData: Tile
     const myUnits = units.filter(u => u.owner === player);
     
     myUnits.forEach(unit => {
-        const uTile = mapData.find(t => t.id === unit.tileId);
+        const uTile = getTileByIdFast(mapData, unit.tileId, gridSize);
         if (!uTile) return;
         let vision = getUnitVision(unit);
         

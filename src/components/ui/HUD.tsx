@@ -14,7 +14,8 @@ import {
   OVERWATCH_STATS,
   MUTATOR_CONFIG,
 } from '../../core/constants/Config';
-import { Tile, WeatherType, LogEntry } from '../../core/types';
+import { Tile, Unit, WeatherType, LogEntry } from '../../core/types';
+import { getTileByIdFast } from '../../core/grid/Pathfinding';
 import {
   calculateAttackOutcome,
   calculateSiegeDamage,
@@ -30,7 +31,7 @@ import {
 import { resolveMoveWithOverwatch } from '../../core/rules/OverwatchRules';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from './GeoPrimitives';
 
-const LogView: React.FC = () => {
+const LogView: React.FC = React.memo(() => {
   const gameLog = useGameStore(state => state.gameLog);
 
   const groupedLogs: Record<number, LogEntry[]> = {};
@@ -88,9 +89,9 @@ const LogView: React.FC = () => {
       ))}
     </div>
   );
-};
+});
 
-const BuildingInfoPanel: React.FC<{ tile: Tile }> = ({ tile }) => {
+const BuildingInfoPanel: React.FC<{ tile: Tile }> = React.memo(({ tile }) => {
   const weatherState = useGameStore(state => state.weather);
   const victoryMode = useGameStore(state => state.settings.victoryMode);
 
@@ -228,7 +229,7 @@ const BuildingInfoPanel: React.FC<{ tile: Tile }> = ({ tile }) => {
       </GeoWell>
     </div>
   );
-};
+});
 
 const WeatherIcon: React.FC<{ type: WeatherType; zoneNum?: number }> = ({ type, zoneNum }) => {
   let icon = '☀️';
@@ -272,7 +273,7 @@ const CpSegMeter: React.FC<{ cp: number; maxCp: number }> = ({ cp, maxCp }) => {
   );
 };
 
-export const LeftPanel: React.FC = () => {
+export const LeftPanel: React.FC = React.memo(() => {
   const currentPlayer = useGameStore(state => state.currentPlayer);
   const playerCount = useGameStore(state => state.settings.playerCount);
   const playerCp = useGameStore(state => state.playerCp);
@@ -599,7 +600,7 @@ export const LeftPanel: React.FC = () => {
       </GeoCard>
     </div>
   );
-};
+});
 
 const TurnStatusBar: React.FC = () => {
   const totalTurns = useGameStore(state => state.totalTurns);
@@ -744,15 +745,18 @@ const BankRewardModal: React.FC = () => {
   );
 };
 
-export const RightPanel: React.FC = () => {
-  const selectedUnitId = useGameStore(state => state.selectedUnitId);
-  const selectedTileId = useGameStore(state => state.selectedTileId);
+/** Isolated hover tactical preview so pointer sweeps never re-render RightPanel or LogView. */
+const HoveredTacticalPreview: React.FC<{
+  selectedUnit: Unit;
+  selectedUnitTile: Tile | undefined;
+}> = React.memo(({ selectedUnit, selectedUnitTile }) => {
   const hoveredTileId = useGameStore(state => state.hoveredTileId);
   const validAttackTargets = useGameStore(state => state.validAttackTargets);
   const validMoveCosts = useGameStore(state => state.validMoveCosts);
+  const validSiegeTile = useGameStore(state => state.validSiegeTile);
+  const validDemolishTile = useGameStore(state => state.validDemolishTile);
   const mapData = useGameStore(state => state.mapData);
   const units = useGameStore(state => state.units);
-  const gameLog = useGameStore(state => state.gameLog);
   const currentPlayer = useGameStore(state => state.currentPlayer);
   const playerCp = useGameStore(state => state.playerCp);
   const weather = useGameStore(state => state.weather);
@@ -760,6 +764,138 @@ export const RightPanel: React.FC = () => {
   const visibleTiles = useGameStore(state => state.visibleTiles);
   const fogOfWar = useGameStore(state => state.settings.fogOfWar);
   const victoryMode = useGameStore(state => state.settings.victoryMode);
+
+  if (!hoveredTileId || selectedUnit.owner !== currentPlayer) return null;
+  const hoveredTile = getTileByIdFast(mapData, hoveredTileId, gridSize);
+  if (!hoveredTile) return null;
+
+  const hoveredEnemy = units.find(u => u.tileId === hoveredTile.id && validAttackTargets.includes(u.id));
+
+  let combatPreview: { title: string; damage: number; hpBefore: number; hpAfter: number; notes: string[] } | null = null;
+  if (hoveredEnemy) {
+    const { damage, defense, watchtowerBoosted, coverArmorApplied } = calculateAttackOutcome(
+      selectedUnit,
+      selectedUnitTile,
+      hoveredTile,
+      hoveredEnemy.owner,
+      hoveredEnemy
+    );
+    const notes: string[] = [];
+    if (defense > 0) notes.push(`Target Cover: -${Math.round(defense * 100)}% DMG`);
+    if (defense < 0) notes.push(`Exposed (${hoveredTile.type}): +${Math.round(Math.abs(defense) * 100)}% DMG`);
+    if (coverArmorApplied) notes.push(`Cover Armor: -${VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG`);
+    if (watchtowerBoosted) notes.push('Watchtower Bonus: x1.2 DMG');
+    if (hoveredEnemy.isOverwatching) notes.push('Breaks Overwatch (SUPPRESSED!)');
+    combatPreview = {
+      title: `P${hoveredEnemy.owner + 1} ${UNIT_STATS[hoveredEnemy.type].name}`,
+      damage,
+      hpBefore: hoveredEnemy.hp,
+      hpAfter: Math.max(0, hoveredEnemy.hp - damage),
+      notes,
+    };
+  } else if (validSiegeTile && hoveredTile.id === validSiegeTile && hoveredTile.hp !== undefined) {
+    const damage = calculateSiegeDamage(selectedUnit, selectedUnitTile);
+    const piercesBase = selectedUnit.type === 'ASSAULTER' && (selectedUnit.rank ?? 0) >= 3;
+    combatPreview = {
+      title: `P${(hoveredTile.owner ?? 0) + 1} Headquarters`,
+      damage,
+      hpBefore: hoveredTile.hp,
+      hpAfter: Math.max(0, hoveredTile.hp - damage),
+      notes: [piercesBase ? 'Ace Siege Pierce: 100% DMG' : 'Base Armor: -20% DMG'],
+    };
+  } else if (validDemolishTile && hoveredTile.id === validDemolishTile && hoveredTile.hp !== undefined) {
+    const damage = calculateDemolishDamage(selectedUnit, selectedUnitTile);
+    combatPreview = {
+      title: 'Defense Barrier',
+      damage,
+      hpBefore: hoveredTile.hp,
+      hpAfter: Math.max(0, hoveredTile.hp - damage),
+      notes: ['Full Structural Damage'],
+    };
+  }
+
+  const movePreviewCost = validMoveCosts.has(hoveredTile.id) ? validMoveCosts.get(hoveredTile.id)! : null;
+  const movePreviewWarnings: string[] = [];
+  if (!combatPreview && movePreviewCost !== null) {
+    if (hoveredTile.type === 'QUICKSAND') movePreviewWarnings.push('Quicksand: Roots unit next turn!');
+    if ((TERRAIN_DEFENSE[hoveredTile.type] || 0) < 0) movePreviewWarnings.push(`${hoveredTile.type}: -10% Exposed Cover`);
+    if ((TERRAIN_DEFENSE[hoveredTile.type] || 0) > 0) movePreviewWarnings.push(`${hoveredTile.type}: +${Math.round((TERRAIN_DEFENSE[hoveredTile.type] || 0) * 100)}% Cover`);
+    const inBankRange = mapData.some(
+      t => t.type === 'BANK' && (t.hackProgress || 0) < 100 && Math.abs(t.x - hoveredTile.x) + Math.abs(t.y - hoveredTile.y) <= BANK_STATS.RANGE
+    );
+    if (inBankRange) movePreviewWarnings.push(`Inside Bank Turret Range (${BANK_STATS.DAMAGE} DMG/t)`);
+    if (victoryMode === 'CONQUER') {
+      const inBaseArtillery = mapData.some(
+        t => t.type === 'BASE' && t.owner !== currentPlayer && (t.hp || 0) > 0 && Math.abs(t.x - hoveredTile.x) + Math.abs(t.y - hoveredTile.y) <= BASE_STATS.RANGE
+      );
+      if (inBaseArtillery) movePreviewWarnings.push(`Inside Enemy Base Artillery (${BASE_STATS.MIN_DMG}-${BASE_STATS.MAX_DMG} DMG/t)`);
+    }
+    const owCheck = resolveMoveWithOverwatch({
+      movingUnit: selectedUnit,
+      targetTileId: hoveredTile.id,
+      mapData,
+      units,
+      weather,
+      gridSize,
+      fogOfWar,
+      maxBudget: playerCp[currentPlayer] ?? 0,
+      knownVisibleTiles: fogOfWar ? visibleTiles : null,
+    });
+    if (owCheck.trigger) {
+      movePreviewWarnings.push(
+        owCheck.trigger.pinResisted
+          ? `Enemy Overwatch on path (-${owCheck.trigger.damage} DMG, Pin Resisted)`
+          : `Enemy Overwatch on path (-${owCheck.trigger.damage} DMG, Pins)`
+      );
+    }
+  }
+
+  return (
+    <>
+      {combatPreview && (
+        <GeoChip variant="softRed" style={{ display: 'block', padding: '7px 10px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '3px' }}>
+            <span>TARGET PREVIEW</span>
+            {combatPreview.hpAfter === 0 && (
+              <span className="geo-chip" style={{ background: 'var(--acc-red)', color: '#fff', padding: '1px 5px' }}>LETHAL</span>
+            )}
+          </div>
+          <div style={{ fontWeight: 900 }}>{combatPreview.title}</div>
+          <div>
+            DMG: <strong>-{combatPreview.damage}</strong> • HP: {combatPreview.hpBefore} → <strong>{combatPreview.hpAfter}</strong>
+          </div>
+          {combatPreview.notes.map((n, idx) => (
+            <div key={idx} style={{ fontWeight: 600 }}>• {n}</div>
+          ))}
+        </GeoChip>
+      )}
+
+      {movePreviewCost !== null && !combatPreview && (
+        <GeoChip variant="softBlue" style={{ display: 'block', padding: '7px 10px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '2px' }}>
+            <span>MOVE TO ({hoveredTile.x},{hoveredTile.y})</span>
+            <span>{movePreviewCost} CP</span>
+          </div>
+          {movePreviewWarnings.map((w, idx) => (
+            <div key={idx} style={{ fontWeight: 600 }}>• {w}</div>
+          ))}
+        </GeoChip>
+      )}
+    </>
+  );
+});
+
+export const RightPanel: React.FC = () => {
+  const selectedUnitId = useGameStore(state => state.selectedUnitId);
+  const selectedTileId = useGameStore(state => state.selectedTileId);
+  const mapData = useGameStore(state => state.mapData);
+  const units = useGameStore(state => state.units);
+  const gameLog = useGameStore(state => state.gameLog);
+  const currentPlayer = useGameStore(state => state.currentPlayer);
+  const playerCp = useGameStore(state => state.playerCp);
+  const gridSize = useGameStore(state => state.gridSize);
+  const visibleTiles = useGameStore(state => state.visibleTiles);
+  const fogOfWar = useGameStore(state => state.settings.fogOfWar);
   const isAiTurn = useGameStore(state => state.isAiTurn);
   const reloadUnit = useGameStore(state => state.reloadUnit);
   const enterOverwatch = useGameStore(state => state.enterOverwatch);
@@ -780,100 +916,10 @@ export const RightPanel: React.FC = () => {
   const validDemolishTile = useGameStore(state => state.validDemolishTile);
 
   const selectedUnit = units.find(u => u.id === selectedUnitId);
-  const selectedTile = mapData.find(t => t.id === selectedTileId);
-  const hoveredTile = mapData.find(t => t.id === hoveredTileId);
-  const selectedUnitTile = selectedUnit ? mapData.find(t => t.id === selectedUnit.tileId) : undefined;
-  const hoveredEnemy = hoveredTile
-    ? units.find(u => u.tileId === hoveredTile.id && validAttackTargets.includes(u.id))
-    : undefined;
-
-  let combatPreview: { title: string; damage: number; hpBefore: number; hpAfter: number; notes: string[] } | null = null;
-  if (selectedUnit && selectedUnit.owner === currentPlayer && hoveredTile) {
-    if (hoveredEnemy) {
-      const { damage, defense, watchtowerBoosted, coverArmorApplied } = calculateAttackOutcome(
-        selectedUnit,
-        selectedUnitTile,
-        hoveredTile,
-        hoveredEnemy.owner,
-        hoveredEnemy
-      );
-      const notes: string[] = [];
-      if (defense > 0) notes.push(`Target Cover: -${Math.round(defense * 100)}% DMG`);
-      if (defense < 0) notes.push(`Exposed (${hoveredTile.type}): +${Math.round(Math.abs(defense) * 100)}% DMG`);
-      if (coverArmorApplied) notes.push(`Cover Armor: -${VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG`);
-      if (watchtowerBoosted) notes.push('Watchtower Bonus: x1.2 DMG');
-      if (hoveredEnemy.isOverwatching) notes.push('Breaks Overwatch (SUPPRESSED!)');
-      combatPreview = {
-        title: `P${hoveredEnemy.owner + 1} ${UNIT_STATS[hoveredEnemy.type].name}`,
-        damage,
-        hpBefore: hoveredEnemy.hp,
-        hpAfter: Math.max(0, hoveredEnemy.hp - damage),
-        notes,
-      };
-    } else if (validSiegeTile && hoveredTile.id === validSiegeTile && hoveredTile.hp !== undefined) {
-      const damage = calculateSiegeDamage(selectedUnit, selectedUnitTile);
-      const piercesBase = selectedUnit.type === 'ASSAULTER' && (selectedUnit.rank ?? 0) >= 3;
-      combatPreview = {
-        title: `P${(hoveredTile.owner ?? 0) + 1} Headquarters`,
-        damage,
-        hpBefore: hoveredTile.hp,
-        hpAfter: Math.max(0, hoveredTile.hp - damage),
-        notes: [piercesBase ? 'Ace Siege Pierce: 100% DMG' : 'Base Armor: -20% DMG'],
-      };
-    } else if (validDemolishTile && hoveredTile.id === validDemolishTile && hoveredTile.hp !== undefined) {
-      const damage = calculateDemolishDamage(selectedUnit, selectedUnitTile);
-      combatPreview = {
-        title: 'Defense Barrier',
-        damage,
-        hpBefore: hoveredTile.hp,
-        hpAfter: Math.max(0, hoveredTile.hp - damage),
-        notes: ['Full Structural Damage'],
-      };
-    }
-  }
+  const selectedTile = selectedTileId ? getTileByIdFast(mapData, selectedTileId, gridSize) : undefined;
+  const selectedUnitTile = selectedUnit ? getTileByIdFast(mapData, selectedUnit.tileId, gridSize) : undefined;
 
   const sniperCanFire = selectedUnit?.type === 'SNIPER' ? canUnitAttackFromTile(selectedUnit, selectedUnitTile) : true;
-
-  const movePreviewCost =
-    selectedUnit && selectedUnit.owner === currentPlayer && hoveredTile && validMoveCosts.has(hoveredTile.id)
-      ? validMoveCosts.get(hoveredTile.id)!
-      : null;
-  const movePreviewWarnings: string[] = [];
-  if (movePreviewCost !== null && hoveredTile) {
-    if (hoveredTile.type === 'QUICKSAND') movePreviewWarnings.push('Quicksand: Roots unit next turn!');
-    if ((TERRAIN_DEFENSE[hoveredTile.type] || 0) < 0) movePreviewWarnings.push(`${hoveredTile.type}: -10% Exposed Cover`);
-    if ((TERRAIN_DEFENSE[hoveredTile.type] || 0) > 0) movePreviewWarnings.push(`${hoveredTile.type}: +${Math.round((TERRAIN_DEFENSE[hoveredTile.type] || 0) * 100)}% Cover`);
-    const inBankRange = mapData.some(
-      t => t.type === 'BANK' && (t.hackProgress || 0) < 100 && Math.abs(t.x - hoveredTile.x) + Math.abs(t.y - hoveredTile.y) <= BANK_STATS.RANGE
-    );
-    if (inBankRange) movePreviewWarnings.push(`Inside Bank Turret Range (${BANK_STATS.DAMAGE} DMG/t)`);
-    if (victoryMode === 'CONQUER') {
-      const inBaseArtillery = mapData.some(
-        t => t.type === 'BASE' && t.owner !== currentPlayer && (t.hp || 0) > 0 && Math.abs(t.x - hoveredTile.x) + Math.abs(t.y - hoveredTile.y) <= BASE_STATS.RANGE
-      );
-      if (inBaseArtillery) movePreviewWarnings.push(`Inside Enemy Base Artillery (${BASE_STATS.MIN_DMG}-${BASE_STATS.MAX_DMG} DMG/t)`);
-    }
-    if (selectedUnit && selectedUnit.owner === currentPlayer) {
-      const owCheck = resolveMoveWithOverwatch({
-        movingUnit: selectedUnit,
-        targetTileId: hoveredTile.id,
-        mapData,
-        units,
-        weather,
-        gridSize,
-        fogOfWar,
-        maxBudget: playerCp[currentPlayer] ?? 0,
-        knownVisibleTiles: fogOfWar ? visibleTiles : null,
-      });
-      if (owCheck.trigger) {
-        movePreviewWarnings.push(
-          owCheck.trigger.pinResisted
-            ? `Enemy Overwatch on path (-${owCheck.trigger.damage} DMG, Pin Resisted)`
-            : `Enemy Overwatch on path (-${owCheck.trigger.damage} DMG, Pins)`
-        );
-      }
-    }
-  }
 
   const isMyTurn = !isAiTurn;
   const intelBadge = selectedUnit?.isOverwatching
@@ -1117,35 +1163,7 @@ export const RightPanel: React.FC = () => {
                     </div>
                   )}
 
-                  {combatPreview && (
-                    <GeoChip variant="softRed" style={{ display: 'block', padding: '7px 10px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '3px' }}>
-                        <span>TARGET PREVIEW</span>
-                        {combatPreview.hpAfter === 0 && (
-                          <span className="geo-chip" style={{ background: 'var(--acc-red)', color: '#fff', padding: '1px 5px' }}>LETHAL</span>
-                        )}
-                      </div>
-                      <div style={{ fontWeight: 900 }}>{combatPreview.title}</div>
-                      <div>
-                        DMG: <strong>-{combatPreview.damage}</strong> • HP: {combatPreview.hpBefore} → <strong>{combatPreview.hpAfter}</strong>
-                      </div>
-                      {combatPreview.notes.map((n, idx) => (
-                        <div key={idx} style={{ fontWeight: 600 }}>• {n}</div>
-                      ))}
-                    </GeoChip>
-                  )}
-
-                  {movePreviewCost !== null && hoveredTile && !combatPreview && (
-                    <GeoChip variant="softBlue" style={{ display: 'block', padding: '7px 10px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '2px' }}>
-                        <span>MOVE TO ({hoveredTile.x},{hoveredTile.y})</span>
-                        <span>{movePreviewCost} CP</span>
-                      </div>
-                      {movePreviewWarnings.map((w, idx) => (
-                        <div key={idx} style={{ fontWeight: 600 }}>• {w}</div>
-                      ))}
-                    </GeoChip>
-                  )}
+                  <HoveredTacticalPreview selectedUnit={selectedUnit} selectedUnitTile={selectedUnitTile} />
                 </div>
               );
             })() : selectedTile ? (() => {

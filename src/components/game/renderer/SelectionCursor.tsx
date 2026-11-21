@@ -6,17 +6,21 @@ import { TILE_SIZE } from '../../../core/constants/Config';
 interface SelectionCursorProps {
     x: number;
     y: number;
+    pulse?: boolean;
 }
 
-export const SelectionCursor: React.FC<SelectionCursorProps> = ({ x, y }) => {
+export const SelectionCursor: React.FC<SelectionCursorProps> = ({ x, y, pulse = true }) => {
     const graphicsRef = useRef<PIXI.Graphics>(null);
     const timeRef = useRef(0);
 
     useTick((delta) => {
-        timeRef.current += 0.1 * delta;
-        if (graphicsRef.current) {
-            graphicsRef.current.alpha = 0.8 + Math.sin(timeRef.current) * 0.2;
+        if (!graphicsRef.current) return;
+        if (!pulse) {
+            graphicsRef.current.alpha = 0.92;
+            return;
         }
+        timeRef.current += 0.1 * delta;
+        graphicsRef.current.alpha = 0.78 + Math.sin(timeRef.current) * 0.22;
     });
 
     const draw = useCallback((g: PIXI.Graphics) => {

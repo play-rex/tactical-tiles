@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { Stage, Container, Graphics, Text, useTick } from '@pixi/react';
+import { Stage, Container, Graphics, Text, useTick, useApp } from '@pixi/react';
 import { SafeSprite } from './SafeSprite';
 import { UnitSprite } from './renderer/UnitSprite';
 import { GameViewport } from './renderer/GameViewport';
@@ -15,10 +15,12 @@ import { SelectionCursor } from './renderer/SelectionCursor';
 import { DamageText } from './renderer/DamageText';
 import { ProjectileRenderer } from './renderer/ProjectileRenderer';
 import { WeatherSystemMemo as WeatherSystem } from './renderer/WeatherSystem.tsx'; // Explicit .tsx extension
-import { useEffectStore } from '../../store/useEffectStore';
+import { FxMode, subscribeRendererWake, useEffectStore, wakeBattleRenderer } from '../../store/useEffectStore';
 import { canConstructOnTile } from '../../core/rules/CombatRules';
 import { getOverwatchCoverageTiles, resolveMoveWithOverwatch } from '../../core/rules/OverwatchRules';
 import { getMovePath } from '../../core/grid/Pathfinding';
+
+const EMPTY_TILE_ARRAY: Tile[] = [];
 
 const LOOT_MARKER_STYLE = new PIXI.TextStyle({
     fill: '#FFD700',
@@ -213,13 +215,40 @@ const OverlayLayer = React.memo(({
     return <Graphics draw={draw} eventMode="none" />;
 });
 
-// Throttled (~20fps) Animated River & Shoreline Ripples (keeps GPU vertex uploads minimal)
-const AnimatedWaterLayer = React.memo<{ waterTiles: Tile[] }>(({ waterTiles }) => {
+const renderWaterRipples = (g: PIXI.Graphics, waterTiles: Tile[], t: number) => {
+    g.clear();
+    if (waterTiles.length === 0) return;
+
+    g.lineStyle(1.8, 0xBAE6FD, 0.34);
+    for (let i = 0; i < waterTiles.length; i++) {
+        const tile = waterTiles[i];
+        const px = tile.x * TILE_SIZE;
+        const py = tile.y * TILE_SIZE;
+        const shift = ((t * 14 + tile.x * 9) % 28) - 14;
+        const y1 = py + 20 + Math.sin(tile.x * 1.3 + t) * 4;
+        const y2 = py + 44 + Math.cos(tile.y * 1.1 + t * 0.9) * 4;
+        g.moveTo(px + 10 + shift * 0.2, y1);
+        g.lineTo(px + 34 + shift * 0.2, y1 + 1.5);
+        g.moveTo(px + 26 - shift * 0.2, y2);
+        g.lineTo(px + 52 - shift * 0.2, y2 - 1.5);
+    }
+    g.lineStyle(0);
+};
+
+// Throttled Animated River & Shoreline Ripples (draws initial frame immediately in ECO mode)
+const AnimatedWaterLayer = React.memo<{ waterTiles: Tile[]; animate: boolean }>(({ waterTiles, animate }) => {
     const gfxRef = useRef<PIXI.Graphics>(null);
     const phaseRef = useRef(0);
-    const accumRef = useRef(3);
+    const accumRef = useRef(0);
+
+    useEffect(() => {
+        if (gfxRef.current && !(gfxRef.current as any).destroyed) {
+            renderWaterRipples(gfxRef.current, waterTiles, phaseRef.current);
+        }
+    }, [waterTiles]);
 
     useTick((delta) => {
+        if (!animate) return;
         const dt = typeof delta === 'number' ? delta : 1;
         accumRef.current += dt;
         if (accumRef.current < 3) return;
@@ -228,40 +257,56 @@ const AnimatedWaterLayer = React.memo<{ waterTiles: Tile[] }>(({ waterTiles }) =
 
         const g = gfxRef.current;
         if (!g || (g as any).destroyed) return;
-        g.clear();
-        if (waterTiles.length === 0) return;
-
-        const t = phaseRef.current;
-        g.lineStyle(1.8, 0xBAE6FD, 0.34);
-        for (let i = 0; i < waterTiles.length; i++) {
-            const tile = waterTiles[i];
-            const px = tile.x * TILE_SIZE;
-            const py = tile.y * TILE_SIZE;
-            const shift = ((t * 14 + tile.x * 9) % 28) - 14;
-            const y1 = py + 20 + Math.sin(tile.x * 1.3 + t) * 4;
-            const y2 = py + 44 + Math.cos(tile.y * 1.1 + t * 0.9) * 4;
-            g.moveTo(px + 10 + shift * 0.2, y1);
-            g.lineTo(px + 34 + shift * 0.2, y1 + 1.5);
-            g.moveTo(px + 26 - shift * 0.2, y2);
-            g.lineTo(px + 52 - shift * 0.2, y2 - 1.5);
-        }
-        g.lineStyle(0);
+        renderWaterRipples(g, waterTiles, phaseRef.current);
     });
 
     return <Graphics ref={gfxRef} eventMode="none" />;
 });
 
-// Throttled (~20fps) Spinning Tactical Radar Bar on Visible HQ Compounds
-const AnimatedBaseRadarLayer = React.memo<{ baseTiles: Tile[]; fogOfWar: boolean; visibleTiles: Set<string> }>(({
+const renderBaseRadar = (
+    g: PIXI.Graphics,
+    baseTiles: Tile[],
+    fogOfWar: boolean,
+    visibleTiles: Set<string>,
+    angle: number
+) => {
+    g.clear();
+    if (baseTiles.length === 0) return;
+
+    g.lineStyle(2, 0xE2E8F0, 0.72);
+    for (let i = 0; i < baseTiles.length; i++) {
+        const b = baseTiles[i];
+        if (fogOfWar && !visibleTiles.has(b.id)) continue;
+        const cx = b.x * TILE_SIZE + TILE_SIZE / 2;
+        const cy = b.y * TILE_SIZE + TILE_SIZE / 2;
+        const ang = angle + b.x * 0.6;
+        const dx = Math.cos(ang) * 7;
+        const dy = Math.sin(ang) * 7;
+        g.moveTo(cx - dx, cy - dy);
+        g.lineTo(cx + dx, cy + dy);
+    }
+    g.lineStyle(0);
+};
+
+// Spinning Tactical Radar Bar on Visible HQ Compounds (renders crisp static bar in ECO idle)
+const AnimatedBaseRadarLayer = React.memo<{ baseTiles: Tile[]; fogOfWar: boolean; visibleTiles: Set<string>; animate: boolean }>(({
     baseTiles,
     fogOfWar,
     visibleTiles,
+    animate,
 }) => {
     const gfxRef = useRef<PIXI.Graphics>(null);
     const angleRef = useRef(0);
-    const accumRef = useRef(3);
+    const accumRef = useRef(0);
+
+    useEffect(() => {
+        if (gfxRef.current && !(gfxRef.current as any).destroyed) {
+            renderBaseRadar(gfxRef.current, baseTiles, fogOfWar, visibleTiles, angleRef.current);
+        }
+    }, [baseTiles, fogOfWar, visibleTiles]);
 
     useTick((delta) => {
+        if (!animate) return;
         const dt = typeof delta === 'number' ? delta : 1;
         accumRef.current += dt;
         if (accumRef.current < 3) return;
@@ -270,22 +315,7 @@ const AnimatedBaseRadarLayer = React.memo<{ baseTiles: Tile[]; fogOfWar: boolean
 
         const g = gfxRef.current;
         if (!g || (g as any).destroyed) return;
-        g.clear();
-        if (baseTiles.length === 0) return;
-
-        g.lineStyle(2, 0xE2E8F0, 0.72);
-        for (let i = 0; i < baseTiles.length; i++) {
-            const b = baseTiles[i];
-            if (fogOfWar && !visibleTiles.has(b.id)) continue;
-            const cx = b.x * TILE_SIZE + TILE_SIZE / 2;
-            const cy = b.y * TILE_SIZE + TILE_SIZE / 2;
-            const ang = angleRef.current + b.x * 0.6;
-            const dx = Math.cos(ang) * 7;
-            const dy = Math.sin(ang) * 7;
-            g.moveTo(cx - dx, cy - dy);
-            g.lineTo(cx + dx, cy + dy);
-        }
-        g.lineStyle(0);
+        renderBaseRadar(g, baseTiles, fogOfWar, visibleTiles, angleRef.current);
     });
 
     return <Graphics ref={gfxRef} eventMode="none" />;
@@ -415,50 +445,329 @@ const UIMarkersLayer = React.memo<{
     );
 });
 
+// Isolated Hover & Path Preview Layer (prevents hoveredTileId changes from re-rendering the whole Stage tree)
+const HoverOverlayLayer = React.memo<{ tileById: Map<string, Tile> }>(({ tileById }) => {
+    const hoveredTileId = useGameStore(state => state.hoveredTileId);
+    const selectedUnitId = useGameStore(state => state.selectedUnitId);
+    const selectedTileId = useGameStore(state => state.selectedTileId);
+    const currentPlayer = useGameStore(state => state.currentPlayer);
+    const validMoveCosts = useGameStore(state => state.validMoveCosts);
+    const units = useGameStore(state => state.units);
+    const mapData = useGameStore(state => state.mapData);
+    const weather = useGameStore(state => state.weather);
+    const gridSize = useGameStore(state => state.gridSize) || 20;
+    const settings = useGameStore(state => state.settings);
+    const playerCp = useGameStore(state => state.playerCp);
+    const visibleTiles = useGameStore(state => state.visibleTiles);
+
+    const selectedUnit = useMemo(
+        () => (selectedUnitId ? units.find(u => u.id === selectedUnitId) : undefined),
+        [units, selectedUnitId]
+    );
+
+    const hoverMoveResolution = useMemo(() => {
+        if (!selectedUnit || selectedUnit.owner !== currentPlayer || selectedUnit.hasMoved) return null;
+        if (!hoveredTileId || !validMoveCosts.has(hoveredTileId)) return null;
+        return resolveMoveWithOverwatch({
+            movingUnit: selectedUnit,
+            targetTileId: hoveredTileId,
+            mapData,
+            units,
+            weather,
+            gridSize,
+            fogOfWar: settings.fogOfWar,
+            maxBudget: playerCp[currentPlayer] ?? 0,
+            knownVisibleTiles: settings.fogOfWar ? visibleTiles : null
+        });
+    }, [selectedUnit, currentPlayer, hoveredTileId, validMoveCosts, mapData, units, weather, gridSize, settings.fogOfWar, playerCp, visibleTiles]);
+
+    const hoverPath = useMemo(() => {
+        if (hoverMoveResolution) return hoverMoveResolution.path;
+        if (!selectedUnit || selectedUnit.owner !== currentPlayer || selectedUnit.hasMoved) return EMPTY_TILE_ARRAY;
+        if (!hoveredTileId || !validMoveCosts.has(hoveredTileId)) return EMPTY_TILE_ARRAY;
+        const startTile = tileById.get(selectedUnit.tileId);
+        if (!startTile) return EMPTY_TILE_ARRAY;
+        return getMovePath(
+            startTile,
+            hoveredTileId,
+            playerCp[currentPlayer] ?? 0,
+            mapData,
+            units,
+            selectedUnit.type,
+            currentPlayer,
+            weather,
+            gridSize,
+            selectedUnit.rank ?? 0
+        );
+    }, [hoverMoveResolution, selectedUnit, currentPlayer, hoveredTileId, validMoveCosts, tileById, playerCp, mapData, units, weather, gridSize]);
+
+    useEffect(() => {
+        wakeBattleRenderer(0);
+    }, [hoveredTileId, hoverPath]);
+
+    const draw = useCallback((g: PIXI.Graphics) => {
+        g.clear();
+        if (!hoveredTileId) return;
+
+        if (hoveredTileId !== selectedTileId) {
+            const hoveredOverwatcher = units.find(u =>
+                u.tileId === hoveredTileId &&
+                u.isOverwatching &&
+                u.ammo > 0 &&
+                (!settings.fogOfWar || u.owner === currentPlayer || visibleTiles.has(u.tileId))
+            );
+            if (hoveredOverwatcher) {
+                const covered = getOverwatchCoverageTiles(hoveredOverwatcher, mapData, weather, gridSize);
+                covered.forEach((tid: string) => {
+                    const t = tileById.get(tid);
+                    if (!t) return;
+                    const px = t.x * TILE_SIZE;
+                    const py = t.y * TILE_SIZE;
+                    g.beginFill(0xFFB300, 0.14);
+                    g.drawRect(px + 2, py + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+                    g.endFill();
+                    g.lineStyle(2, 0xFFB300, 0.9);
+                    g.drawRect(px + 2, py + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+                    g.lineStyle(0);
+                });
+            }
+        }
+
+        if (hoverPath.length > 1) {
+            const trig = hoverMoveResolution?.trigger;
+            const safeEndIdx = trig ? Math.min(hoverPath.length - 1, trig.interceptIndex) : hoverPath.length - 1;
+
+            g.lineStyle(4, 0x00E5FF, 0.9);
+            for (let idx = 0; idx <= safeEndIdx; idx++) {
+                const pt = hoverPath[idx];
+                const cx = pt.x * TILE_SIZE + TILE_SIZE / 2;
+                const cy = pt.y * TILE_SIZE + TILE_SIZE / 2;
+                if (idx === 0) g.moveTo(cx, cy);
+                else g.lineTo(cx, cy);
+            }
+            g.lineStyle(0);
+
+            if (trig && safeEndIdx < hoverPath.length - 1) {
+                g.lineStyle(4, 0xFF5722, 0.9);
+                for (let idx = safeEndIdx; idx < hoverPath.length; idx++) {
+                    const pt = hoverPath[idx];
+                    const cx = pt.x * TILE_SIZE + TILE_SIZE / 2;
+                    const cy = pt.y * TILE_SIZE + TILE_SIZE / 2;
+                    if (idx === safeEndIdx) g.moveTo(cx, cy);
+                    else g.lineTo(cx, cy);
+                }
+                g.lineStyle(0);
+            }
+
+            for (let idx = 1; idx < hoverPath.length; idx++) {
+                const pt = hoverPath[idx];
+                const cx = pt.x * TILE_SIZE + TILE_SIZE / 2;
+                const cy = pt.y * TILE_SIZE + TILE_SIZE / 2;
+                const isIntercept = trig && idx === trig.interceptIndex;
+                const isDest = idx === hoverPath.length - 1;
+                const dotColor = isIntercept ? 0xFF5722 : isDest ? 0x00E5FF : 0xFFFFFF;
+                g.beginFill(dotColor, isIntercept || isDest ? 0.95 : 0.75);
+                g.drawCircle(cx, cy, isIntercept || isDest ? 7 : 4);
+                g.endFill();
+            }
+        }
+
+        const ht = tileById.get(hoveredTileId);
+        if (ht) {
+            g.beginFill(0xFFFFFF, 0.15);
+            g.drawRect(ht.x * TILE_SIZE, ht.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            g.endFill();
+            g.lineStyle(1, 0xFFFFFF, 0.5);
+            g.drawRect(ht.x * TILE_SIZE, ht.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            g.lineStyle(0);
+        }
+    }, [hoveredTileId, selectedTileId, units, settings.fogOfWar, currentPlayer, visibleTiles, mapData, weather, gridSize, tileById, hoverPath, hoverMoveResolution]);
+
+    return <Graphics draw={draw} eventMode="none" />;
+});
+
+/** Demand-driven + FPS-capped PixiJS Stage lifecycle controller (0% idle GPU in ECO mode). */
+const BattleRenderController: React.FC<{
+    fxMode: FxMode;
+    viewport: any;
+    unitsAnimKey: string;
+    sceneRenderDeps: unknown[];
+}> = ({ fxMode, viewport, unitsAnimKey, sceneRenderDeps }) => {
+    const app = useApp();
+    const hasProjectiles = useEffectStore(state => state.projectiles.length > 0);
+    const hasPopups = useEffectStore(state => state.damagePopups.length > 0);
+    const hasShake = useEffectStore(state => state.shakeIntensity > 0.05);
+    const activeFx = hasProjectiles || hasPopups || hasShake;
+
+    const wakeUntilRef = useRef<number>(0);
+    const singleRafRef = useRef<number | null>(null);
+    const fxModeRef = useRef<FxMode>(fxMode);
+    const activeFxRef = useRef<boolean>(activeFx);
+    fxModeRef.current = fxMode;
+    activeFxRef.current = activeFx;
+
+    const scheduleSingleFrame = useCallback(() => {
+        if (fxModeRef.current === 'LIVE') return;
+        if (singleRafRef.current !== null) return;
+        singleRafRef.current = requestAnimationFrame(() => {
+            singleRafRef.current = null;
+            if (!(app.renderer as any)?.destroyed) {
+                app.renderer.render(app.stage);
+            }
+        });
+    }, [app]);
+
+    const wake = useCallback((durationMs = 600) => {
+        if (fxModeRef.current === 'LIVE') {
+            if (!app.ticker.started) app.ticker.start();
+            return;
+        }
+        if (durationMs <= 0) {
+            scheduleSingleFrame();
+            return;
+        }
+        wakeUntilRef.current = Math.max(wakeUntilRef.current, performance.now() + durationMs);
+        if (!app.ticker.started) {
+            app.ticker.start();
+        }
+    }, [app, scheduleSingleFrame]);
+
+    // Stop PixiJS global Ticker.shared so no stray background RAF loop runs
+    useEffect(() => {
+        try {
+            PIXI.Ticker.shared.autoStart = false;
+            PIXI.Ticker.shared.stop();
+        } catch {
+            // Safe guard
+        }
+        return () => {
+            if (singleRafRef.current !== null) {
+                cancelAnimationFrame(singleRafRef.current);
+                singleRafRef.current = null;
+            }
+        };
+    }, []);
+
+    // Configure FPS cap + ECO idle auto-sleep ticker check
+    useEffect(() => {
+        app.ticker.maxFPS = fxMode === 'LIVE' ? 24 : 30;
+        if (fxMode === 'LIVE') {
+            app.ticker.start();
+            return;
+        }
+
+        const onTick = () => {
+            if (fxModeRef.current !== 'ECO') return;
+            if (!activeFxRef.current && performance.now() >= wakeUntilRef.current) {
+                wakeUntilRef.current = 0;
+                app.ticker.stop();
+                scheduleSingleFrame();
+            }
+        };
+        app.ticker.add(onTick);
+        // Kick off one clean initial settle window
+        wake(450);
+
+        return () => {
+            if ((app.ticker as any)?._head) {
+                app.ticker.remove(onTick);
+            }
+        };
+    }, [app, fxMode, wake, scheduleSingleFrame]);
+
+    // Wake for unit movement / spawns / combat FX
+    useEffect(() => {
+        wake(850);
+    }, [unitsAnimKey, wake]);
+
+    useEffect(() => {
+        if (activeFx) wake(1200);
+    }, [activeFx, wake]);
+
+    // Coalesced single-frame render on board/fog/selection/overlay changes
+    useEffect(() => {
+        scheduleSingleFrame();
+    }, [scheduleSingleFrame, ...sceneRenderDeps]);
+
+    // Wake smoothly during viewport pan/drag/zoom momentum & keyboard pan
+    useEffect(() => {
+        const unsubWake = subscribeRendererWake((ms) => {
+            if (ms && ms > 0) wake(ms);
+            else scheduleSingleFrame();
+        });
+
+        const onKey = (e: KeyboardEvent) => {
+            const k = e.key.toLowerCase();
+            if (k === 'w' || k === 'a' || k === 's' || k === 'd' || k.startsWith('arrow')) {
+                wake(550);
+            }
+        };
+        window.addEventListener('keydown', onKey);
+
+        const onVpActive = () => wake(550);
+        if (viewport) {
+            viewport.on('drag-start', onVpActive);
+            viewport.on('wheel-start', onVpActive);
+            viewport.on('pinch-start', onVpActive);
+            viewport.on('zoomed-start', onVpActive);
+            viewport.on('moved', onVpActive);
+            viewport.on('zoomed', onVpActive);
+        }
+
+        return () => {
+            unsubWake();
+            window.removeEventListener('keydown', onKey);
+            if (viewport && !viewport.destroyed) {
+                viewport.off('drag-start', onVpActive);
+                viewport.off('wheel-start', onVpActive);
+                viewport.off('pinch-start', onVpActive);
+                viewport.off('zoomed-start', onVpActive);
+                viewport.off('moved', onVpActive);
+                viewport.off('zoomed', onVpActive);
+            }
+        };
+    }, [viewport, wake, scheduleSingleFrame]);
+
+    return null;
+};
+
 export const GameRenderer = () => {
     const parentRef = useRef<HTMLDivElement>(null);
     const { setViewport, viewport } = useViewportContext();
     const [loaded, setLoaded] = useState(false);
     const [dimensions, setDimensions] = useState({ width: 200, height: 200 });
 
-    // State Selectors
+    // State Selectors (decoupled from hoveredTileId so cursor sweep never re-renders the whole Stage)
     const mapData = useGameStore(state => state.mapData);
     const units = useGameStore(state => state.units);
-    const gridSize = useGameStore(state => state.gridSize) || 20; 
+    const gridSize = useGameStore(state => state.gridSize) || 20;
     const handleTileClick = useGameStore(state => state.handleTileClick);
-    
-    // Debug sizing
-    useEffect(() => {
-        console.log(`[GameRenderer] Resize Debug: Width=${dimensions.width}, Height=${dimensions.height}, Grid=${gridSize}, Tile=${TILE_SIZE}`);
-    }, [dimensions, gridSize]);
 
     const setHoveredTile = useGameStore(state => state.setHoveredTile);
     const currentPlayer = useGameStore(state => state.currentPlayer);
     const visibleTiles = useGameStore(state => state.visibleTiles);
     const settings = useGameStore(state => state.settings);
     const selectedUnitId = useGameStore(state => state.selectedUnitId);
-    
+
     // Highlights
     const validMoveTiles = useGameStore(state => state.validMoveTiles);
-    const validMoveCosts = useGameStore(state => state.validMoveCosts);
     const validAttackTargets = useGameStore(state => state.validAttackTargets);
     const validSpawnTiles = useGameStore(state => state.validSpawnTiles);
     const selectedTileId = useGameStore(state => state.selectedTileId);
-    const hoveredTileId = useGameStore(state => state.hoveredTileId);
     const placementMode = useGameStore(state => state.placementMode);
-    const playerCp = useGameStore(state => state.playerCp);
     const selectNextReadyUnit = useGameStore(state => state.selectNextReadyUnit);
     const enterOverwatch = useGameStore(state => state.enterOverwatch);
-    
+
     // Actions
     const validSecureTile = useGameStore(state => state.validSecureTile);
     const validHeistTile = useGameStore(state => state.validHeistTile);
     const validSiegeTile = useGameStore(state => state.validSiegeTile);
     const validDemolishTile = useGameStore(state => state.validDemolishTile);
 
-    // Visual Effects
+    // Visual Effects & Render Mode
     const damagePopups = useEffectStore(state => state.damagePopups);
     const projectiles = useEffectStore(state => state.projectiles);
+    const fxMode = useEffectStore(state => state.fxMode);
 
     const terrainSig = useMemo(() => computeTerrainSignature(mapData, gridSize), [mapData, gridSize]);
     const bakedBoard = useMemo(() => bakeTacticalReconBoard(mapData, gridSize), [terrainSig]);
@@ -488,44 +797,12 @@ export const GameRenderer = () => {
     
     const weather = useGameStore(state => state.weather);
     const hitPlaneRef = useRef<PIXI.Graphics>(null);
-    const lastHoverRef = useRef<string | null>(hoveredTileId);
-    lastHoverRef.current = hoveredTileId;
+    const lastHoverRef = useRef<string | null>(null);
 
-    const hoverMoveResolution = useMemo(() => {
-        if (!selectedUnit || selectedUnit.owner !== currentPlayer || selectedUnit.hasMoved) return null;
-        if (!hoveredTileId || !validMoveCosts.has(hoveredTileId)) return null;
-        return resolveMoveWithOverwatch({
-            movingUnit: selectedUnit,
-            targetTileId: hoveredTileId,
-            mapData,
-            units,
-            weather,
-            gridSize,
-            fogOfWar: settings.fogOfWar,
-            maxBudget: playerCp[currentPlayer] ?? 0,
-            knownVisibleTiles: settings.fogOfWar ? visibleTiles : null
-        });
-    }, [selectedUnit, currentPlayer, hoveredTileId, validMoveCosts, mapData, units, weather, gridSize, settings.fogOfWar, playerCp, visibleTiles]);
-
-    const hoverPath = useMemo(() => {
-        if (hoverMoveResolution) return hoverMoveResolution.path;
-        if (!selectedUnit || selectedUnit.owner !== currentPlayer || selectedUnit.hasMoved) return [];
-        if (!hoveredTileId || !validMoveCosts.has(hoveredTileId)) return [];
-        const startTile = mapData.find(t => t.id === selectedUnit.tileId);
-        if (!startTile) return [];
-        return getMovePath(
-            startTile,
-            hoveredTileId,
-            playerCp[currentPlayer] ?? 0,
-            mapData,
-            units,
-            selectedUnit.type,
-            currentPlayer,
-            weather,
-            gridSize,
-            selectedUnit.rank ?? 0
-        );
-    }, [hoverMoveResolution, selectedUnit, currentPlayer, hoveredTileId, validMoveCosts, mapData, playerCp, units, weather, gridSize]);
+    const unitsAnimKey = useMemo(
+        () => units.map(u => `${u.id}:${u.tileId}:${u.hp}`).join('|'),
+        [units]
+    );
 
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
@@ -628,7 +905,7 @@ export const GameRenderer = () => {
         );
     }
 
-    const stageResolution = Math.min(window.devicePixelRatio || 1, 1.5);
+    const stageResolution = Math.min(window.devicePixelRatio || 1, fxMode === 'ECO' ? 1.25 : 1.5);
 
     return (
         <div ref={parentRef} style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
@@ -636,8 +913,40 @@ export const GameRenderer = () => {
             <Stage 
                 width={dimensions.width} 
                 height={dimensions.height} 
-                options={{ backgroundAlpha: 0, antialias: false, autoDensity: true, resolution: stageResolution }}
+                raf={fxMode === 'LIVE'}
+                renderOnComponentChange={false}
+                options={{
+                    background: 0xCFD7E4,
+                    backgroundAlpha: 1,
+                    antialias: false,
+                    autoDensity: true,
+                    powerPreference: 'low-power',
+                    resolution: stageResolution,
+                }}
             >
+                <BattleRenderController
+                    fxMode={fxMode}
+                    viewport={viewport}
+                    unitsAnimKey={unitsAnimKey}
+                    sceneRenderDeps={[
+                        dimensions,
+                        bakedBoard,
+                        mapData,
+                        units,
+                        visibleTiles,
+                        selectedTileId,
+                        validMoveTiles,
+                        validAttackTargets,
+                        validSpawnTiles,
+                        placementMode,
+                        validSecureTile,
+                        validHeistTile,
+                        validSiegeTile,
+                        validDemolishTile,
+                        validLootTile,
+                        weather,
+                    ]}
+                />
                 <GameViewport
                     width={dimensions.width}
                     height={dimensions.height}
@@ -658,8 +967,8 @@ export const GameRenderer = () => {
                             height={totalBoardSize}
                             eventMode="none"
                         />
-                        <AnimatedWaterLayer waterTiles={waterTiles} />
-                        <AnimatedBaseRadarLayer baseTiles={baseTiles} fogOfWar={settings.fogOfWar} visibleTiles={visibleTiles} />
+                        <AnimatedWaterLayer waterTiles={waterTiles} animate={fxMode === 'LIVE'} />
+                        <AnimatedBaseRadarLayer baseTiles={baseTiles} fogOfWar={settings.fogOfWar} visibleTiles={visibleTiles} animate={fxMode === 'LIVE'} />
                         <Graphics
                             ref={hitPlaneRef}
                             eventMode="static"
@@ -711,17 +1020,18 @@ export const GameRenderer = () => {
                         validAttackTargets={validAttackTargets}
                         validSpawnTiles={validSpawnTiles}
                         selectedTileId={selectedTileId}
-                        hoveredTileId={hoveredTileId}
+                        hoveredTileId={null}
                         placementMode={placementMode}
                         validSecureTile={validSecureTile}
                         validHeistTile={validHeistTile}
                         validSiegeTile={validSiegeTile}
                         validDemolishTile={validDemolishTile}
                         validLootTile={validLootTile}
-                        hoverPath={hoverPath}
-                        hoverMoveResolution={hoverMoveResolution}
+                        hoverPath={EMPTY_TILE_ARRAY}
+                        hoverMoveResolution={null}
                         gridSize={gridSize}
                     />
+                    <HoverOverlayLayer tileById={tileById} />
 
                     {/* 4. UNITS LAYER (No full-screen bloom filter -> 10x lighter GPU compositing) */}
                     <Container name="units">
@@ -764,7 +1074,7 @@ export const GameRenderer = () => {
                     <Container name="effects" eventMode="none">
                          {/* Selection Pulse */}
                          {selectedUnitPos && (
-                             <SelectionCursor x={selectedUnitPos.x} y={selectedUnitPos.y} />
+                             <SelectionCursor x={selectedUnitPos.x} y={selectedUnitPos.y} pulse={fxMode === 'LIVE'} />
                          )}
 
                          {/* Projectiles */}

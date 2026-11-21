@@ -12,9 +12,10 @@ import { MapControls } from './src/components/game/ui/MapControls';
 import { GeoButton, GeoCard, GeoChip } from './src/components/ui/GeoPrimitives';
 import { canUnitAttackFromTile } from './src/core/rules/CombatRules';
 import { SoundFX } from './src/core/audio/SoundFX';
+import { useEffectStore } from './src/store/useEffectStore';
 import { PLAYER_UI_THEME } from './src/components/ui/GeoPrimitives';
 
-const TopBattleGuidanceBar: React.FC = () => {
+const TopBattleGuidanceBar: React.FC = React.memo(() => {
   const currentPlayer = useGameStore(state => state.currentPlayer);
   const isAiTurn = useGameStore(state => state.isAiTurn);
   const winner = useGameStore(state => state.winner);
@@ -27,6 +28,8 @@ const TopBattleGuidanceBar: React.FC = () => {
   const selectedInventoryItemIndex = useGameStore(state => state.selectedInventoryItemIndex);
   const selectedGraveyardUnitId = useGameStore(state => state.selectedGraveyardUnitId);
   const resetGame = useGameStore(state => state.resetGame);
+  const fxMode = useEffectStore(state => state.fxMode);
+  const toggleFxMode = useEffectStore(state => state.toggleFxMode);
   const [muted, setMuted] = useState(() => SoundFX.isMuted());
 
   const toggleMute = () => {
@@ -108,6 +111,14 @@ const TopBattleGuidanceBar: React.FC = () => {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
           <GeoButton
+            onClick={toggleFxMode}
+            variant={fxMode === 'ECO' ? 'softMint' : 'softBlue'}
+            title={fxMode === 'ECO' ? 'Eco Graphics: Zero-Idle GPU Mode (Switch to Live 24fps FX)' : 'Live FX: Continuous Water & Weather @ 24fps (Switch to Eco Mode)'}
+            coreStyle={{ padding: '4px 10px' }}
+          >
+            {fxMode === 'ECO' ? 'FX: ECO' : 'FX: LIVE'}
+          </GeoButton>
+          <GeoButton
             onClick={toggleMute}
             variant={muted ? 'default' : 'softBlue'}
             title={muted ? 'Unmute Sound Effects' : 'Mute Sound Effects'}
@@ -126,7 +137,7 @@ const TopBattleGuidanceBar: React.FC = () => {
       </div>
     </GeoCard>
   );
-};
+});
 
 const App = () => {
   const currentScreen = useGameStore(state => state.currentScreen);

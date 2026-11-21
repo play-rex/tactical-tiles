@@ -1,6 +1,7 @@
 import React from 'react';
 import { useViewportContext } from '../../../context/ViewportContext';
 import { useGameStore } from '../../../store/useGameStore';
+import { wakeBattleRenderer } from '../../../store/useEffectStore';
 import { GeoButton, GeoCard } from '../../ui/GeoPrimitives';
 
 const Swatch: React.FC<{ color: string; label: string }> = ({ color, label }) => (
@@ -24,6 +25,7 @@ export const MapControls: React.FC = () => {
 
   const handleZoomIn = () => {
     if (!viewport) return;
+    wakeBattleRenderer(500);
     viewport.animate({
       time: 350,
       scale: viewport.scale.x * 1.4,
@@ -33,6 +35,7 @@ export const MapControls: React.FC = () => {
 
   const handleZoomOut = () => {
     if (!viewport) return;
+    wakeBattleRenderer(500);
     viewport.animate({
       time: 350,
       scale: viewport.scale.x * 0.72,
@@ -42,6 +45,7 @@ export const MapControls: React.FC = () => {
 
   const handleReset = () => {
     if (!viewport) return;
+    wakeBattleRenderer(450);
     viewport.plugins.remove('animate');
     viewport.fit();
     viewport.moveCenter(viewport.worldWidth / 2, viewport.worldHeight / 2);

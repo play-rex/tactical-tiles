@@ -524,6 +524,7 @@ export const WeatherSystem: React.FC<WeatherSystemProps> = ({ width, height, vie
     useEffect(() => {
         if (engineRef.current && mapData && weather) {
             engineRef.current.setZoneData(mapData, weather);
+            engineRef.current.update(1);
         }
     }, [mapData, weather]);
 

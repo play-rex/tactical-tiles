@@ -24,11 +24,6 @@ export const DamageText: React.FC<DamageTextProps> = ({ data }) => {
         fill: [data.color, '#eeeeee'],
         stroke: '#000000',
         strokeThickness: 4,
-        dropShadow: true,
-        dropShadowColor: '#000000',
-        dropShadowBlur: 2,
-        dropShadowAngle: Math.PI / 6,
-        dropShadowDistance: 2,
     }), [data.color]);
 
     useTick((delta) => {

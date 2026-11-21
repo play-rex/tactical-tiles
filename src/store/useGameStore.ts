@@ -720,9 +720,14 @@ export const useGameStore = create<GameStore>((set, get) => ({
   loadMapIntoEditor: (map: SavedMap) => set({ currentScreen: 'EDITOR', mapToEdit: map }),
 
   loadMapAndStart: (customMap: Tile[]) => {
-      // 1. Deep Copy the map data to avoid mutating original presets
-      const rawCopy = JSON.parse(JSON.stringify(customMap)) as Tile[];
-      const zonedMap = JSON.parse(JSON.stringify(customMap)) as Tile[];
+      // 1. Copy the map data quickly without slow JSON stringify/parse serialization
+      const cloneTiles = (tiles: Tile[]): Tile[] =>
+          tiles.map(t => ({
+              ...t,
+              capturedByOwners: t.capturedByOwners ? [...t.capturedByOwners] : undefined,
+          }));
+      const rawCopy = cloneTiles(customMap);
+      const zonedMap = cloneTiles(customMap);
       
       const tileCount = zonedMap.length;
       const mapSize = Math.sqrt(tileCount);

@@ -1,7 +1,7 @@
 
 import { Unit, Tile, AIDifficulty, WeatherState } from '../types';
 import { UNIT_STATS } from '../constants/Config';
-import { getManhattanDistance, hasLineOfSight } from '../grid/Pathfinding';
+import { getManhattanDistance, getTileByIdFast, hasLineOfSight } from '../grid/Pathfinding';
 import { calculateAttackOutcome, canUnitAttackFromTile, getUnitRange } from '../rules/CombatRules';
 
 interface CombatSimulationResult {
@@ -11,9 +11,9 @@ interface CombatSimulationResult {
     hitChance: number;
 }
 
-const simulateCombat = (attacker: Unit, target: Unit, mapData: Tile[]): CombatSimulationResult => {
-    const attTile = mapData.find(t => t.id === attacker.tileId);
-    const tarTile = mapData.find(t => t.id === target.tileId);
+const simulateCombat = (attacker: Unit, target: Unit, mapData: Tile[], gridSize: number): CombatSimulationResult => {
+    const attTile = getTileByIdFast(mapData, attacker.tileId, gridSize);
+    const tarTile = getTileByIdFast(mapData, target.tileId, gridSize);
 
     if (!attTile || !tarTile) return { damageDealt: 0, potentialDamage: 0, isKill: false, hitChance: 0 };
 
@@ -36,14 +36,14 @@ export const findBestTarget = (
     gridSize: number
 ): { unit: Unit, score: number } | null => {
     const enemies = allUnits.filter(u => u.owner !== attacker.owner);
-    const attTile = mapData.find(t => t.id === attacker.tileId);
+    const attTile = getTileByIdFast(mapData, attacker.tileId, gridSize);
     if (!attTile || !canUnitAttackFromTile(attacker, attTile)) return null;
 
     const effectiveRange = getUnitRange(attacker, mapData, weather);
 
     // Filter valid targets (Range & LOS)
     const validTargets = enemies.filter(enemy => {
-        const enemyTile = mapData.find(t => t.id === enemy.tileId);
+        const enemyTile = getTileByIdFast(mapData, enemy.tileId, gridSize);
         if (!enemyTile) return false;
         
         const dist = getManhattanDistance(attTile, enemyTile);
@@ -57,8 +57,8 @@ export const findBestTarget = (
     // --- EASY MODE: Just Closest ---
     if (difficulty === 'EASY') {
         const closest = validTargets.sort((a, b) => {
-            const ta = mapData.find(t => t.id === a.tileId)!;
-            const tb = mapData.find(t => t.id === b.tileId)!;
+            const ta = getTileByIdFast(mapData, a.tileId, gridSize)!;
+            const tb = getTileByIdFast(mapData, b.tileId, gridSize)!;
             return getManhattanDistance(attTile, ta) - getManhattanDistance(attTile, tb);
         })[0];
         return { unit: closest, score: 50 };
@@ -70,7 +70,7 @@ export const findBestTarget = (
 
     validTargets.forEach(target => {
         let score = 0;
-        const sim = simulateCombat(attacker, target, mapData);
+        const sim = simulateCombat(attacker, target, mapData, gridSize);
 
         // 1. DAMAGE & KILLS
         if (sim.isKill) {

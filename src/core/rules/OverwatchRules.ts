@@ -4,6 +4,7 @@ import {
     getManhattanDistance,
     getMovePath,
     getStepCost,
+    getTileByIdFast,
     hasOverwatchLineOfSight
 } from '../grid/Pathfinding';
 import {
@@ -41,7 +42,7 @@ export const getOverwatchCoverageTiles = (
     gridSize: number
 ): Set<string> => {
     const covered = new Set<string>();
-    const origin = mapData.find(t => t.id === overwatcher.tileId);
+    const origin = getTileByIdFast(mapData, overwatcher.tileId, gridSize);
     if (!origin || !canUnitAttackFromTile(overwatcher, origin) || overwatcher.ammo <= 0) {
         return covered;
     }
@@ -80,6 +81,10 @@ export const resolveMoveWithOverwatch = (params: {
     fogOfWar: boolean;
     maxBudget: number;
     knownVisibleTiles?: Set<string> | null;
+    precomputedPath?: Tile[];
+    precomputedEnemyOverwatchers?: Unit[];
+    knownTeamVisByOwner?: Map<number, Set<string>>;
+    knownCoverageByOverwatcher?: Map<string, Set<string>>;
 }): OverwatchMoveResolution => {
     const {
         movingUnit,
@@ -90,15 +95,19 @@ export const resolveMoveWithOverwatch = (params: {
         gridSize,
         fogOfWar,
         maxBudget,
-        knownVisibleTiles = null
+        knownVisibleTiles = null,
+        precomputedPath,
+        precomputedEnemyOverwatchers,
+        knownTeamVisByOwner,
+        knownCoverageByOverwatcher
     } = params;
 
-    const startTile = mapData.find(t => t.id === movingUnit.tileId);
+    const startTile = getTileByIdFast(mapData, movingUnit.tileId, gridSize);
     if (!startTile) {
         return { path: [], trigger: null, finalTile: null, finalIndex: 0, actualCost: 0, haltedEarly: false };
     }
 
-    const path = getMovePath(
+    const path = precomputedPath ?? getMovePath(
         startTile,
         targetTileId,
         maxBudget,
@@ -121,7 +130,7 @@ export const resolveMoveWithOverwatch = (params: {
         cumulativeCosts.push(cumulativeCosts[i - 1] + step);
     }
 
-    const enemyOverwatchers = units.filter(u =>
+    const enemyOverwatchers = precomputedEnemyOverwatchers ?? units.filter(u =>
         u.owner !== movingUnit.owner &&
         u.isOverwatching === true &&
         u.ammo > 0 &&
@@ -140,7 +149,7 @@ export const resolveMoveWithOverwatch = (params: {
         };
     }
 
-    const visByPlayer = new Map<number, Set<string>>();
+    const visByPlayer = knownTeamVisByOwner ?? new Map<number, Set<string>>();
     const getTeamVis = (owner: number): Set<string> => {
         let vis = visByPlayer.get(owner);
         if (!vis) {
@@ -159,11 +168,16 @@ export const resolveMoveWithOverwatch = (params: {
         const eligible: { overwatcher: Unit; damage: number; dist: number }[] = [];
 
         for (const ow of enemyOverwatchers) {
-            const owTile = mapData.find(t => t.id === ow.tileId);
+            const preCoverage = knownCoverageByOverwatcher?.get(ow.id);
+            if (preCoverage && !preCoverage.has(stepTile.id)) continue;
+
+            const owTile = getTileByIdFast(mapData, ow.tileId, gridSize);
             if (!owTile || !canUnitAttackFromTile(ow, owTile)) continue;
             const dist = getManhattanDistance(owTile, stepTile);
-            if (dist > getUnitRange(ow, mapData, weather)) continue;
-            if (!hasOverwatchLineOfSight(owTile, stepTile, mapData, ow.type, weather, gridSize)) continue;
+            if (!preCoverage) {
+                if (dist > getUnitRange(ow, mapData, weather)) continue;
+                if (!hasOverwatchLineOfSight(owTile, stepTile, mapData, ow.type, weather, gridSize)) continue;
+            }
             if (fogOfWar && !getTeamVis(ow.owner).has(stepTile.id)) continue;
 
             const outcome = calculateOverwatchOutcome(ow, owTile, stepTile, movingUnit.owner, movingUnit);
