@@ -1,383 +1,317 @@
-
 import React, { useState } from 'react';
 import { useGameStore } from '../store/useGameStore';
-import { UNIT_STATS, TERRAIN_DEFENSE, TERRAIN_COSTS, UNIT_COSTS, CP_SYSTEM, BASE_STATS, BANK_STATS, VETERANCY_CONFIG, OVERWATCH_STATS } from '../core/constants/Config';
+import {
+  UNIT_STATS,
+  TERRAIN_DEFENSE,
+  TERRAIN_COSTS,
+  UNIT_COSTS,
+  CP_SYSTEM,
+  BASE_STATS,
+  BANK_STATS,
+  VETERANCY_CONFIG,
+  OVERWATCH_STATS,
+} from '../core/constants/Config';
 import { UnitType } from '../core/types';
+import { GeoButton, GeoCard, GeoChip, GeoWell } from '../components/ui/GeoPrimitives';
 
-const TabButton = ({ label, active, onClick }: { label: string, active: boolean, onClick: () => void }) => (
-    <button 
-        onClick={onClick}
+const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+  <GeoCard style={{ marginBottom: '20px' }}>
+    <div style={{ padding: '20px' }}>
+      <h3
         style={{
-            flex: 1, padding: '15px',
-            background: active ? '#2196F3' : '#222',
-            color: active ? 'white' : '#888',
-            border: 'none',
-            fontSize: '16px', fontWeight: 'bold',
-            cursor: 'pointer',
-            transition: 'background 0.2s',
-            borderBottom: active ? '4px solid #1565C0' : '4px solid #111'
+          color: 'var(--acc-mint-ink)',
+          borderBottom: '1.5px solid var(--op-line)',
+          paddingBottom: '8px',
+          marginTop: 0,
+          marginBottom: '14px',
+          fontSize: '15px',
+          fontWeight: 900,
+          letterSpacing: '0.6px',
         }}
+      >
+        {title}
+      </h3>
+      {children}
+    </div>
+  </GeoCard>
+);
+
+const StatRow: React.FC<{ label: string; value: string | number }> = ({ label, value }) => (
+  <div
+    style={{
+      display: 'flex',
+      justifyContent: 'space-between',
+      padding: '6px 0',
+      borderBottom: '1px solid var(--op-line)',
+      fontSize: '13px',
+    }}
+  >
+    <span style={{ color: 'var(--op-ink-muted)', fontWeight: 600 }}>{label}</span>
+    <span style={{ fontWeight: 800, color: 'var(--op-ink)' }}>{value}</span>
+  </div>
+);
+
+export const HowToPlay: React.FC = () => {
+  const exitTutorial = useGameStore(state => state.exitTutorial);
+  const [activeTab, setActiveTab] = useState<'GUIDE' | 'INTEL'>('GUIDE');
+
+  return (
+    <div
+      className="opgeo-stage"
+      style={{
+        width: '100vw',
+        height: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        padding: '12px',
+        gap: '12px',
+        overflow: 'hidden',
+      }}
     >
-        {label}
-    </button>
-);
+      {/* Top Manual Bar */}
+      <GeoCard>
+        <div
+          style={{
+            padding: '10px 18px',
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 900, letterSpacing: '0.8px' }}>
+              TACTICAL FIELD MANUAL
+            </h2>
+            <GeoChip variant="softAmber">CLASSIFIED BRIEFING</GeoChip>
+          </div>
 
-interface SectionProps {
-    title: string;
-    children: React.ReactNode;
-}
-
-const Section: React.FC<SectionProps> = ({ title, children }) => (
-    <div style={{ marginBottom: '40px', background: 'rgba(255,255,255,0.02)', padding: '20px', borderRadius: '8px', border: '1px solid #333' }}>
-        <h3 style={{ color: '#4CAF50', borderBottom: '1px solid #444', paddingBottom: '10px', marginTop: 0, letterSpacing: '1px' }}>{title}</h3>
-        {children}
-    </div>
-);
-
-const StatRow = ({ label, value }: { label: string, value: string | number }) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #333' }}>
-        <span style={{ color: '#aaa' }}>{label}</span>
-        <span style={{ fontWeight: 'bold', color: 'white' }}>{value}</span>
-    </div>
-);
-
-export const HowToPlay = () => {
-    const exitTutorial = useGameStore(state => state.exitTutorial);
-    const [activeTab, setActiveTab] = useState<'GUIDE' | 'INTEL'>('GUIDE');
-
-    return (
-        <div style={{ 
-            width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column',
-            background: '#0a0a0a', color: 'white', fontFamily: "'Segoe UI', sans-serif"
-        }}>
-            {/* Header */}
-            <div style={{ 
-                height: '70px', background: '#111', borderBottom: '1px solid #333', 
-                display: 'flex', alignItems: 'center', padding: '0 30px', justifyContent: 'space-between',
-                boxShadow: '0 4px 10px rgba(0,0,0,0.5)', zIndex: 10
-            }}>
-                <div>
-                    <h2 style={{ margin: 0, letterSpacing: '2px', color: '#fff' }}>TACTICAL FIELD MANUAL</h2>
-                    <div style={{ fontSize: '11px', color: '#666', letterSpacing: '1px' }}>CLASSIFIED: EYES ONLY</div>
-                </div>
-                <button 
-                    onClick={exitTutorial}
-                    style={{ 
-                        padding: '12px 24px', background: '#D32F2F', color: 'white', 
-                        border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer',
-                        boxShadow: '0 2px 5px rgba(0,0,0,0.4)'
-                    }}
-                >
-                    RETURN TO OPERATIONS
-                </button>
-            </div>
-
-            {/* Tabs */}
-            <div style={{ display: 'flex', background: '#1a1a1a', borderBottom: '1px solid #333' }}>
-                <TabButton label="MISSION BRIEFING (GAMEPLAY)" active={activeTab === 'GUIDE'} onClick={() => setActiveTab('GUIDE')} />
-                <TabButton label="TECHNICAL SPECS (STATS)" active={activeTab === 'INTEL'} onClick={() => setActiveTab('INTEL')} />
-            </div>
-
-            {/* Content Area */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '40px', maxWidth: '1000px', margin: '0 auto', width: '100%', boxSizing: 'border-box' }}>
-                
-                {activeTab === 'GUIDE' && (
-                    <div className="guide-content">
-                        
-                        {/* 1. CORE LOOP */}
-                        <Section title="1. CORE COMBAT LOOP">
-                            <p style={{ lineHeight: '1.6', color: '#ddd', fontSize: '15px' }}>
-                                Commander, your goal is to secure the sector using a squad of elite specialists. The battlefield is grid-based and turn-based. Victory requires careful management of your <strong>Command Points (CP)</strong> and tactical positioning. (Player 1 starts Round 1 with {CP_SYSTEM.P1_ROUND1_CP} CP to balance opening initiative; all players regenerate {CP_SYSTEM.REGEN_AMOUNT} CP per turn up to {CP_SYSTEM.MAX_CP}.)
-                            </p>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '15px', marginTop: '20px' }}>
-                                <div style={{ background: '#222', padding: '15px', borderRadius: '6px', textAlign: 'center' }}>
-                                    <div style={{ fontSize: '24px', marginBottom: '10px' }}>🚀</div>
-                                    <strong style={{ color: '#4CAF50' }}>DEPLOY</strong>
-                                    <p style={{ fontSize: '12px', color: '#aaa' }}>Spawn units from your Base using Gold.</p>
-                                </div>
-                                <div style={{ background: '#222', padding: '15px', borderRadius: '6px', textAlign: 'center' }}>
-                                    <div style={{ fontSize: '24px', marginBottom: '10px' }}>🏃</div>
-                                    <strong style={{ color: '#2196F3' }}>MANEUVER</strong>
-                                    <p style={{ fontSize: '12px', color: '#aaa' }}>Spend CP to move. Terrain affects cost.</p>
-                                </div>
-                                <div style={{ background: '#222', padding: '15px', borderRadius: '6px', textAlign: 'center' }}>
-                                    <div style={{ fontSize: '24px', marginBottom: '10px' }}>🎯</div>
-                                    <strong style={{ color: '#D32F2F' }}>ENGAGE</strong>
-                                    <p style={{ fontSize: '12px', color: '#aaa' }}>Attack enemies or siege bases. Requires Line of Sight.</p>
-                                </div>
-                                <div style={{ background: '#222', padding: '15px', borderRadius: '6px', textAlign: 'center' }}>
-                                    <div style={{ fontSize: '24px', marginBottom: '10px' }}>💰</div>
-                                    <strong style={{ color: '#FFD700' }}>ECONOMY</strong>
-                                    <p style={{ fontSize: '12px', color: '#aaa' }}>Heist Banks and Secure Buildings for bonuses.</p>
-                                </div>
-                            </div>
-                        </Section>
-
-                        {/* 2. GAME MODES */}
-                        <Section title="2. OPERATIONAL MODES">
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                                <div>
-                                    <h4 style={{ color: '#FFD700', margin: '0 0 5px 0' }}>👑 CONQUER MODE</h4>
-                                    <p style={{ margin: 0, color: '#ccc', fontSize: '14px' }}>
-                                        <strong>Objective:</strong> Destroy the enemy <strong>HEADQUARTERS (BASE)</strong>.
-                                        <br/>
-                                        The Enemy Base has <strong>{BASE_STATS.HP} HP</strong> (20% armored cover). Higher-damage units (Snipers/Breachers) and Watchtower positions deal substantially stronger siege damage.
-                                    </p>
-                                </div>
-                                <div>
-                                    <h4 style={{ color: '#FF5722', margin: '0 0 5px 0' }}>☠️ DEATHMATCH (DOOMSDAY)</h4>
-                                    <p style={{ margin: 0, color: '#ccc', fontSize: '14px' }}>
-                                        <strong>Objective:</strong> Eliminate <strong>ALL</strong> enemy units.
-                                        <br/>
-                                        <strong>Warning:</strong> The "Doomsday Protocol" initiates at Turn 30. The map edges will turn to <strong>LAVA</strong>, shrinking the play area every 5 turns. Any unit caught in the lava is instantly destroyed.
-                                    </p>
-                                </div>
-                            </div>
-                        </Section>
-
-                        {/* 3. DEFENSE SYSTEMS */}
-                        <Section title="3. INFRASTRUCTURE & DEFENSES">
-                            <p style={{ color: '#aaa', fontSize: '14px', fontStyle: 'italic', marginBottom: '15px' }}>
-                                Intelligence Report: Neutral structures are no longer passive. They are equipped with automated defense turrets.
-                            </p>
-                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
-                                <thead>
-                                    <tr style={{ borderBottom: '2px solid #444', color: '#888', textAlign: 'left' }}>
-                                        <th style={{ padding: '10px' }}>Structure</th>
-                                        <th style={{ padding: '10px' }}>Function</th>
-                                        <th style={{ padding: '10px' }}>Defense System (Automated)</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr style={{ borderBottom: '1px solid #333' }}>
-                                        <td style={{ padding: '15px', fontWeight: 'bold', color: '#FFD700' }}>BANK VAULT</td>
-                                        <td style={{ padding: '15px', color: '#ccc' }}>
-                                            Contains massive Gold reserves. 
-                                            <br/><span style={{fontSize:'12px', color:'#aaa'}}>Action: <strong>HEIST (4 CP)</strong> to loot.</span>
-                                        </td>
-                                        <td style={{ padding: '15px', color: '#F44336' }}>
-                                            <strong>Proximity Turret</strong>
-                                            <ul style={{ margin: '5px 0', paddingLeft: '20px', fontSize:'13px' }}>
-                                                <li>Range: <strong>{BANK_STATS.RANGE} Tiles</strong></li>
-                                                <li>Damage: <strong>{BANK_STATS.DAMAGE} per Turn</strong></li>
-                                                <li><em>Status: Attacks closest unit until Hacked/Looted.</em></li>
-                                            </ul>
-                                        </td>
-                                    </tr>
-                                    <tr>
-                                        <td style={{ padding: '15px', fontWeight: 'bold', color: '#2196F3' }}>HEADQUARTERS (BASE)</td>
-                                        <td style={{ padding: '15px', color: '#ccc' }}>
-                                            Spawn point for reinforcements.
-                                            <br/><span style={{fontSize:'12px', color:'#aaa'}}>Primary target in Conquer Mode.</span>
-                                        </td>
-                                        <td style={{ padding: '15px', color: '#F44336' }}>
-                                            <strong>Heavy Artillery</strong>
-                                            <ul style={{ margin: '5px 0', paddingLeft: '20px', fontSize:'13px' }}>
-                                                <li>Range: <strong>{BASE_STATS.RANGE} Tiles</strong></li>
-                                                <li>Damage: <strong>{BASE_STATS.MIN_DMG}-{BASE_STATS.MAX_DMG} per Turn</strong></li>
-                                                <li><em>Status: Fires at enemies threatening the base.</em></li>
-                                            </ul>
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </Section>
-
-                        {/* 4. WEATHER ZONES */}
-                        <Section title="4. METEOROLOGICAL ZONES">
-                            <p style={{ color: '#ccc', fontSize: '14px', marginBottom: '20px' }}>
-                                The battlefield is divided into "Voronoi Zones" controlled by local weather systems. Weather shifts every <strong>5 Turns</strong>.
-                            </p>
-                            <div style={{ overflowX: 'auto' }}>
-                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px', textAlign: 'left' }}>
-                                    <thead>
-                                        <tr style={{ background: '#333', color: '#fff' }}>
-                                            <th style={{ padding: '12px' }}>Type</th>
-                                            <th style={{ padding: '12px' }}>Visual</th>
-                                            <th style={{ padding: '12px' }}>Tactical Effect</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <tr style={{ background: '#1a1a1a', borderBottom: '1px solid #333' }}>
-                                            <td style={{ padding: '12px', fontWeight: 'bold', color: '#ff9800' }}>SCORCHED</td>
-                                            <td style={{ padding: '12px' }}>Heat Haze / Orange</td>
-                                            <td style={{ padding: '12px', color: '#ccc' }}>
-                                                Extreme Heat.
-                                                <div style={{ color: '#ff9800', marginTop:'4px' }}>• Movement Cost on PLAINS & SAND increased by +1 CP.</div>
-                                            </td>
-                                        </tr>
-                                        <tr style={{ background: '#222', borderBottom: '1px solid #333' }}>
-                                            <td style={{ padding: '12px', fontWeight: 'bold', color: '#90caf9' }}>MONSOON</td>
-                                            <td style={{ padding: '12px' }}>Rain / Blue Tint</td>
-                                            <td style={{ padding: '12px', color: '#ccc' }}>
-                                                Muddy Terrain.
-                                                <div style={{ color: '#90caf9', marginTop:'4px' }}>• Heavy Units (Breachers) pay 2x Move Cost on Plains.</div>
-                                            </td>
-                                        </tr>
-                                        <tr style={{ background: '#1a1a1a', borderBottom: '1px solid #333' }}>
-                                            <td style={{ padding: '12px', fontWeight: 'bold', color: '#cfd8dc' }}>FOG</td>
-                                            <td style={{ padding: '12px' }}>Grey Mist</td>
-                                            <td style={{ padding: '12px', color: '#ccc' }}>
-                                                Low Visibility.
-                                                <div style={{ color: '#cfd8dc', marginTop:'4px' }}>• Vision Range capped at 2 Tiles.</div>
-                                                <div style={{ color: '#cfd8dc' }}>• Snipers are effectively neutralized.</div>
-                                            </td>
-                                        </tr>
-                                        <tr style={{ background: '#222', borderBottom: '1px solid #333' }}>
-                                            <td style={{ padding: '12px', fontWeight: 'bold', color: '#69f0ae' }}>TAILWIND</td>
-                                            <td style={{ padding: '12px' }}>Green Breeze</td>
-                                            <td style={{ padding: '12px', color: '#ccc' }}>
-                                                High Winds.
-                                                <div style={{ color: '#69f0ae', marginTop:'4px' }}>• All Units: +1 Attack Range.</div>
-                                                <div style={{ color: '#69f0ae' }}>• Plains Movement Cost reduced to 0.5 CP.</div>
-                                            </td>
-                                        </tr>
-                                        <tr style={{ background: '#1a1a1a', borderBottom: '1px solid #333' }}>
-                                            <td style={{ padding: '12px', fontWeight: 'bold', color: '#D4A35B' }}>SANDSTORM</td>
-                                            <td style={{ padding: '12px' }}>Brown Dust</td>
-                                            <td style={{ padding: '12px', color: '#ccc' }}>
-                                                Blinding Dust.
-                                                <div style={{ color: '#D4A35B', marginTop:'4px' }}>• Vision Range capped at 3 Tiles.</div>
-                                            </td>
-                                        </tr>
-                                        <tr style={{ background: '#222' }}>
-                                            <td style={{ padding: '12px', fontWeight: 'bold', color: '#fff' }}>CLEAR</td>
-                                            <td style={{ padding: '12px' }}>Standard</td>
-                                            <td style={{ padding: '12px', color: '#ccc' }}>No modifiers. Standard engagement rules apply.</td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </Section>
-
-                        {/* 5. SHOP */}
-                         <Section title="5. LOGISTICS (FIELD SHOP)">
-                            <p style={{ color: '#ddd', fontSize: '14px' }}>
-                                Access the FIELD SHOP in the bottom right panel to order supply drops.
-                            </p>
-                            <ul style={{ color: '#ccc', fontSize: '14px', lineHeight: '1.8' }}>
-                                <li><strong>Ammo Drop (50 Gold):</strong> Restores full ammo. Delivered via pod 3-9 tiles from base.</li>
-                                <li><strong>Medkit (100 Gold):</strong> Fully heals a unit. Delivered via pod 3-9 tiles from base.</li>
-                                <li><strong>Field Reload (5 CP):</strong> Emergency unit action restoring 50% max ammo on the spot (ends that unit's turn).</li>
-                            </ul>
-                            <p style={{ color: '#F44336', fontSize: '12px', fontStyle: 'italic', marginTop: '10px' }}>
-                                <strong>RETRIEVAL PROTOCOL:</strong> <br/>
-                                Supply pods do not activate automatically. A unit must be adjacent to (or on) the pod and spend <strong>4 CP</strong> to execute a "RETRIEVE SUPPLY" action.
-                            </p>
-                        </Section>
-
-                        {/* 6. VETERANCY & SEEDS */}
-                        <Section title="6. UNIT VETERANCY & SECTOR SEEDS">
-                            <p style={{ color: '#ddd', fontSize: '14px', lineHeight: '1.6' }}>
-                                Surviving units earn Combat XP from attacks (+1 XP), kills (+2 XP, or +3 XP vs Elite/Ace), Bank Heists (+2 XP), Base Destruction (+2 XP), and first-time Building captures (+1 XP). Respawned units reset to Recruit.
-                            </p>
-                            <ul style={{ color: '#ccc', fontSize: '14px', lineHeight: '1.8' }}>
-                                <li><strong style={{ color: '#FFD700' }}>★ Veteran ({VETERANCY_CONFIG.XP_THRESHOLDS[1]} XP):</strong> +20% Max HP (heals gained HP) and +2 Max Ammo (Scout/Breacher) or +1 Max Ammo (Sniper).</li>
-                                <li><strong style={{ color: '#FFD700' }}>★★ Elite ({VETERANCY_CONFIG.XP_THRESHOLDS[2]} XP):</strong> Scout gains +1 Vision & ignores SCORCHED/MONSOON Plains penalties; Breacher takes -{VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG in cover terrain; Sniper gains +{VETERANCY_CONFIG.ELITE_SNIPER_DMG_BONUS} DMG & 7 CP shots.</li>
-                                <li><strong style={{ color: '#FFD700' }}>★★★ Ace ({VETERANCY_CONFIG.XP_THRESHOLDS[3]} XP):</strong> +20% additional Max HP; Scout +{VETERANCY_CONFIG.ACE_SCOUT_DMG_BONUS} DMG & 2 CP shots; Breacher +{VETERANCY_CONFIG.ACE_BREACHER_DMG_BONUS} DMG & pierces Base Armor; Sniper moves on Mountain/Dunes for 1 CP. Eliminating an Ace pays <strong>+${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} Bounty Gold</strong>.</li>
-                            </ul>
-                            <p style={{ color: '#90CAF9', fontSize: '13px', lineHeight: '1.6', marginTop: '10px' }}>
-                                <strong>Sector Seeds & Scorecard:</strong> Every procedural battlefield uses a shareable Sector Seed displayed in the top-left HUD. Victories are graded S–D on Speed vs Par, Preservation, and Objectives (Easy AI is capped below S-Rank).
-                            </p>
-                        </Section>
-
-                        {/* 7. OVERWATCH */}
-                        <Section title="7. OVERWATCH & FOG AMBUSH">
-                            <p style={{ color: '#ddd', fontSize: '14px', lineHeight: '1.6' }}>
-                                Ready units with ammo (and valid firing terrain for Snipers) can enter <strong>Overwatch (O key)</strong> to ambush moving enemies during the opponent&apos;s turn.
-                            </p>
-                            <ul style={{ color: '#ccc', fontSize: '14px', lineHeight: '1.8' }}>
-                                <li><strong>Stance Costs & Refunds:</strong> Scout {OVERWATCH_STATS.SOLDIER.cost} CP ({OVERWATCH_STATS.SOLDIER.damage} DMG, +{OVERWATCH_STATS.SOLDIER.refund} CP unfired refund) • Breacher {OVERWATCH_STATS.ASSAULTER.cost} CP ({OVERWATCH_STATS.ASSAULTER.damage} DMG, +{OVERWATCH_STATS.ASSAULTER.refund} CP refund) • Sniper {OVERWATCH_STATS.SNIPER.cost} CP ({OVERWATCH_STATS.SNIPER.damage} DMG, +{OVERWATCH_STATS.SNIPER.refund} CP refund, clamped to {CP_SYSTEM.MAX_CP} CP).</li>
-                                <li><strong>Interception & Pinning:</strong> Fires once on the first tile an enemy enters inside your Overwatch line, pinning them on the spot (charging only the CP walked). <strong>★★ Elite Breachers</strong> resist pinning and complete their move.</li>
-                                <li><strong>Counterplay:</strong> Dealing <em>any</em> damage immediately cancels Overwatch (<strong>SUPPRESSED!</strong>). Deployed <strong>Barriers</strong>, <strong>Fog</strong>, and <strong>Sandstorms</strong> block Overwatch fire lines.</li>
-                            </ul>
-                        </Section>
-
-                        {/* 8. TACTICAL OPS & MUTATORS */}
-                        <Section title="8. TACTICAL OPS & SETUP MUTATORS">
-                            <p style={{ color: '#ddd', fontSize: '14px', lineHeight: '1.6' }}>
-                                Test your command skill in the <strong>CHALLENGES</strong> tab across 5 curated asymmetric operations earning <strong>S / A / B Medals</strong>, or customize skirmishes with optional <strong>Game Mutators</strong>:
-                            </p>
-                            <ul style={{ color: '#ccc', fontSize: '14px', lineHeight: '1.8' }}>
-                                <li><strong>Blitz CP:</strong> Increases battery capacity to <strong>30 MAX CP</strong> with <strong>+15 CP/turn</strong> regeneration (22 CP opening turn).</li>
-                                <li><strong>Scarcity:</strong> Cuts unit starting &amp; maximum ammo by <strong>50%</strong> while boosting Bank Heist Gold &amp; CP payouts by <strong>+50%</strong>.</li>
-                                <li><strong>Ironman:</strong> Sets graveyard respawns to <strong>0</strong> — every unit loss is permanent.</li>
-                            </ul>
-                        </Section>
-                    </div>
-                )}
-
-                {activeTab === 'INTEL' && (
-                    <div className="intel-content">
-                        <Section title="UNIT CLASSIFICATIONS">
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px' }}>
-                                {Object.entries(UNIT_STATS).map(([key, stats]) => (
-                                    <div key={key} style={{ background: '#222', padding: '20px', borderRadius: '8px', border: '1px solid #333' }}>
-                                        <h4 style={{ margin: '0 0 15px 0', color: '#fff', borderBottom: '1px solid #444', paddingBottom: '10px' }}>
-                                            {stats.name.toUpperCase()} <span style={{fontSize:'12px', color:'#FFD700', float:'right'}}>${UNIT_COSTS[key as UnitType]}</span>
-                                        </h4>
-                                        <StatRow label="HP" value={stats.hp} />
-                                        <StatRow label="Attack" value={stats.damage} />
-                                        <StatRow label="Range" value={stats.range} />
-                                        <StatRow label="Attack Cost" value={`${stats.attackCost} CP`} />
-                                        <StatRow label="Move Cost" value={`${stats.moveCost}x`} />
-                                        <StatRow label="Ammo Capacity" value={stats.maxAmmo} />
-                                        <StatRow label="Vision Radius" value={stats.vision} />
-                                        {key === 'SNIPER' && (
-                                            <div style={{ marginTop: '10px', fontSize: '11px', color: '#ff9800', fontStyle: 'italic' }}>
-                                                *RESTRICTION: Can only shoot from Mountains, Dunes, or Owned Buildings.
-                                            </div>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                        </Section>
-
-                        <Section title="TERRAIN DATABASE">
-                            <div style={{ overflowX: 'auto' }}>
-                                <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '14px' }}>
-                                    <thead>
-                                        <tr style={{ background: '#333', color: '#fff' }}>
-                                            <th style={{ padding: '12px' }}>Type</th>
-                                            <th style={{ padding: '12px' }}>Defense</th>
-                                            <th style={{ padding: '12px' }}>Base Move Cost</th>
-                                            <th style={{ padding: '12px' }}>Tactical Notes</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {Object.keys(TERRAIN_DEFENSE).map((key, i) => {
-                                            const def = TERRAIN_DEFENSE[key] * 100;
-                                            const isNegative = def < 0;
-                                            const defColor = isNegative ? '#ff5722' : (def > 0 ? '#4CAF50' : '#888');
-                                            const sign = def > 0 ? '+' : '';
-                                            
-                                            return (
-                                                <tr key={key} style={{ background: i % 2 === 0 ? '#1a1a1a' : '#222', borderBottom: '1px solid #333' }}>
-                                                    <td style={{ padding: '12px', fontWeight: 'bold', color: '#ccc' }}>{key}</td>
-                                                    <td style={{ padding: '12px', color: defColor }}>
-                                                        {def !== 0 ? `${sign}${def}%` : '-'}
-                                                    </td>
-                                                    <td style={{ padding: '12px', color: '#aaa' }}>{TERRAIN_COSTS[key] >= 99 ? 'N/A' : TERRAIN_COSTS[key]}</td>
-                                                    <td style={{ padding: '12px', color: '#888', fontStyle: 'italic' }}>
-                                                        {key === 'MOUNTAIN' && 'High Ground. Essential for Snipers.'}
-                                                        {key === 'FOREST' && 'Provides 40% Cover.'}
-                                                        {key === 'SAND' && 'Exposed Terrain. Vulnerable to attacks.'}
-                                                        {key === 'DUNES' && 'High Ground. Blocks Line of Sight.'}
-                                                        {key === 'QUICKSAND' && 'Traps units (Rooted) for 1 Turn.'}
-                                                        {key === 'CANYON' && 'Impassable. Allows shooting over.'}
-                                                        {key === 'BUILDING' && 'Securable. Watchtowers boost Range.'}
-                                                        {key === 'WATER' && 'Impassable without Bridge.'}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </Section>
-                    </div>
-                )}
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <GeoButton
+              variant={activeTab === 'GUIDE' ? 'blue' : 'default'}
+              onClick={() => setActiveTab('GUIDE')}
+              coreStyle={{ padding: '8px 14px' }}
+            >
+              MISSION BRIEFING
+            </GeoButton>
+            <GeoButton
+              variant={activeTab === 'INTEL' ? 'blue' : 'default'}
+              onClick={() => setActiveTab('INTEL')}
+              coreStyle={{ padding: '8px 14px' }}
+            >
+              TECHNICAL SPECS
+            </GeoButton>
+            <GeoButton variant="red" onClick={exitTutorial} coreStyle={{ padding: '8px 14px' }}>
+              RETURN TO OPERATIONS
+            </GeoButton>
+          </div>
         </div>
-    );
+      </GeoCard>
+
+      {/* Scrollable Content */}
+      <div className="opgeo-scroll" style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+        <div style={{ maxWidth: '1080px', margin: '0 auto', padding: '6px 4px 28px 4px' }}>
+          {activeTab === 'GUIDE' && (
+            <div>
+              <Section title="1. CORE COMBAT LOOP">
+                <p style={{ lineHeight: 1.6, color: 'var(--op-ink)', fontSize: '14px', marginTop: 0 }}>
+                  Commander, your goal is to secure the sector using a squad of specialists. Victory requires careful management of your <strong>Command Points (CP)</strong> and terrain cover. Player 1 starts Round 1 with {CP_SYSTEM.P1_ROUND1_CP} CP for opening initiative; all players regenerate {CP_SYSTEM.REGEN_AMOUNT} CP per turn up to {CP_SYSTEM.MAX_CP}.
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '12px', marginTop: '14px' }}>
+                  {[
+                    ['🚀 DEPLOY', 'var(--acc-mint-ink)', 'Spawn units from your HQ using Gold.'],
+                    ['🏃 MANEUVER', 'var(--acc-blue-ink)', 'Spend CP to move. Terrain affects cost.'],
+                    ['🎯 ENGAGE', 'var(--acc-red-ink)', 'Attack enemies or siege bases with LOS.'],
+                    ['💰 ECONOMY', 'var(--acc-amber-ink)', 'Heist Banks and secure Buildings.'],
+                  ].map(([title, col, desc]) => (
+                    <GeoWell key={title} coreStyle={{ padding: '14px', textAlign: 'center' }}>
+                      <div style={{ fontWeight: 900, fontSize: '14px', color: col, marginBottom: '6px' }}>{title}</div>
+                      <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', lineHeight: 1.45 }}>{desc}</div>
+                    </GeoWell>
+                  ))}
+                </div>
+              </Section>
+
+              <Section title="2. OPERATIONAL MODES">
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>
+                  <GeoWell coreStyle={{ padding: '14px' }}>
+                    <h4 style={{ color: 'var(--acc-amber-ink)', margin: '0 0 6px 0', fontSize: '14px' }}>👑 CONQUER MODE</h4>
+                    <p style={{ margin: 0, color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.55 }}>
+                      <strong>Objective:</strong> Destroy the enemy <strong>HEADQUARTERS (BASE)</strong>. Enemy Bases have <strong>{BASE_STATS.HP} HP</strong> (20% armored cover). Watchtowers and Breachers/Snipers deal stronger siege damage.
+                    </p>
+                  </GeoWell>
+                  <GeoWell coreStyle={{ padding: '14px' }}>
+                    <h4 style={{ color: 'var(--acc-red-ink)', margin: '0 0 6px 0', fontSize: '14px' }}>☠️ DEATHMATCH (DOOMSDAY)</h4>
+                    <p style={{ margin: 0, color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.55 }}>
+                      <strong>Objective:</strong> Eliminate <strong>ALL</strong> enemy units. If Doomsday is enabled, at Turn 30 map edges turn to <strong>LAVA</strong> shrinking inward every 5 turns.
+                    </p>
+                  </GeoWell>
+                </div>
+              </Section>
+
+              <Section title="3. INFRASTRUCTURE & AUTOMATED DEFENSES">
+                <p style={{ color: 'var(--op-ink-muted)', fontSize: '13px', fontStyle: 'italic', marginTop: 0 }}>
+                  Neutral Banks and Headquarters defend their perimeters automatically each turn.
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '12px' }}>
+                  <GeoWell coreStyle={{ padding: '14px' }}>
+                    <div style={{ fontWeight: 900, fontSize: '14px', color: 'var(--acc-amber-ink)', marginBottom: '6px' }}>BANK VAULT</div>
+                    <div style={{ fontSize: '13px', marginBottom: '6px' }}>Contains Gold/CP loot. Action: <strong>HEIST (4 CP)</strong>.</div>
+                    <div style={{ fontSize: '12px', color: 'var(--acc-red-ink)', fontWeight: 700 }}>
+                      Proximity Turret: {BANK_STATS.RANGE} Tile Range • {BANK_STATS.DAMAGE} DMG/turn until looted.
+                    </div>
+                  </GeoWell>
+                  <GeoWell coreStyle={{ padding: '14px' }}>
+                    <div style={{ fontWeight: 900, fontSize: '14px', color: 'var(--acc-blue-ink)', marginBottom: '6px' }}>HEADQUARTERS (BASE)</div>
+                    <div style={{ fontSize: '13px', marginBottom: '6px' }}>Unit respawn &amp; shop drop center. Primary Conquer target.</div>
+                    <div style={{ fontSize: '12px', color: 'var(--acc-red-ink)', fontWeight: 700 }}>
+                      Heavy Artillery: {BASE_STATS.RANGE} Tile Range • {BASE_STATS.MIN_DMG}-{BASE_STATS.MAX_DMG} DMG/turn.
+                    </div>
+                  </GeoWell>
+                </div>
+              </Section>
+
+              <Section title="4. METEOROLOGICAL WEATHER ZONES">
+                <p style={{ color: 'var(--op-ink)', fontSize: '13px', marginTop: 0 }}>
+                  The battlefield is divided into Voronoi Zones with local weather shifting every <strong>5 Turns</strong>.
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '10px' }}>
+                  {[
+                    ['🔥 SCORCHED', '#C2410C', 'Plains & Sand cost +1 CP to move.'],
+                    ['🌧️ MONSOON', '#1344C4', 'Heavy Units (Breachers) pay 2x Move Cost on Plains.'],
+                    ['🌫️ FOG', '#475569', 'Vision capped at 2 Tiles; Snipers limited to 3 range.'],
+                    ['🍃 TAILWIND', '#046C3E', '+1 Attack Range for all units; Plains cost 0.5 CP.'],
+                    ['🌪️ SANDSTORM', '#8D5B1C', 'Vision Range capped at 3 Tiles.'],
+                    ['☀️ CLEAR', 'var(--op-ink)', 'No modifiers. Standard engagement rules apply.'],
+                  ].map(([name, col, effect]) => (
+                    <GeoWell key={name} coreStyle={{ padding: '10px 12px' }}>
+                      <div style={{ fontWeight: 900, fontSize: '13px', color: col, marginBottom: '3px' }}>{name}</div>
+                      <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)' }}>{effect}</div>
+                    </GeoWell>
+                  ))}
+                </div>
+              </Section>
+
+              <Section title="5. LOGISTICS (FIELD SHOP)">
+                <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
+                  <li><strong>Ammo Drop (50 Gold) / Medkit (100 Gold):</strong> Delivered via Drop Pod 3–9 tiles from HQ.</li>
+                  <li><strong>Barrier / Bridge (100 Gold):</strong> Construct 80% cover walls or water/canyon crossings.</li>
+                  <li><strong>Field Reload (5 CP):</strong> Emergency unit action restoring 50% max ammo immediately (ends unit turn).</li>
+                  <li><strong>Retrieval Protocol:</strong> Move adjacent to or onto a supply pod and spend <strong>4 CP</strong> (RETRIEVE SUPPLY).</li>
+                </ul>
+              </Section>
+
+              <Section title="6. UNIT VETERANCY & SECTOR SEEDS">
+                <p style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.6, marginTop: 0 }}>
+                  Units earn XP from attacks (+1 XP), kills (+2 XP, +3 vs Elite/Ace), Bank Heists (+2 XP), Base Destruction (+2 XP), and first Building captures (+1 XP). Respawned units reset to Recruit.
+                </p>
+                <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
+                  <li><strong>★ Veteran ({VETERANCY_CONFIG.XP_THRESHOLDS[1]} XP):</strong> +20% Max HP (heals gained HP) and +2 Max Ammo (Scout/Breacher) or +1 Max Ammo (Sniper).</li>
+                  <li><strong>★★ Elite ({VETERANCY_CONFIG.XP_THRESHOLDS[2]} XP):</strong> Scout +1 Vision &amp; clears Scorched/Monsoon Plains penalty; Breacher -{VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG in Cover &amp; resists Overwatch pins; Sniper +{VETERANCY_CONFIG.ELITE_SNIPER_DMG_BONUS} DMG &amp; 7 CP shot.</li>
+                  <li><strong>★★★ Ace ({VETERANCY_CONFIG.XP_THRESHOLDS[3]} XP):</strong> +20% more Max HP; Scout +{VETERANCY_CONFIG.ACE_SCOUT_DMG_BONUS} DMG &amp; 2 CP shot; Breacher +{VETERANCY_CONFIG.ACE_BREACHER_DMG_BONUS} DMG &amp; pierces Base Armor; Sniper 1 CP Mountain/Dunes move. Killing an Ace pays <strong>+${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} Bounty Gold</strong>.</li>
+                </ul>
+              </Section>
+
+              <Section title="7. OVERWATCH & FOG AMBUSH">
+                <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
+                  <li><strong>Stance Costs &amp; Refunds (O key):</strong> Scout {OVERWATCH_STATS.SOLDIER.cost} CP ({OVERWATCH_STATS.SOLDIER.damage} DMG, +{OVERWATCH_STATS.SOLDIER.refund} CP refund) • Breacher {OVERWATCH_STATS.ASSAULTER.cost} CP ({OVERWATCH_STATS.ASSAULTER.damage} DMG, +{OVERWATCH_STATS.ASSAULTER.refund} CP) • Sniper {OVERWATCH_STATS.SNIPER.cost} CP ({OVERWATCH_STATS.SNIPER.damage} DMG, +{OVERWATCH_STATS.SNIPER.refund} CP).</li>
+                  <li><strong>Interception &amp; Counterplay:</strong> Fires on first entering enemy and pins them (★★ Elite Breachers resist pins). Any damage suppresses Overwatch; Barriers/Fog/Sandstorms block Overwatch lines.</li>
+                </ul>
+              </Section>
+
+              <Section title="8. TACTICAL OPS & SETUP MUTATORS">
+                <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
+                  <li><strong>Blitz CP:</strong> 30 MAX CP battery with +15 CP/turn regeneration (22 CP opening turn).</li>
+                  <li><strong>Scarcity:</strong> Cuts unit starting &amp; max ammo by 50% while boosting Bank Heist rewards +50%.</li>
+                  <li><strong>Ironman:</strong> Sets graveyard respawns to 0 — every loss is permanent.</li>
+                </ul>
+              </Section>
+            </div>
+          )}
+
+          {activeTab === 'INTEL' && (
+            <div>
+              <Section title="UNIT CLASSIFICATIONS">
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px' }}>
+                  {Object.entries(UNIT_STATS).map(([key, stats]) => (
+                    <GeoWell key={key} coreStyle={{ padding: '16px' }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          borderBottom: '1.5px solid var(--op-line)',
+                          paddingBottom: '8px',
+                          marginBottom: '8px',
+                        }}
+                      >
+                        <strong style={{ fontSize: '15px' }}>{stats.name.toUpperCase()}</strong>
+                        <GeoChip variant="softAmber">${UNIT_COSTS[key as UnitType]}</GeoChip>
+                      </div>
+                      <StatRow label="HP" value={stats.hp} />
+                      <StatRow label="Attack" value={stats.damage} />
+                      <StatRow label="Range" value={stats.range} />
+                      <StatRow label="Attack Cost" value={`${stats.attackCost} CP`} />
+                      <StatRow label="Move Cost" value={`${stats.moveCost}x`} />
+                      <StatRow label="Ammo Capacity" value={stats.maxAmmo} />
+                      <StatRow label="Vision Radius" value={stats.vision} />
+                      {key === 'SNIPER' && (
+                        <div style={{ marginTop: '10px', fontSize: '12px', color: 'var(--acc-amber-ink)', fontWeight: 700 }}>
+                          *Restriction: Can only fire from Mountains, Dunes, or Owned Buildings.
+                        </div>
+                      )}
+                    </GeoWell>
+                  ))}
+                </div>
+              </Section>
+
+              <Section title="TERRAIN DATABASE">
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ background: 'var(--op-well)', color: 'var(--op-ink)' }}>
+                        <th style={{ padding: '10px 12px' }}>Type</th>
+                        <th style={{ padding: '10px 12px' }}>Defense</th>
+                        <th style={{ padding: '10px 12px' }}>Move Cost</th>
+                        <th style={{ padding: '10px 12px' }}>Tactical Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.keys(TERRAIN_DEFENSE).map((key, i) => {
+                        const def = Math.round(TERRAIN_DEFENSE[key] * 100);
+                        const defColor = def < 0 ? 'var(--acc-red-ink)' : def > 0 ? 'var(--acc-mint-ink)' : 'var(--op-ink-muted)';
+                        return (
+                          <tr key={key} style={{ background: i % 2 === 0 ? '#FFFFFF' : '#F3F6FA', borderBottom: '1px solid var(--op-line)' }}>
+                            <td style={{ padding: '10px 12px', fontWeight: 800 }}>{key}</td>
+                            <td style={{ padding: '10px 12px', fontWeight: 800, color: defColor }}>
+                              {def !== 0 ? `${def > 0 ? '+' : ''}${def}%` : '-'}
+                            </td>
+                            <td style={{ padding: '10px 12px', fontWeight: 700 }}>{TERRAIN_COSTS[key] >= 99 ? 'Impassable' : TERRAIN_COSTS[key]}</td>
+                            <td style={{ padding: '10px 12px', color: 'var(--op-ink-muted)' }}>
+                              {key === 'MOUNTAIN' && 'High Ground. Essential for Snipers.'}
+                              {key === 'FOREST' && 'Provides 40% Cover.'}
+                              {key === 'SAND' && 'Exposed Terrain (-10% Defense).'}
+                              {key === 'DUNES' && 'High Ground. Blocks Line of Sight.'}
+                              {key === 'QUICKSAND' && 'Traps units (Rooted) for 1 Turn.'}
+                              {key === 'CANYON' && 'Impassable. Allows shooting over.'}
+                              {key === 'BUILDING' && 'Securable. Watchtowers boost Range.'}
+                              {key === 'WATER' && 'Impassable without Bridge.'}
+                              {key === 'BARRIER' && 'Blocks movement; 80% defensive cover.'}
+                              {key === 'BASE' && 'Headquarters (+20% Defense).'}
+                              {key === 'BANK' && 'Lootable Vault (+20% Defense).'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </Section>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 };

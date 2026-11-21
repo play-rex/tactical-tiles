@@ -1,6 +1,6 @@
-
-import React from 'react';
+import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import './src/styles/opChamferGeo.css';
 import { GameRenderer } from './src/components/game/GameRenderer';
 import { LeftPanel, RightPanel, WinnerOverlay } from './src/components/ui/HUD';
 import { GameSetup } from './src/screens/GameSetup';
@@ -9,85 +9,199 @@ import { HowToPlay } from './src/screens/HowToPlay';
 import { useGameStore } from './src/store/useGameStore';
 import { ViewportProvider } from './src/context/ViewportContext';
 import { MapControls } from './src/components/game/ui/MapControls';
+import { GeoButton, GeoCard, GeoChip } from './src/components/ui/GeoPrimitives';
+import { canUnitAttackFromTile } from './src/core/rules/CombatRules';
+import { SoundFX } from './src/core/audio/SoundFX';
+import { PLAYER_UI_THEME } from './src/components/ui/GeoPrimitives';
+
+const TopBattleGuidanceBar: React.FC = () => {
+  const currentPlayer = useGameStore(state => state.currentPlayer);
+  const isAiTurn = useGameStore(state => state.isAiTurn);
+  const winner = useGameStore(state => state.winner);
+  const gridSize = useGameStore(state => state.gridSize);
+  const selectedUnitId = useGameStore(state => state.selectedUnitId);
+  const units = useGameStore(state => state.units);
+  const mapData = useGameStore(state => state.mapData);
+  const placementMode = useGameStore(state => state.placementMode);
+  const bankRewardPending = useGameStore(state => state.bankRewardPending);
+  const selectedInventoryItemIndex = useGameStore(state => state.selectedInventoryItemIndex);
+  const selectedGraveyardUnitId = useGameStore(state => state.selectedGraveyardUnitId);
+  const resetGame = useGameStore(state => state.resetGame);
+  const [muted, setMuted] = useState(() => SoundFX.isMuted());
+
+  const toggleMute = () => {
+    const next = !muted;
+    SoundFX.setMuted(next);
+    setMuted(next);
+  };
+
+  const selectedUnit = units.find(u => u.id === selectedUnitId);
+  const selectedUnitTile = selectedUnit ? mapData.find(t => t.id === selectedUnit.tileId) : undefined;
+  const pTheme = PLAYER_UI_THEME[currentPlayer] || PLAYER_UI_THEME[0];
+
+  let guidance = 'Select a friendly unit to command, or press TAB for next ready unit.';
+  if (winner !== null) {
+    guidance = `Match complete — P${winner + 1} victorious.`;
+  } else if (isAiTurn) {
+    guidance = `Enemy Commander (P${currentPlayer + 1}) is executing moves...`;
+  } else if (bankRewardPending && bankRewardPending.playerId === currentPlayer) {
+    guidance = 'Vault Breached! Choose Gold or Command Points loot in the right panel.';
+  } else if (placementMode && placementMode.active) {
+    guidance = 'Construction Mode: Click a highlighted cyan tile on the map to deploy, or Cancel.';
+  } else if (selectedInventoryItemIndex !== null) {
+    guidance = 'Inventory Supply Armed: Click a friendly unit on the map to apply item.';
+  } else if (selectedGraveyardUnitId) {
+    guidance = 'Reinforcement Selected: Click any green tile near your HQ to respawn.';
+  } else if (selectedUnit && selectedUnit.owner === currentPlayer) {
+    if (selectedUnit.isOverwatching) {
+      guidance = 'Overwatch Armed: Traps first entering enemy next turn.';
+    } else if (selectedUnit.type === 'SNIPER' && !canUnitAttackFromTile(selectedUnit, selectedUnitTile)) {
+      guidance = 'Sniper Restriction: Move to Mountain, Dunes, or an owned Building to fire.';
+    } else {
+      guidance = 'Click BLUE tile to Move • RED target to Attack • O Overwatch • TAB Next Unit';
+    }
+  }
+
+  return (
+    <GeoCard>
+      <div
+        style={{
+          padding: '6px 12px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '10px',
+          minHeight: '40px',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
+          <span
+            className="geo-chip"
+            style={{
+              background: pTheme.badgeBg,
+              color: pTheme.badgeText,
+              padding: '3px 9px',
+              fontSize: '12px',
+              fontWeight: 800,
+              flexShrink: 0,
+            }}
+          >
+            {isAiTurn ? `P${currentPlayer + 1} AI` : `P${currentPlayer + 1} TURN`}
+          </span>
+          <GeoChip variant="softBlue" style={{ flexShrink: 0, fontFamily: 'monospace' }}>
+            {gridSize}×{gridSize}
+          </GeoChip>
+          <span
+            style={{
+              fontSize: '12px',
+              fontWeight: 700,
+              color: 'var(--op-ink-muted)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+            title={guidance}
+          >
+            {guidance}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+          <GeoButton
+            onClick={toggleMute}
+            variant={muted ? 'default' : 'softBlue'}
+            title={muted ? 'Unmute Sound Effects' : 'Mute Sound Effects'}
+            coreStyle={{ padding: '4px 10px' }}
+          >
+            {muted ? 'MUTE' : 'SFX ON'}
+          </GeoButton>
+          <GeoButton
+            onClick={() => resetGame()}
+            variant="softRed"
+            coreStyle={{ padding: '4px 10px' }}
+          >
+            ABORT MISSION
+          </GeoButton>
+        </div>
+      </div>
+    </GeoCard>
+  );
+};
 
 const App = () => {
   const currentScreen = useGameStore(state => state.currentScreen);
-  const resetGame = useGameStore(state => state.resetGame);
 
   if (currentScreen === 'SETUP') {
-      return <GameSetup />;
+    return <GameSetup />;
   }
 
   if (currentScreen === 'EDITOR') {
-      return <MapEditor />;
+    return <MapEditor />;
   }
 
   if (currentScreen === 'TUTORIAL') {
-      return <HowToPlay />;
+    return <HowToPlay />;
   }
 
-  // GAME SCREEN
+  // LIVE BATTLE SCREEN (OP-Chamfer Geo tuned for 20x20 / 25x25 / 30x30 maps)
   return (
     <ViewportProvider>
-    <div style={{ 
-        display: 'flex', 
-        width: '100vw', 
-        height: '100vh', 
-        background: '#0a0a0a', 
-        overflow: 'hidden',
-        fontFamily: "'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
-    }}>
-      <WinnerOverlay />
-      
-      {/* Left Column (Player Stats) */}
-      <div style={{ width: 'clamp(165px, 21vw, 300px)', height: '100%', flexShrink: 0, overflow: 'hidden' }}>
-        <LeftPanel />
-      </div>
+      <div
+        className="opgeo-stage"
+        style={{
+          display: 'flex',
+          width: '100vw',
+          height: '100vh',
+          overflow: 'hidden',
+          padding: '8px',
+          gap: '10px',
+        }}
+      >
+        <WinnerOverlay />
 
-      {/* Center Column (Fixed Map) */}
-      <div style={{ flex: 1, minWidth: 0, position: 'relative', height: '100%', borderLeft: '1px solid #222', borderRight: '1px solid #222', display: 'flex', flexDirection: 'column' }}>
-        
-        {/* LEAVE BUTTON */}
-        <div style={{ position: 'absolute', top: '15px', right: '15px', zIndex: 50 }}>
-            <button 
-                onClick={() => resetGame()}
-                style={{
-                    background: 'rgba(20, 20, 20, 0.8)',
-                    color: '#ef5350',
-                    border: '1px solid #b71c1c',
-                    padding: '8px 16px',
-                    borderRadius: '6px',
-                    cursor: 'pointer',
-                    fontWeight: 'bold',
-                    fontSize: '11px',
-                    letterSpacing: '1px',
-                    backdropFilter: 'blur(4px)',
-                    textTransform: 'uppercase',
-                    boxShadow: '0 2px 5px rgba(0,0,0,0.5)'
-                }}
-                onMouseOver={(e) => e.currentTarget.style.background = 'rgba(183, 28, 28, 0.2)'}
-                onMouseOut={(e) => e.currentTarget.style.background = 'rgba(20, 20, 20, 0.8)'}
-            >
-                ABORT MISSION
-            </button>
+        {/* Left Column: Disciplined width (210-255px) maximizes 25x25 square canvas area */}
+        <div style={{ width: 'clamp(210px, 18vw, 255px)', height: '100%', flexShrink: 0, minHeight: 0 }}>
+          <LeftPanel />
         </div>
 
-        {/* TOP: Game Viewport Area */}
-        <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-            <GameRenderer />
+        {/* Center Column: Slim Top Bar + Maximized Square Pixi Stage + Compact Bottom Controls */}
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            minHeight: 0,
+            height: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+          }}
+        >
+          <TopBattleGuidanceBar />
+
+          <div className="geo-drop geo-fill" style={{ flex: 1, minHeight: 0 }}>
+            <div className="geo-backplate" />
+            <div className="geo-rim" style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+              <div className="geo-body" style={{ flex: 1, minHeight: 0, padding: '6px', display: 'flex' }}>
+                <div className="geo-frame-rim" style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+                  <div
+                    className="geo-frame-core"
+                    style={{ flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}
+                  >
+                    <GameRenderer />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <MapControls />
         </div>
 
-        {/* BOTTOM: Control Deck Area (Separate Panel) */}
-        <div style={{ height: '80px', background: '#0f0f0f', borderTop: '1px solid #222', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <MapControls />
+        {/* Right Column: Disciplined width (240-290px) for Turn Info, Intel/Logs, Shop & Actions */}
+        <div style={{ width: 'clamp(240px, 21vw, 290px)', height: '100%', flexShrink: 0, minHeight: 0 }}>
+          <RightPanel />
         </div>
       </div>
-
-      {/* Right Column (Info & Actions) */}
-      <div style={{ width: 'clamp(175px, 22vw, 310px)', height: '100%', flexShrink: 0, overflow: 'hidden' }}>
-        <RightPanel />
-      </div>
-    </div>
     </ViewportProvider>
   );
 };

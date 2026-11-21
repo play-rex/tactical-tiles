@@ -43,8 +43,9 @@ const OverlayLayer = ({
             
             // Parse rgba or hex
             let color = 0xFFFFFF;
+            let borderColor: number | null = null;
             // Simple mapping for the Config colors to Hex
-            if (colorStr.includes('0, 100, 255')) color = 0x0064FF; // Move
+            if (colorStr.includes('0, 100, 255')) { color = 0x0064FF; borderColor = 0x38BDF8; } // Move
             else if (colorStr.includes('255, 0, 0')) color = 0xFF0000; // Attack
             else if (colorStr.includes('0, 255, 0')) color = 0x00FF00; // Spawn
             else if (colorStr === '#F44336') color = 0xF44336;
@@ -61,7 +62,7 @@ const OverlayLayer = ({
             g.endFill();
 
             if (border) {
-                g.lineStyle(2, color, 1);
+                g.lineStyle(2, borderColor ?? color, 0.95);
                 g.drawRect(px + 2, py + 2, TILE_SIZE - 4, TILE_SIZE - 4);
                 g.lineStyle(0);
             }
@@ -75,7 +76,7 @@ const OverlayLayer = ({
             });
         }
 
-        validMoveTiles.forEach((id: string) => drawHighlight(id, UI_COLORS.MOVE_HIGHLIGHT));
+        validMoveTiles.forEach((id: string) => drawHighlight(id, UI_COLORS.MOVE_HIGHLIGHT, 0.36, true));
         validSpawnTiles.forEach((id: string) => drawHighlight(id, UI_COLORS.SPAWN_HIGHLIGHT));
         validAttackTargets.forEach((unitId: string) => {
             const targetUnit = Array.isArray(units) ? units.find((u: any) => u.id === unitId) : null;
@@ -269,7 +270,7 @@ export const GameRenderer = () => {
     const parentRef = useRef<HTMLDivElement>(null);
     const { setViewport, viewport } = useViewportContext();
     const [loaded, setLoaded] = useState(false);
-    const [dimensions, setDimensions] = useState({ width: 800, height: 800 });
+    const [dimensions, setDimensions] = useState({ width: 200, height: 200 });
 
     // State Selectors
     const mapData = useGameStore(state => state.mapData);
@@ -450,7 +451,8 @@ export const GameRenderer = () => {
     };
 
     return (
-        <div ref={parentRef} style={{ width: '100%', height: '100%', background: '#050505', overflow: 'hidden' }}>
+        <div ref={parentRef} style={{ width: '100%', height: '100%', position: 'relative', background: '#050505', overflow: 'hidden' }}>
+            <div style={{ position: 'absolute', inset: 0 }}>
             <Stage 
                 width={dimensions.width} 
                 height={dimensions.height} 
@@ -634,6 +636,7 @@ export const GameRenderer = () => {
 
                 </GameViewport>
             </Stage>
+            </div>
         </div>
     );
 };

@@ -477,7 +477,9 @@ class ZoneWeatherEngine {
     }
 
     public destroy() {
-        this.graphics.destroy();
+        if (this.graphics && !this.graphics.destroyed) {
+            this.graphics.destroy();
+        }
     }
 }
 
@@ -539,7 +541,7 @@ export const WeatherSystem: React.FC<WeatherSystemProps> = ({ width, height, vie
         app.ticker.add(update);
         
         return () => {
-            if (app && app.ticker) {
+            if ((app?.ticker as any)?._head) {
                 app.ticker.remove(update);
             }
         };

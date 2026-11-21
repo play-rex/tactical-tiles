@@ -70,35 +70,27 @@ const PixiViewport = PixiComponent<ViewportComponentProps, Viewport>('GameViewpo
 
          if (hasResized) {
              instance.resize(newP.width, newP.height, newP.worldWidth, newP.worldHeight);
-             
-             // INTELLIGENT RE-CENTERING
-             // If the viewport was 800x800 (default) and now snapped to real size, 
-             // AND the user hasn't moved it much (we assume they haven't if it's startup),
-             // then re-fit.
-             if (oldP.width === 800 && newP.width !== 800) {
-                 instance.fit();
-                 instance.moveCenter(newP.worldWidth / 2, newP.worldHeight / 2);
-             }
+             instance.fit();
+             instance.moveCenter(newP.worldWidth / 2, newP.worldHeight / 2);
          }
     },
     willUnmount: (instance) => {
         try {
-            // Detach options to stop listeners before destroying
             instance.plugins.pause('drag');
             instance.plugins.pause('wheel');
             instance.plugins.pause('pinch');
             instance.plugins.pause('decelerate');
             instance.plugins.pause('clamp');
             instance.plugins.pause('clampZoom');
-            
-            // Removing children first avoids them trying to update on a dying viewport
-            (instance as unknown as PIXI.Container).removeChildren();
-            
-            // Safe destroy
-            instance.destroy({ children: true, texture: false, baseTexture: false }); 
+            const vpAny = instance as any;
+            if (vpAny.options?.ticker?._head && vpAny.tickerFunction) {
+                vpAny.options.ticker.remove(vpAny.tickerFunction);
+            }
+            if (vpAny.options) {
+                vpAny.options.noTicker = true;
+            }
         } catch (e) {
-            // Suppress viewport destruction errors (often related to ticker/next null references)
-            console.warn("Viewport destroy suppressed:", e); 
+            console.warn("Viewport unmount cleanup suppressed:", e);
         }
     }
 });
