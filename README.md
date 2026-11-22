@@ -1,20 +1,58 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Tactical Tiles
 
-# Run and deploy your AI Studio app
+A turn-based tactics game for 2–6 players on a tile map. Each squad shares one battery of Command
+Points: every move, shot, heist and reload draws on it. Capture buildings, rob banks, bridge rivers,
+and destroy the enemy HQ (Conquer) or wipe out their squads (Deathmatch). Weather shifts every five
+turns, fog of war is optional, and the Doomsday protocol floods the map with lava.
 
-This contains everything you need to run your app locally.
+Play on one screen (hot-seat or against the AI) or **online**: one player creates a table, shares
+its four-letter code or link, and fills any empty seats with bots.
 
-View your app in AI Studio: https://ai.studio/apps/drive/1-_IOFyHFKs5HAtNuTh0H5iDUIePqOur3
+See [GAME_REVIEW.md](GAME_REVIEW.md) for the design notes and roadmap.
 
-## Run Locally
+## Layout
 
-**Prerequisites:**  Node.js
+```
+packages/engine   rules, map generation, AI, wire types (pure TypeScript, no I/O)
+apps/server       Colyseus room per online table + Express (serves the built web app)
+apps/web          React + PixiJS client (local games run the engine in the browser)
+deploy/           Docker compose + Cloudflare tunnel, driven by deploy.sh
+```
 
+The server holds the only real copy of an online match. Clients send actions; the server checks
+each one with the engine (`prepareAction`, which also works out its cost), applies it, and sends
+every player their own view: with fog of war on, enemy units out of sight are never sent.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Development
+
+```
+pnpm install
+pnpm dev          # server on :2767 (tsx watch) + web on :5373
+pnpm test         # engine, server and web tests
+pnpm typecheck
+pnpm build        # web app → apps/web/dist
+pnpm start        # server on :2767, also serving apps/web/dist
+```
+
+The ports differ from Jinx Gambit's and EmberWild's so all three can run side by side.
+
+## Production
+
+```
+pnpm ship              # build and deploy the latest commit on main
+pnpm ship <ref>        # deploy a tag, branch or commit (also how you roll back)
+pnpm ship status | logs | url | stop
+```
+
+- Only committed code is deployed (the image is built from `git archive`).
+- **Local check of the deployed build:** http://localhost:2770.
+- **Live at:** https://tiles.rxnova.dev, through the Cloudflare tunnel `tactical-tiles` (its
+  token is in `deploy/.env`; see `deploy/.env.example`) pointing at `http://app:2767`.
+
+## Online play
+
+- Tables live in the server's memory: a restart ends matches in progress.
+- A player who drops keeps their seat for 3 minutes and gets it back by reloading (or reopening
+  the table link) on the same device. Meanwhile a bot plays their turns; if they don't return,
+  the bot keeps the seat.
+- Leaving a match on purpose hands your squad to a bot.

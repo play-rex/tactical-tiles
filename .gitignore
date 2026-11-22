@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Deploy secrets and state
+deploy/.env
+deploy/.deployed

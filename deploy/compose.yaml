@@ -1,0 +1,40 @@
+# Production stack. Run it through deploy/deploy.sh rather than by hand.
+#
+#   app           the game (image built from committed code by deploy.sh)
+#   tunnel        Cloudflare Tunnel to your own domain (when TUNNEL_TOKEN is set)
+#   quick-tunnel  free temporary trycloudflare.com address (when it isn't)
+#
+# Tables live in the server's memory, so a redeploy ends matches in progress.
+
+name: tactical-tiles
+
+services:
+  app:
+    image: tactical-tiles:${TILES_TAG:-latest}
+    restart: unless-stopped
+    init: true
+    # Lets you open the deployed version locally at http://localhost:2770 without
+    # clashing with the dev server on 2767. Bound to this Mac only.
+    ports:
+      - "127.0.0.1:2770:2767"
+
+  tunnel:
+    profiles: [named]
+    image: cloudflare/cloudflared:2026.11.0
+    restart: unless-stopped
+    # Sends every request for the tunnel's hostname to the game container.
+    command: tunnel --no-autoupdate run --url http://app:2767
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      app:
+        condition: service_healthy
+
+  quick-tunnel:
+    profiles: [quick]
+    image: cloudflare/cloudflared:2026.11.0
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://app:2767
+    depends_on:
+      app:
+        condition: service_healthy
