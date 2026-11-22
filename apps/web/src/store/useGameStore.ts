@@ -333,16 +333,16 @@ export const useGameStore = create<GameStore>((set, get) => {
     },
 
     reloadUnit: () => {
-      const { selectedUnitId, units, playerCp, currentPlayer } = get();
-      const unit = units.find(u => u.id === selectedUnitId && u.owner === currentPlayer);
+      const { selectedUnitId, units, playerCp, currentPlayer, isAiTurn } = get();
+      const unit = isAiTurn ? undefined : units.find(u => u.id === selectedUnitId && u.owner === currentPlayer);
       if (!unit || unit.completed || unit.ammo >= unit.maxAmmo) return;
       if ((playerCp[currentPlayer] ?? 0) < CP_SYSTEM.RELOAD_COST) return;
       get().executeAiAction({ type: 'RELOAD', unitId: unit.id, cost: CP_SYSTEM.RELOAD_COST });
     },
 
     enterOverwatch: () => {
-      const { selectedUnitId, units, playerCp, currentPlayer, mapData } = get();
-      const unit = units.find(u => u.id === selectedUnitId && u.owner === currentPlayer);
+      const { selectedUnitId, units, playerCp, currentPlayer, mapData, isAiTurn } = get();
+      const unit = isAiTurn ? undefined : units.find(u => u.id === selectedUnitId && u.owner === currentPlayer);
       if (!unit) return;
       const tile = mapData.find(t => t.id === unit.tileId);
       if (!canUnitEnterOverwatch(unit, tile, playerCp[currentPlayer] ?? 0)) return;
@@ -356,10 +356,29 @@ export const useGameStore = create<GameStore>((set, get) => {
         validMoveCosts, mapData, validAttackTargets, winner, graveyard, validSpawnTiles, settings, isAiTurn, placementMode,
       } = state;
 
-      if (winner !== null || state.bankRewardPending || isAiTurn) return;
-
       const clickedTileId = `${x},${y}`;
       const tile = mapData.find(t => t.id === clickedTileId);
+      // A unit you can see (under fog, only those in your sight)
+      const viewer = viewerSeat(state);
+      const seenUnit = units.find(
+        u => u.tileId === clickedTileId && (!settings.fogOfWar || u.owner === viewer || state.visibleTiles.has(clickedTileId)),
+      );
+      /** Look at a unit or tile without commanding it: its card shows in Tactical Intel. */
+      const inspect = () =>
+        set({
+          ...CLEAR_SELECTION,
+          hoveredTileId: state.hoveredTileId,
+          placementMode: state.placementMode,
+          selectedUnitId: seenUnit?.id ?? null,
+          selectedTileId: clickedTileId,
+        });
+
+      // Not your move (someone else's turn, a vault to claim, or the match is over): you can
+      // still inspect anything you can see.
+      if (winner !== null || state.bankRewardPending || isAiTurn) {
+        inspect();
+        return;
+      }
 
       // Placing a Barrier or Bridge bought from the shop
       if (placementMode && placementMode.active && tile) {
@@ -369,8 +388,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const clickedUnit = units.find(u => u.tileId === clickedTileId);
-      if (settings.fogOfWar && clickedUnit && clickedUnit.owner !== currentPlayer && !state.visibleTiles.has(clickedTileId)) return;
+      const clickedUnit = seenUnit;
 
       // Using a supply item: click one of your units (anything else cancels)
       if (selectedInventoryItemIndex !== null) {
@@ -432,8 +450,8 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      // Anything else: inspect the tile
-      set({ ...CLEAR_SELECTION, hoveredTileId: state.hoveredTileId, placementMode: state.placementMode, selectedTileId: clickedTileId });
+      // Anything else (an enemy, a unit that has acted, a tile): inspect it
+      inspect();
     },
 
     secureBuilding: () => {
@@ -523,6 +541,8 @@ export const useGameStore = create<GameStore>((set, get) => {
       set({
         ...next,
         ...CLEAR_SELECTION,
+        // While the AI plays, keep whatever you're inspecting
+        ...(aiNext ? { selectedUnitId: state.selectedUnitId, selectedTileId: state.selectedTileId } : {}),
         visibleTiles: visibleSet(next, next.settings.gameMode === 'PVE' ? 0 : next.currentPlayer),
         isAiTurn: aiNext,
       });
@@ -556,6 +576,8 @@ export const useGameStore = create<GameStore>((set, get) => {
       set({
         ...game,
         ...CLEAR_SELECTION,
+        // While others play, keep whatever you're inspecting
+        ...(isAiTurn ? { selectedUnitId: state.selectedUnitId, selectedTileId: state.selectedTileId } : {}),
         mode: 'ONLINE',
         mySeat: view.mySeat,
         onlineSeq: view.seq,

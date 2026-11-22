@@ -810,8 +810,10 @@ const HoveredTacticalPreview: React.FC<{
   const visibleTiles = useGameStore(state => state.visibleTiles);
   const fogOfWar = useGameStore(state => state.settings.fogOfWar);
   const victoryMode = useGameStore(state => state.settings.victoryMode);
+  const isAiTurn = useGameStore(state => state.isAiTurn);
 
-  if (!hoveredTileId || selectedUnit.owner !== currentPlayer) return null;
+  // Attack previews are for planning your own moves, not for units you're only inspecting
+  if (!hoveredTileId || isAiTurn || selectedUnit.owner !== currentPlayer) return null;
   const hoveredTile = getTileByIdFast(mapData, hoveredTileId, gridSize);
   if (!hoveredTile) return null;
 
@@ -1087,7 +1089,7 @@ export const RightPanel: React.FC = () => {
                         </GeoChip>
                       </div>
                       <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600, display: 'flex', justifyContent: 'space-between', marginTop: '2px' }}>
-                        <span>{selectedUnit.owner === currentPlayer ? 'Your Unit' : `P${selectedUnit.owner + 1} Unit`}</span>
+                        <span>{selectedUnit.owner === viewer ? 'Your Unit' : `P${selectedUnit.owner + 1} Unit`}</span>
                         <span>{nextThreshold !== null ? `XP ${xp}/${nextThreshold}` : `MAX (${xp})`} • {selectedUnit.kills ?? 0}K</span>
                       </div>
                     </div>
@@ -1140,13 +1142,13 @@ export const RightPanel: React.FC = () => {
                     </GeoWell>
                   )}
 
-                  {selectedUnit.type === 'SNIPER' && selectedUnit.owner === currentPlayer && (
+                  {selectedUnit.type === 'SNIPER' && selectedUnit.owner === currentPlayer && isMyTurn && (
                     <GeoChip variant={sniperCanFire ? 'softMint' : 'softAmber'} style={{ display: 'block', padding: '5px 8px' }}>
                       {sniperCanFire ? '🎯 High-Ground Firing Ready' : '⚠️ Move to Mountain, Dunes, or Owned Building to Fire'}
                     </GeoChip>
                   )}
 
-                  {selectedUnit.owner === currentPlayer && (
+                  {selectedUnit.owner === currentPlayer && isMyTurn && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                       {selectedUnit.isOverwatching && (
                         <GeoChip variant="amber" style={{ display: 'block', padding: '7px 9px', fontWeight: 900 }}>
