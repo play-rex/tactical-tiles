@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, test } from 'node:test';
-import { Server } from '@colyseus/core';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as joinPath } from 'node:path';
+import { matchMaker, Server } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
-import { ClientMsg, ROOM_NAME, ServerMsg, type TableView } from '@tactical/engine';
+import { ClientMsg, CloseCode, ROOM_NAME, ServerMsg, type TableView } from '@tactical/engine';
 import { Client, type Room } from 'colyseus.js';
-import { limits, TableRoom, timings } from '../src/TableRoom';
+import { limits, restoreTables, TableRoom, timings } from '../src/TableRoom';
+import { fileTableStore } from '../src/store';
 
 let gameServer: Server;
 let endpoint: string;
@@ -207,4 +211,50 @@ test("a player who drops on their turn has it played for them", async () => {
   assert.ok(covered.seq > start.seq);
   assert.ok(covered.seats[0].autopilot || !covered.seats[0].connected);
   await b.room.leave();
+});
+
+test('a restart (a deploy) brings the table back, and players carry on where they were', async () => {
+  const dir = mkdtempSync(joinPath(tmpdir(), 'tt-tables-'));
+  const store = fileTableStore(dir);
+  TableRoom.store = store;
+  try {
+    const id = pid();
+    const a = await host('Alice', id);
+    const code = (await a.view(() => true)).code;
+    a.room.send(ClientMsg.addBot);
+    await a.view(v => v.seats.length === 2);
+    a.room.send(ClientMsg.start);
+    // Alice ends her turn; the bot plays its turn and hands it back
+    await a.view(v => v.status === 'playing' && v.game?.game.currentPlayer === 0);
+    a.room.send(ClientMsg.action, { type: 'END_TURN' });
+    const before = await a.view(v => v.game?.game.currentPlayer === 0 && v.game.game.turnCounter >= 2, 'Alice again');
+    const saved = () => readdirSync(dir).includes(`${code}.json`);
+    assert.ok(saved(), 'saved');
+
+    // The server stops: the table is kept, and nothing changes while it goes down
+    TableRoom.shuttingDown = true;
+    const closed = new Promise<number>(resolve => a.room.onLeave(resolve));
+    await matchMaker.getLocalRoomById(code)!.disconnect(CloseCode.restarting);
+    assert.equal(await closed, CloseCode.restarting);
+    assert.ok(saved(), 'kept for the restart');
+
+    // ...and starts again: same code, same game, and Alice gets her seat back
+    TableRoom.shuttingDown = false;
+    assert.equal(await restoreTables(store), 1);
+    const back = await join(code, 'Alice', id);
+    const v = await back.view(x => x.status === 'playing');
+    assert.equal(v.mySeat, 0);
+    assert.equal(v.seq, before.seq, 'nothing happened while she was away');
+    assert.deepEqual(v.game?.game.units, before.game?.game.units);
+    assert.equal(v.seats[1].isBot, true);
+
+    // Leaving for good forgets the saved table
+    await back.room.leave();
+    await new Promise(r => setTimeout(r, 200));
+    assert.ok(!saved(), 'forgotten');
+  } finally {
+    TableRoom.store = null;
+    TableRoom.shuttingDown = false;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

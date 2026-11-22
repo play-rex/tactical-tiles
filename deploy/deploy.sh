@@ -6,7 +6,10 @@
 #   pnpm ship status       what's running, and which commit
 #   pnpm ship logs         follow the server logs
 #   pnpm ship url          print the public address
-#   pnpm ship stop         stop production
+#   pnpm ship stop         stop production (saved tables are kept)
+#
+# Matches survive a deploy: tables are saved on every change and restored when the new
+# server starts; players reconnect on their own.
 #
 # Only committed code is deployed: the image is built from `git archive`, so whatever
 # you are editing in dev never reaches production.
@@ -47,6 +50,8 @@ deploy() {
 
   echo "Building tactical-tiles:${sha} from ${ref}…"
   git archive --format=tar "$sha" | docker build -t "tactical-tiles:${sha}" -t tactical-tiles:latest -
+
+  docker volume create tiles-data >/dev/null
 
   local p
   p=$(profile)

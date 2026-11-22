@@ -3,11 +3,12 @@
  * then the match. The server holds the only real game; every player is sent their own view
  * of it after each change. Modelled on EmberWild's TableRoom.
  */
-import { type AuthContext, type Client, type Deferred, Room } from '@colyseus/core';
+import { type AuthContext, type Client, type Deferred, matchMaker, Room } from '@colyseus/core';
 import {
   applyAction,
   botAction,
   ClientMsg,
+  ROOM_NAME,
   CloseCode,
   createGeneratedGame,
   DEFAULT_TABLE_SETTINGS,
@@ -28,6 +29,7 @@ import {
 } from '@tactical/engine';
 import type { z } from 'zod';
 import { actionMsg, joinOptions, removeSeatMsg, settingsMsg } from './messages';
+import type { TableStore } from './store';
 
 interface Seat {
   sessionId: string | null; // null for bots, and for players who haven't come back yet
@@ -49,6 +51,8 @@ export const timings = {
   autopilotMs: 4000,
   lobbyReconnectS: 30,
   gameReconnectS: 180,
+  /** After a restart, how long bots wait before playing for players still reconnecting. */
+  restoreGraceMs: 30_000,
 };
 
 /** Guards against floods. Generous for real play, including several friends behind one address. */
@@ -80,6 +84,44 @@ const joinAllowed = windowLimiter(60_000);
 
 const between = ([lo, hi]: [number, number]) => lo + Math.random() * (hi - lo);
 
+/** What's saved of a table: enough to bring it back exactly as players last saw it. */
+interface TableSnapshot {
+  v: 1;
+  code: string;
+  seats: Pick<Seat, 'playerId' | 'name' | 'isBot'>[];
+  hostPlayerId: string | null;
+  settings: TableSettings;
+  status: TableView['status'];
+  game: GameState | null;
+  seq: number;
+}
+
+/** Tables waiting to be restored at boot, keyed by code. */
+const restoring = new Map<string, TableSnapshot>();
+
+/**
+ * Bring back every table that was open when the server stopped (a deploy, a crash, a
+ * reboot). Players rejoin with their player id and carry on where they left off.
+ */
+export async function restoreTables(store: TableStore, maxAgeMs = 24 * 60 * 60 * 1000) {
+  let count = 0;
+  for (const row of store.all()) {
+    let snap: TableSnapshot | null = null;
+    try {
+      snap = JSON.parse(row.data) as TableSnapshot;
+    } catch {}
+    if (snap?.v !== 1 || snap.code !== row.code || Date.now() - row.updatedAt > maxAgeMs) {
+      store.delete(row.code);
+      continue;
+    }
+    if (matchMaker.getLocalRoomById(snap.code)) continue; // already open
+    restoring.set(snap.code, snap);
+    await matchMaker.createRoom(ROOM_NAME, { restoreCode: snap.code });
+    count++;
+  }
+  return count;
+}
+
 export class TableRoom extends Room {
   // Seats are capped in onJoin. This is higher so a full table still lets a player back in:
   // Colyseus counts held seats and replaced connections against it and would lock the room.
@@ -106,7 +148,13 @@ export class TableRoom extends Room {
   private messageAllowed = windowLimiter(1000);
   private pending: { clear(): void } | null = null;
   private counted = false;
+  /** After a restore: bots hold off for players finding their way back until then. */
+  private graceUntil = 0;
   private static openTables = 0;
+  /** Where tables are saved (none in tests that don't need it). */
+  static store: TableStore | null = null;
+  /** Set once the server is stopping: tables are kept as they are, to be restored. */
+  static shuttingDown = false;
 
   static async generateCode(exists: (code: string) => Promise<boolean>): Promise<string> {
     for (;;) {
@@ -116,11 +164,18 @@ export class TableRoom extends Room {
     }
   }
 
-  override async onCreate() {
-    if (TableRoom.openTables >= limits.maxTables) {
-      throw new Error('The server is full right now. Try again in a few minutes.');
+  override async onCreate(options: unknown) {
+    const code = (options as { restoreCode?: unknown } | undefined)?.restoreCode;
+    const snap = typeof code === 'string' ? restoring.get(code) : undefined;
+    if (snap) {
+      restoring.delete(snap.code);
+      this.roomId = snap.code;
+    } else {
+      if (TableRoom.openTables >= limits.maxTables) {
+        throw new Error('The server is full right now. Try again in a few minutes.');
+      }
+      this.roomId = await TableRoom.generateCode(async c => Boolean(await this.presence.sismember(CODES_KEY, c)));
     }
-    this.roomId = await TableRoom.generateCode(async c => Boolean(await this.presence.sismember(CODES_KEY, c)));
     await this.presence.sadd(CODES_KEY, this.roomId);
     TableRoom.openTables++;
     this.counted = true;
@@ -176,6 +231,28 @@ export class TableRoom extends Room {
       if (seat < 0 || !this.game || this.status !== 'playing') return this.err(client, "You're not in this match");
       this.act(seat, msg as GameAction, client);
     });
+
+    if (snap) this.restore(snap);
+  }
+
+  /** Rebuild a table from its snapshot; every player is away until they rejoin. */
+  private restore(snap: TableSnapshot) {
+    this.seats = snap.seats.map(s => ({ ...s, sessionId: null, connected: s.isBot }));
+    this.hostPlayerId = snap.hostPlayerId;
+    this.settings = snap.settings;
+    this.status = snap.status;
+    this.game = snap.game;
+    this.seq = snap.seq;
+    if (this.game) this.sight = this.seats.map((_, i) => visibleSet(this.game!, i));
+    this.graceUntil = Date.now() + timings.restoreGraceMs;
+    // Nobody is connected yet: keep the room open while they find their way back, and hand
+    // the seats of anyone who never does to bots (as if their reconnection hold ran out).
+    const holdS = this.status === 'lobby' ? timings.lobbyReconnectS : timings.gameReconnectS;
+    this.resetAutoDisposeTimeout(holdS);
+    this.clock.setTimeout(() => {
+      for (const seat of [...this.seats]) if (!seat.isBot && !seat.connected && !seat.sessionId) this.retire(seat);
+    }, holdS * 1000);
+    this.afterChange();
   }
 
   /** Runs before every new join or table creation (not for reconnections). */
@@ -228,6 +305,8 @@ export class TableRoom extends Room {
   }
 
   override async onLeave(client: Client, consented: boolean) {
+    // Server stopping: leave seats as they are; the saved table brings everyone back.
+    if (TableRoom.shuttingDown) return;
     const seat = this.seats[this.seatOf(client)];
     if (!seat) return;
     seat.connected = false;
@@ -260,6 +339,8 @@ export class TableRoom extends Room {
   override async onDispose() {
     this.pending?.clear();
     if (this.counted) TableRoom.openTables--;
+    // Everyone has gone for good: forget the table. (On shutdown, keep it to restore.)
+    if (!TableRoom.shuttingDown) TableRoom.store?.delete(this.roomId);
     await this.presence.srem(CODES_KEY, this.roomId);
   }
 
@@ -291,7 +372,9 @@ export class TableRoom extends Room {
 
   private apply(action: GameAction, asBot: boolean) {
     const before = this.game;
-    if (!before) return false;
+    // Once the server is stopping nothing is saved, so nothing may change either: the table
+    // comes back exactly as players last saw it.
+    if (!before || TableRoom.shuttingDown) return false;
     const result = applyAction(before, action, { autoBankReward: asBot });
     if (result.rejected) return false;
     const after = result.state;
@@ -327,7 +410,9 @@ export class TableRoom extends Room {
     let delay = between(timings.botThinkMs);
     if (!seat.isBot) {
       if (this.coverAt?.turn !== game.turnCounter) {
-        this.coverAt = { turn: game.turnCounter, at: Date.now() + timings.autopilotMs };
+        // Longer right after a restart, while everyone is still reconnecting.
+        const wait = Math.max(timings.autopilotMs, this.graceUntil - Date.now());
+        this.coverAt = { turn: game.turnCounter, at: Date.now() + wait };
       }
       delay = Math.max(delay, this.coverAt.at - Date.now());
     }
@@ -412,10 +497,30 @@ export class TableRoom extends Room {
     client.send(ServerMsg.error, { message });
   }
 
-  /** Every change ends here: send each player their view. */
+  /** Every change ends here: send each player their view, and save the table. */
   private broadcastViews() {
     const seats = this.seatInfo();
     for (const client of this.clients) this.sendView(client, seats);
+    this.persist();
+  }
+
+  private persist() {
+    if (TableRoom.shuttingDown || !TableRoom.store) return;
+    const snap: TableSnapshot = {
+      v: 1,
+      code: this.roomId,
+      seats: this.seats.map(({ playerId, name, isBot }) => ({ playerId, name, isBot })),
+      hostPlayerId: this.hostPlayerId,
+      settings: this.settings,
+      status: this.status,
+      game: this.game,
+      seq: this.seq,
+    };
+    try {
+      TableRoom.store.save(this.roomId, JSON.stringify(snap));
+    } catch (e) {
+      console.error('failed to save table', e);
+    }
   }
 
   private seatInfo(): SeatInfo[] {

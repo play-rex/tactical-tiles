@@ -26,3 +26,6 @@ dist-ssr
 # Deploy secrets and state
 deploy/.env
 deploy/.deployed
+
+# Saved tables in development
+apps/server/data

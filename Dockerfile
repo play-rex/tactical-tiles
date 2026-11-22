@@ -1,4 +1,5 @@
 # Production image: game server + built website in one container.
+# Saved tables are NOT in the image; they live in the `tiles-data` volume mounted at /data.
 # Build it with deploy/deploy.sh, which feeds only committed code (git archive) to Docker.
 
 FROM node:22-bookworm-slim AS build
@@ -21,7 +22,8 @@ RUN rm -rf node_modules apps/*/node_modules packages/*/node_modules \
 
 FROM node:22-bookworm-slim
 ENV NODE_ENV=production \
-    PORT=2767
+    PORT=2767 \
+    TABLES_DIR=/data/tables
 WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json /app/pnpm-workspace.yaml ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
@@ -29,6 +31,9 @@ COPY --from=build --chown=node:node /app/packages/engine ./packages/engine
 COPY --from=build --chown=node:node /app/apps/server ./apps/server
 COPY --from=build --chown=node:node /app/apps/web/dist ./apps/web/dist
 
+# /data is owned by the unprivileged user so a fresh volume is writable.
+RUN mkdir -p /data/tables && chown -R node:node /data
+VOLUME /data
 USER node
 WORKDIR /app/apps/server
 EXPOSE 2767

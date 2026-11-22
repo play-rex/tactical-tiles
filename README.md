@@ -45,13 +45,16 @@ pnpm ship status | logs | url | stop
 ```
 
 - Only committed code is deployed (the image is built from `git archive`).
+- Deploys don't end matches: tables are saved on every change (the `tiles-data` volume) and
+  restored when the new server starts. Players see "reconnecting…" for a few seconds.
 - **Local check of the deployed build:** http://localhost:2770.
 - **Live at:** https://tiles.rxnova.dev, through the Cloudflare tunnel `tactical-tiles` (its
   token is in `deploy/.env`; see `deploy/.env.example`) pointing at `http://app:2767`.
 
 ## Online play
 
-- Tables live in the server's memory: a restart ends matches in progress.
+- Tables are saved on every change and restored after a restart or deploy (for a day).
+- After a restart, bots wait 30 seconds before covering a player who hasn't reconnected yet.
 - A player who drops keeps their seat for 3 minutes and gets it back by reloading (or reopening
   the table link) on the same device. Meanwhile a bot plays their turns; if they don't return,
   the bot keeps the seat.
