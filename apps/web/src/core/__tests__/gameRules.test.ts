@@ -1543,6 +1543,7 @@ test('Map rotation helpers invert accurately across 0/90/180/270 and multiplayer
         ],
         mySeat: 1,
         settings: DEFAULT_TABLE_SETTINGS,
+        turnClock: null,
         game: p2View,
         events: [],
         seq: 1,

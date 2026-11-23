@@ -23,7 +23,15 @@ export interface SeatInfo {
  */
 export type TableSettings = Required<
   Pick<GameSettings, 'unitCounts' | 'dynamicWeather' | 'fogOfWar' | 'doomsdayEnabled' | 'victoryMode' | 'aiDifficulty' | 'mutators' | 'mapSeed'>
->;
+> & {
+  /** Seconds a turn starts with. 0 = no timer. Host picks 0 (off) | 30 | 45 | 60 | 90. */
+  turnBaseS: number;
+  /** Seconds banked after every action. 0 = no increment. Host picks 0 | 15 | 30 | 45 | 60. */
+  turnIncrementS: number;
+};
+
+export const TURN_BASE_OPTIONS = [0, 30, 45, 60, 90] as const;
+export const TURN_INCREMENT_OPTIONS = [0, 15, 30, 45, 60] as const;
 
 export const DEFAULT_TABLE_SETTINGS: TableSettings = {
   unitCounts: { SOLDIER: 2, ASSAULTER: 1, SNIPER: 1 },
@@ -34,15 +42,22 @@ export const DEFAULT_TABLE_SETTINGS: TableSettings = {
   aiDifficulty: 'MEDIUM',
   mutators: { blitzCp: false, scarcity: false, ironman: false },
   mapSeed: '',
+  turnBaseS: 30,
+  turnIncrementS: 15,
 };
 
 /** Settings for a match from a table's rules (a fresh copy, safe to keep). */
-export const gameSettingsFor = (table: TableSettings, playerCount: number): GameSettings => ({
-  ...structuredClone(table),
-  playerCount,
-  gameMode: 'PVP',
-  mapSeed: table.mapSeed || undefined,
-});
+export const gameSettingsFor = (table: TableSettings, playerCount: number): GameSettings => {
+  const { turnBaseS: _base, turnIncrementS: _inc, ...rest } = table;
+  void _base;
+  void _inc;
+  return {
+    ...structuredClone(rest),
+    playerCount,
+    gameMode: 'PVP',
+    mapSeed: table.mapSeed || undefined,
+  };
+};
 
 /** A new two-player local game's settings. */
 export const DEFAULT_GAME_SETTINGS: GameSettings = gameSettingsFor(DEFAULT_TABLE_SETTINGS, 2);
@@ -50,12 +65,24 @@ export const DEFAULT_GAME_SETTINGS: GameSettings = gameSettingsFor(DEFAULT_TABLE
 /** Most units of each type per squad (as on the local setup screen). */
 export const UNIT_LIMITS = { SOLDIER: 5, ASSAULTER: 4, SNIPER: 3 } as const;
 
+export interface TurnClock {
+  /** Server timestamp (ms) when this view was built. */
+  sentAt: number;
+  /** Server timestamp (ms) when the current turn expires. */
+  deadline: number;
+  baseS: number;
+  incrementS: number;
+  seat: number;
+  turnKey: string;
+}
+
 export interface TableView {
   code: string;
   status: 'lobby' | 'playing' | 'finished';
   seats: SeatInfo[];
   mySeat: number;
   settings: TableSettings;
+  turnClock: TurnClock | null;
   game: PlayerGameView | null;
   /**
    * Effects of the change this view brings (shots, damage numbers, sounds), to play once.

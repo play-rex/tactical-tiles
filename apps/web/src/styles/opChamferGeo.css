@@ -156,6 +156,16 @@
 @media (prefers-reduced-motion: reduce) {
   .geo-drop.geo-turn-active > .geo-rim::after { animation: none; }
 }
+
+/* Timed turn: the rim stops looping and becomes a depleting time ring (JS sets --turn-frac 1->0). */
+.geo-drop.geo-turn-active.geo-turn-timed > .geo-rim::after {
+  animation: none;
+  background: conic-gradient(
+    from -90deg,
+    var(--turn-color, #1D5EFF) calc(var(--turn-frac, 1) * 100%),
+    rgba(178, 188, 203, 0.5) 0
+  );
+}
 .geo-body {
   min-width: 0;
   background: linear-gradient(180deg, var(--op-card-top) 0%, var(--op-card-bot) 100%);
@@ -329,6 +339,24 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .tt-sheet { animation: none; }
+}
+
+/* Setup-page space savers: environment toggles pair up, squad loadout sits in 3 columns. */
+.tt-env2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  align-items: stretch;
+}
+.tt-squad3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  align-items: stretch;
+}
+@media (max-width: 560px) {
+  .tt-env2 { grid-template-columns: minmax(0, 1fr); }
+  .tt-squad3 { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Side-by-side setup columns stack on narrow screens (inline grid styles need !important) */

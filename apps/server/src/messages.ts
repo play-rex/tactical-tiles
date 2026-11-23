@@ -26,6 +26,8 @@ export const settingsMsg = z.object({
   aiDifficulty: z.enum(['EASY', 'MEDIUM', 'HARD']),
   mutators: z.object({ blitzCp: z.boolean(), scarcity: z.boolean(), ironman: z.boolean() }),
   mapSeed: z.string().max(12).regex(/^[A-Za-z0-9]*$/),
+  turnBaseS: z.number().int().refine(v => [0, 30, 45, 60, 90].includes(v), 'Invalid turn time'),
+  turnIncrementS: z.number().int().refine(v => [0, 15, 30, 45, 60].includes(v), 'Invalid increment'),
 });
 
 export const removeSeatMsg = z.object({ seat: z.number().int().min(0) });

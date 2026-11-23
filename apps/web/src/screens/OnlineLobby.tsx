@@ -10,7 +10,9 @@ import {
   SECTION_LABEL,
   SquadLoadoutControls,
   StageShell,
+  TurnClockControls,
   VictoryModeControl,
+  SquadGuideButton,
 } from '../components/ui/MatchRulesControls';
 import { useCopyState } from '../hooks/useCopyState';
 import { codeFromUrl, goHome, tablePath, useOnline } from '../net/useOnline';
@@ -127,7 +129,10 @@ const RulesPanel: React.FC<{ settings: TableSettings; isHost: boolean; hasBots: 
         onPatch={set}
       />
 
-      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>SQUAD ({total} UNITS EACH)</div>
+      <div style={{ ...SECTION_LABEL, marginTop: '4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+        <span>SQUAD ({total} UNITS EACH)</span>
+        <SquadGuideButton />
+      </div>
       <SquadLoadoutControls
         unitCounts={settings.unitCounts}
         disabled={!isHost}
@@ -141,6 +146,9 @@ const RulesPanel: React.FC<{ settings: TableSettings; isHost: boolean; hasBots: 
           <DifficultyButtons value={settings.aiDifficulty} disabled={!isHost} onChange={aiDifficulty => set({ aiDifficulty })} />
         </>
       )}
+
+      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>TURN CLOCK (ONLINE)</div>
+      <TurnClockControls turnBaseS={settings.turnBaseS ?? 30} turnIncrementS={settings.turnIncrementS ?? 15} disabled={!isHost} onPatch={set} />
 
       <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>MUTATORS</div>
       <MutatorToggles mutators={settings.mutators} disabled={!isHost} onChange={mutators => set({ mutators })} />

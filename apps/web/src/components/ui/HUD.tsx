@@ -35,6 +35,7 @@ import {
   getUnitAttackCost,
 } from '@tactical/engine/rules/CombatRules';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME, playerDisplayName } from './GeoPrimitives';
+import { ActiveTurnClock } from '../game/ui/TurnClock';
 
 /**
  * How loudly a log line is shown: the turn passing is a divider, routine moves and purchases
@@ -479,6 +480,8 @@ export const LeftPanel: React.FC = React.memo(() => {
               {statsLabel}: {statsValue}
             </span>
           </div>
+
+          {isCurrent && <ActiveTurnClock color={pTheme.border} />}
 
           {/* Euros & CP Recessed Wells */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>

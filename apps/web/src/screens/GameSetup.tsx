@@ -17,6 +17,7 @@ import {
   SquadLoadoutControls,
   StageShell,
   VictoryModeControl,
+  SquadGuideButton,
 } from '../components/ui/MatchRulesControls';
 
 interface MapCardProps {
@@ -252,9 +253,6 @@ export const GameSetup: React.FC = () => {
           }
           right={
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              <GeoButton variant="violet" onClick={openOnline} coreStyle={{ padding: '7px 14px' }}>
-                PLAY ONLINE
-              </GeoButton>
               <GeoButton onClick={openTutorial} coreStyle={{ padding: '7px 14px' }}>
                 ? HOW TO PLAY
               </GeoButton>
@@ -512,18 +510,24 @@ export const GameSetup: React.FC = () => {
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
                       <GeoButton
-                        variant={settings.gameMode === 'PVP' ? 'blue' : 'default'}
+                        variant="blue"
                         fullWidth
-                        onClick={() => setSettings({ ...settings, gameMode: 'PVP' })}
+                        title={settings.gameMode === 'PVP' ? 'Hot-seat multiplayer — tap to switch to VS AI' : 'You vs the AI — tap to switch to hot-seat'}
+                        onClick={() => setSettings(settings.gameMode === 'PVP'
+                          ? { ...settings, gameMode: 'PVE', playerCount: 2 }
+                          : { ...settings, gameMode: 'PVP' })}
+                        coreStyle={{ padding: '8px 4px' }}
                       >
-                        MULTIPLAYER
+                        📍 LOCAL: {settings.gameMode === 'PVP' ? 'TURN-BY-TURN' : 'VS AI'}
                       </GeoButton>
                       <GeoButton
-                        variant={settings.gameMode === 'PVE' ? 'red' : 'default'}
+                        variant="default"
                         fullWidth
-                        onClick={() => setSettings({ ...settings, gameMode: 'PVE', playerCount: 2 })}
+                        title="Create or join an online table"
+                        onClick={openOnline}
+                        coreStyle={{ padding: '8px 4px' }}
                       >
-                        VS AI
+                        🌐 ONLINE →
                       </GeoButton>
                     </div>
 
@@ -606,8 +610,9 @@ export const GameSetup: React.FC = () => {
 
                   {/* COLUMN B: SQUAD LOADOUT & MUTATORS */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                    <div style={SECTION_LABEL}>
-                      3. STARTING SQUAD ({totalUnits} UNITS)
+                    <div style={{ ...SECTION_LABEL, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                      <span>3. STARTING SQUAD ({totalUnits} UNITS)</span>
+                      <SquadGuideButton />
                     </div>
 
                     <SquadLoadoutControls

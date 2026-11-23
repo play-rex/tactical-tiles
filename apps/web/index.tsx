@@ -16,6 +16,7 @@ import { TurnBanner } from './src/components/game/ui/TurnBanner';
 import { CameraFollow } from './src/components/game/ui/CameraFollow';
 import { useNarrow } from './src/hooks/useNarrow';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME, playerDisplayName } from './src/components/ui/GeoPrimitives';
+import { TurnClockLine } from './src/components/game/ui/TurnClock';
 import { getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { canUnitAttackFromTile } from '@tactical/engine/rules/CombatRules';
 import { SoundFX } from './src/core/audio/SoundFX';
@@ -116,6 +117,8 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
     else if (guidance.startsWith('BLUE Move')) guidance = 'Tap a blue tile to move there, a red one to attack. INTEL has more actions.';
   }
 
+
+
   const turnChip = (
     <span
       className="geo-chip"
@@ -144,6 +147,7 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
         <div style={{ padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             {turnChip}
+            <TurnClockLine />
             <span style={{ flex: 1 }} />
             <GeoButton
               onClick={() => rotateMap(90)}

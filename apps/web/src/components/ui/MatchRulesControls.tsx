@@ -1,7 +1,8 @@
 import React from 'react';
-import { UNIT_LIMITS, type TableSettings } from '@tactical/engine';
+import { TURN_BASE_OPTIONS, TURN_INCREMENT_OPTIONS, UNIT_LIMITS, type TableSettings } from '@tactical/engine';
 import type { AIDifficulty, GameMutators, UnitType } from '@tactical/engine/types';
 import { GeoButton, GeoCard, GeoToggle, GeoWell } from './GeoPrimitives';
+import { UnitGuideModal, UnitMapIcon } from './UnitDeckModal';
 
 export const SECTION_LABEL: React.CSSProperties = {
   fontSize: '12px',
@@ -76,7 +77,34 @@ export const BrandHeader: React.FC<{ badge?: React.ReactNode; right?: React.Reac
   </GeoCard>
 );
 
-type RulePatch = Partial<Pick<TableSettings, 'victoryMode' | 'doomsdayEnabled' | 'dynamicWeather' | 'fogOfWar' | 'aiDifficulty' | 'unitCounts' | 'mutators'>>;
+type RulePatch = Partial<Pick<TableSettings, 'victoryMode' | 'doomsdayEnabled' | 'dynamicWeather' | 'fogOfWar' | 'aiDifficulty' | 'unitCounts' | 'mutators' | 'turnBaseS' | 'turnIncrementS'>>;
+
+export const TurnClockControls: React.FC<{
+  turnBaseS: number;
+  turnIncrementS: number;
+  disabled?: boolean;
+  onPatch: (patch: RulePatch) => void;
+}> = ({ turnBaseS, turnIncrementS, disabled = false, onPatch }) => (
+  <>
+    <div style={{ fontSize: '12px', fontWeight: 800, color: 'var(--op-ink-muted)' }}>TURN TIME (SEC)</div>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px' }}>
+      {TURN_BASE_OPTIONS.map(v => (
+        <GeoButton key={v} fullWidth disabled={disabled} variant={turnBaseS === v ? 'blue' : 'default'} onClick={() => onPatch({ turnBaseS: v })} coreStyle={{ padding: '7px 4px' }}>
+          {v === 0 ? 'OFF' : v}
+        </GeoButton>
+      ))}
+    </div>
+    <div style={{ fontSize: '12px', fontWeight: 800, color: 'var(--op-ink-muted)', marginTop: '6px' }}>+ SECONDS PER ACTION</div>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '6px' }}>
+      {TURN_INCREMENT_OPTIONS.map(v => (
+        <GeoButton key={v} fullWidth disabled={disabled} variant={turnIncrementS === v ? 'mint' : 'default'} onClick={() => onPatch({ turnIncrementS: v })} coreStyle={{ padding: '7px 4px' }}>
+          {v === 0 ? '+0' : '+' + v}
+        </GeoButton>
+      ))}
+    </div>
+    <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)' }}>Idle past the clock auto-ends the turn. Every action banks its bonus with no cap.</div>
+  </>
+);
 
 export const VictoryModeControl: React.FC<{
   victoryMode: TableSettings['victoryMode'];
@@ -127,7 +155,7 @@ export const EnvironmentToggles: React.FC<{
   detailedLabels?: boolean;
   onPatch: (patch: RulePatch) => void;
 }> = ({ dynamicWeather, fogOfWar, disabled = false, detailedLabels = false, onPatch }) => (
-  <>
+  <div className="tt-env2">
     <GeoToggle
       label={detailedLabels ? 'Dynamic Weather (Voronoi Shifts)' : 'Dynamic Weather'}
       value={dynamicWeather}
@@ -140,7 +168,7 @@ export const EnvironmentToggles: React.FC<{
       disabled={disabled}
       onChange={v => onPatch({ fogOfWar: v })}
     />
-  </>
+  </div>
 );
 
 export const DifficultyButtons: React.FC<{
@@ -171,6 +199,7 @@ export const SquadLoadoutControls: React.FC<{
   minTotal?: number;
   onChange: (nextCounts: TableSettings['unitCounts']) => void;
 }> = ({ unitCounts, disabled = false, showDetails = false, minTotal = 0, onChange }) => {
+
   const step = (type: UnitType, delta: number) => {
     const next = Math.max(0, Math.min(UNIT_LIMITS[type], unitCounts[type] + delta));
     const updated = { ...unitCounts, [type]: next };
@@ -179,44 +208,40 @@ export const SquadLoadoutControls: React.FC<{
   };
 
   return (
-    <>
+    <div className="tt-squad3">
       {UNIT_META.map(({ type, label, role }) => {
         const max = UNIT_LIMITS[type];
         return (
           <GeoWell
             key={type}
             coreStyle={{
-              padding: showDetails ? '8px 10px' : '6px 10px',
+              padding: '7px 6px',
               display: 'flex',
-              justifyContent: 'space-between',
+              flexDirection: 'column',
               alignItems: 'center',
-              gap: showDetails ? '8px' : undefined,
+              textAlign: 'center',
+              gap: '2px',
             }}
           >
-            <div>
-              <div style={{ fontSize: '13px', fontWeight: 900 }}>
-                {label}
-                {showDetails && (
-                  <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600 }}> (Max {max})</span>
-                )}
-              </div>
-              {showDetails && <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)' }}>{role}</div>}
+            <UnitMapIcon type={type} label={label} size={40} />
+            <div style={{ fontSize: '13px', fontWeight: 900, lineHeight: 1.2, textAlign: 'center' }}>
+              {label}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
               <GeoButton
                 onClick={() => step(type, -1)}
                 disabled={disabled || unitCounts[type] <= 0}
-                coreStyle={{ padding: showDetails ? '4px 10px' : '3px 10px' }}
+                coreStyle={{ padding: '3px 10px' }}
               >
                 -
               </GeoButton>
-              <span style={{ fontSize: '15px', fontWeight: 900, width: '18px', textAlign: 'center' }}>
-                {unitCounts[type]}
+              <span style={{ fontSize: '15px', fontWeight: 900, minWidth: '34px', textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>
+                {unitCounts[type]}<span style={{ fontSize: '11px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>/{max}</span>
               </span>
               <GeoButton
                 onClick={() => step(type, 1)}
                 disabled={disabled || unitCounts[type] >= max}
-                coreStyle={{ padding: showDetails ? '4px 10px' : '3px 10px' }}
+                coreStyle={{ padding: '3px 10px' }}
               >
                 +
               </GeoButton>
@@ -224,6 +249,19 @@ export const SquadLoadoutControls: React.FC<{
           </GeoWell>
         );
       })}
+    </div>
+  );
+};
+
+/** Single UNIT GUIDE ? button + modal. Renders in the section header row, sharing its line. */
+export const SquadGuideButton: React.FC = () => {
+  const [guide, setGuide] = React.useState(false);
+  return (
+    <>
+      <GeoButton onClick={() => setGuide(true)} coreStyle={{ padding: '4px 12px', fontSize: '12px' }} title="Open the squad guide: all three units side by side">
+        SQUAD GUIDE ?
+      </GeoButton>
+      {guide && <UnitGuideModal onClose={() => setGuide(false)} />}
     </>
   );
 };

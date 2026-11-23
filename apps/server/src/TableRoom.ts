@@ -157,6 +157,10 @@ export class TableRoom extends Room {
   private messageAllowed = windowLimiter(1000);
   private pending: { clear(): void } | null = null;
   private restoreHold: { clear(): void } | null = null;
+  /** Server timestamp (ms) when the current human turn expires. Null outside a human turn. */
+  private turnDeadline: number | null = null;
+  private turnKey = '';
+  private turnTimeout: { clear(): void } | null = null;
   private counted = false;
   /** After a restore: bots hold off for players finding their way back until then. */
   private graceUntil = 0;
@@ -251,11 +255,13 @@ export class TableRoom extends Room {
   private restore(snap: TableSnapshot) {
     this.seats = snap.seats.map(s => ({ ...s, sessionId: null, connected: s.isBot }));
     this.hostPlayerId = snap.hostPlayerId;
-    this.settings = snap.settings;
+    this.settings = { ...structuredClone(DEFAULT_TABLE_SETTINGS), ...snap.settings };
     this.status = snap.status;
     this.game = snap.game;
     this.seq = snap.seq;
     this.snapshotDirty = false;
+    this.turnKey = '';
+    this.turnDeadline = null;
     this.refreshSight();
     this.graceUntil = Date.now() + timings.restoreGraceMs;
     // Nobody is connected yet: keep the room open while they find their way back, and hand
@@ -365,6 +371,9 @@ export class TableRoom extends Room {
     this.pending = null;
     this.restoreHold?.clear();
     this.restoreHold = null;
+    this.turnTimeout?.clear();
+    this.turnTimeout = null;
+    this.turnDeadline = null;
     if (this.counted) TableRoom.openTables--;
     // Everyone has gone for good: forget the table. (On shutdown, keep it to restore.)
     if (!TableRoom.shuttingDown) TableRoom.store?.delete(this.roomId);
@@ -382,6 +391,8 @@ export class TableRoom extends Room {
     this.seq++;
     this.snapshotDirty = true;
     this.refreshSight();
+    this.turnKey = '';
+    this.turnDeadline = null;
     this.afterChange();
   }
 
@@ -414,6 +425,11 @@ export class TableRoom extends Room {
     const seatEvents = this.seats.map((s, i) =>
       s.isBot ? [] : eventsFor(result.events, fog, sightBefore[i] ?? EMPTY_SIGHT, this.sight[i] ?? EMPTY_SIGHT),
     );
+    // Increment is uncapped: every action (other than ending the turn) banks its bonus.
+    // CP costs bound how many actions a turn can hold, so active play earns time.
+    if (action.type !== 'END_TURN' && this.turnDeadline !== null) {
+      this.turnDeadline += this.incrementMs();
+    }
     this.seq++;
     if (after.winner !== null) this.status = 'finished';
     this.snapshotDirty = true;
@@ -421,12 +437,62 @@ export class TableRoom extends Room {
     return true;
   }
 
+  private baseMs() {
+    const v = this.settings.turnBaseS;
+    return (typeof v === 'number' && [0, 30, 45, 60, 90].includes(v) ? v : 30) * 1000;
+  }
+
+  private incrementMs() {
+    const v = this.settings.turnIncrementS;
+    return (typeof v === 'number' && [0, 15, 30, 45, 60].includes(v) ? v : 15) * 1000;
+  }
+
+  private turnId() {
+    const g = this.game;
+    return g ? `${g.turnCounter}:${g.currentPlayer}` : '';
+  }
+
   /** Broadcast, then schedule whatever happens next without a human. */
   private afterChange(seatEvents?: GameEvent[][]) {
     this.pending?.clear();
     this.pending = null;
+    const game = this.game;
+    if (!game || this.status !== 'playing' || game.winner !== null) {
+      this.turnTimeout?.clear();
+      this.turnTimeout = null;
+      this.turnDeadline = null;
+      this.broadcastViews(seatEvents);
+      return;
+    }
+    // A new turn gets a fresh clock (0 base = timer off: no deadline, no auto-end).
+    if (this.turnId() !== this.turnKey) {
+      this.turnKey = this.turnId();
+      const base = this.baseMs();
+      this.turnDeadline = base > 0 ? Date.now() + base : null;
+    }
     this.broadcastViews(seatEvents);
     this.scheduleAutoTurn();
+    this.scheduleTurnExpiry();
+  }
+
+  /** Connected humans get a hard deadline: on expiry their turn auto-ends. */
+  private scheduleTurnExpiry() {
+    this.turnTimeout?.clear();
+    this.turnTimeout = null;
+    const game = this.game;
+    if (!game || this.status !== 'playing' || game.winner !== null || this.turnDeadline === null) return;
+    const seat = this.seats[game.currentPlayer];
+    if (!seat || seat.isBot || !seat.connected) return;
+    const key = this.turnId();
+    const delay = Math.max(0, this.turnDeadline - Date.now());
+    this.turnTimeout = this.clock.setTimeout(() => {
+      const g = this.game;
+      if (!g || this.status !== 'playing' || g.winner !== null) return;
+      if (this.turnId() !== key || g.currentPlayer !== game.currentPlayer) return;
+      const s = this.seats[g.currentPlayer];
+      if (!s || s.isBot || !s.connected) return;
+      this.apply({ type: 'END_TURN' }, true);
+    }, delay);
   }
 
   private scheduleAutoTurn() {
@@ -520,6 +586,19 @@ export class TableRoom extends Room {
       : [];
   }
 
+  private turnClockView(): TableView['turnClock'] {
+    const game = this.game;
+    if (!game || this.status !== 'playing' || game.winner !== null || this.turnDeadline === null) return null;
+    return {
+      sentAt: Date.now(),
+      deadline: this.turnDeadline,
+      baseS: Math.round(this.baseMs() / 1000),
+      incrementS: Math.round(this.incrementMs() / 1000),
+      seat: game.currentPlayer,
+      turnKey: this.turnKey,
+    };
+  }
+
   private seatOf(client: Client) {
     return this.seats.findIndex(s => s.sessionId === client.sessionId);
   }
@@ -610,6 +689,7 @@ export class TableRoom extends Room {
       seats,
       mySeat,
       settings: this.settings,
+      turnClock: this.turnClockView(),
       game: gameView,
       events,
       seq: this.seq,
