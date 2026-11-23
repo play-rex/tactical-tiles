@@ -7,7 +7,7 @@
 #
 # A redeploy restarts the server: players see "reconnecting…" for a few seconds, then carry on.
 
-name: tactical-tiles
+name: playrex-tactical-tiles
 
 services:
   app:
