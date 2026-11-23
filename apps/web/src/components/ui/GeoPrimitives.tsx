@@ -30,6 +30,15 @@ const VARIANT_STYLES: Record<GeoVariant, { bg: string; color: string; rim?: stri
 /** Converts a CSS `#RRGGBB` hex string into a numeric 0xRRGGBB PixiJS color. */
 export const hexToPixiColor = (hex: string): number => parseInt(hex.replace('#', ''), 16);
 
+/** Display name for a seat: online seat name wins, then local hot-seat name, else Player N. */
+export const playerDisplayName = (pid: number, playerNames?: string[], seatName?: string): string => {
+  const seat = (seatName ?? '').trim();
+  if (seat) return seat.length > 18 ? `${seat.slice(0, 18)}…` : seat;
+  const local = (playerNames?.[pid] ?? '').trim();
+  if (local) return local.length > 18 ? `${local.slice(0, 18)}…` : local;
+  return `Player ${pid + 1}`;
+};
+
 /** High-contrast light-mode theme mapping for all 6 faction colors. */
 export const PLAYER_UI_THEME: Record<number, { badgeBg: string; badgeText: string; ink: string; border: string }> = {
   0: { badgeBg: '#E53935', badgeText: '#FFFFFF', ink: '#C62828', border: '#E53935' },

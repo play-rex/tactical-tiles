@@ -34,7 +34,7 @@ import {
   getUnitBaseDamage,
   getUnitAttackCost,
 } from '@tactical/engine/rules/CombatRules';
-import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from './GeoPrimitives';
+import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME, playerDisplayName } from './GeoPrimitives';
 
 /**
  * How loudly a log line is shown: the turn passing is a divider, routine moves and purchases
@@ -52,6 +52,9 @@ const logWeight = (log: LogEntry): 'turn' | 'routine' | 'normal' | 'key' => {
 const LogView: React.FC = React.memo(() => {
   const gameLog = useGameStore(state => state.gameLog);
   const viewer = useGameStore(viewerSeat);
+  const mode = useGameStore(state => state.mode);
+  const playerNames = useGameStore(state => state.settings.playerNames);
+  const seats = useOnline(state => state.view?.seats);
 
   const groupedLogs: Record<number, LogEntry[]> = {};
   gameLog.forEach(log => {
@@ -94,7 +97,7 @@ const LogView: React.FC = React.memo(() => {
               const pTheme = PLAYER_UI_THEME[log.playerId];
               const color = isEnv ? '#475569' : (pTheme?.ink || 'var(--op-ink)');
               const stripe = isEnv ? '#64748B' : (pTheme?.badgeBg || '#1D5EFF');
-              const who = isEnv ? 'Map' : `P${log.playerId + 1}`;
+              const who = isEnv ? 'Map' : playerDisplayName(log.playerId, playerNames, mode === 'ONLINE' ? seats?.[log.playerId]?.name : undefined);
               const weight = logWeight(log);
 
               if (weight === 'turn') {
@@ -135,6 +138,13 @@ const LogView: React.FC = React.memo(() => {
 const BuildingInfoPanel: React.FC<{ tile: Tile }> = React.memo(({ tile }) => {
   const weatherState = useGameStore(state => state.weather);
   const victoryMode = useGameStore(state => state.settings.victoryMode);
+  const localNames = useGameStore(state => state.settings.playerNames);
+  const online = useGameStore(state => state.mode === 'ONLINE');
+  const onlineSeats = useOnline(state => state.view?.seats);
+  const ownerLabel = (owner: number | null | undefined) =>
+    owner === null || owner === undefined
+      ? 'NEUTRAL'
+      : playerDisplayName(owner, localNames, online ? onlineSeats?.[owner]?.name : undefined).toUpperCase();
 
   let name: string = tile.type;
   let ownerColor = 'var(--op-ink-muted)';
@@ -146,7 +156,7 @@ const BuildingInfoPanel: React.FC<{ tile: Tile }> = React.memo(({ tile }) => {
     name = config.name.toUpperCase();
     if (tile.owner !== null && tile.owner !== undefined) {
       ownerColor = PLAYER_UI_THEME[tile.owner]?.ink || 'var(--op-ink)';
-      ownerName = `PLAYER ${tile.owner + 1}`;
+      ownerName = ownerLabel(tile.owner);
     }
     stats.push({ label: 'DEFENSE', value: `+${Math.round(config.defense * 100)}%` });
     stats.push({ label: 'RANGE', value: `+${config.rangeBonus}` });
@@ -161,7 +171,7 @@ const BuildingInfoPanel: React.FC<{ tile: Tile }> = React.memo(({ tile }) => {
     name = 'HEADQUARTERS';
     if (tile.owner !== null && tile.owner !== undefined) {
       ownerColor = PLAYER_UI_THEME[tile.owner]?.ink || 'var(--op-ink)';
-      ownerName = `PLAYER ${tile.owner + 1} BASE`;
+      ownerName = `${ownerLabel(tile.owner)} BASE`;
     }
     if (victoryMode === 'CONQUER' && tile.hp !== undefined) {
       stats.push({ label: 'INTEGRITY', value: `${tile.hp}/${tile.maxHp}` });
@@ -320,7 +330,7 @@ export const LeftPanel: React.FC = React.memo(() => {
   const online = useGameStore(state => state.mode === 'ONLINE');
   const mySeat = useGameStore(state => state.mySeat);
   const onlineSeats = useOnline(state => state.view?.seats);
-  const seatNames = online ? onlineSeats : undefined;
+  const playerNames = useGameStore(state => state.settings.playerNames);
   const currentPlayer = useGameStore(state => state.currentPlayer);
   const playerCount = useGameStore(state => state.settings.playerCount);
   const playerCp = useGameStore(state => state.playerCp);
@@ -413,7 +423,7 @@ export const LeftPanel: React.FC = React.memo(() => {
         <GeoCard key={pid} style={{ opacity: 0.55, flexShrink: 0 }}>
           <div style={{ padding: '7px 11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ color: pTheme.ink, fontWeight: 800, fontSize: '13px', textDecoration: 'line-through' }}>
-              P{pid + 1}{seatNames?.[pid] ? ` ${seatNames[pid].name}` : ''} (ELIM)
+              {playerDisplayName(pid, playerNames, online ? onlineSeats?.[pid]?.name : undefined)} (P{pid + 1} • ELIM)
             </span>
             <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>OUT</span>
           </div>
@@ -445,16 +455,14 @@ export const LeftPanel: React.FC = React.memo(() => {
               paddingBottom: '4px',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-              <span className="geo-chip" style={{ width: '9px', height: '9px', background: pTheme.badgeBg }} />
-              <span style={{ fontWeight: 900, fontSize: '14px', color: pTheme.ink }}>
-                P{pid + 1}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0 }}>
+              <span className="geo-chip" style={{ width: '9px', height: '9px', background: pTheme.badgeBg, flexShrink: 0 }} />
+              <span style={{ fontWeight: 900, fontSize: '14px', color: pTheme.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {playerDisplayName(pid, playerNames, online ? onlineSeats?.[pid]?.name : undefined)}
               </span>
-              {seatNames?.[pid] && (
-                <span style={{ fontWeight: 800, fontSize: '12px', color: 'var(--op-ink-muted)', maxWidth: '110px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {seatNames[pid].name}{pid === mySeat ? ' (you)' : ''}
-                </span>
-              )}
+              <span style={{ fontWeight: 800, fontSize: '11px', color: 'var(--op-ink-muted)', flexShrink: 0 }}>
+                P{pid + 1}{online && pid === mySeat ? ' • YOU' : ''}{isCurrent ? ' • TURN' : ''}
+              </span>
               <WeatherIcon type={weather.playerZones[pid] || 'CLEAR'} zoneNum={pid + 1} />
             </div>
             <span
@@ -638,7 +646,7 @@ export const LeftPanel: React.FC = React.memo(() => {
                   padding: '2px 7px',
                 }}
               >
-                P{currentPlayer + 1} • €{playerGold[currentPlayer] ?? 0}
+                {playerDisplayName(currentPlayer, playerNames, online ? onlineSeats?.[currentPlayer]?.name : undefined).toUpperCase()} • €{playerGold[currentPlayer] ?? 0}
               </span>
             ) : (
               <GeoChip variant="default" style={{ fontSize: '12px', padding: '2px 7px' }}>
@@ -860,6 +868,9 @@ const HoveredTacticalPreview: React.FC<{
   const victoryMode = settings.victoryMode;
   const isAiTurn = useGameStore(state => state.isAiTurn);
   const winner = useGameStore(state => state.winner);
+  const online = useGameStore(state => state.mode === 'ONLINE');
+  const onlineSeats = useOnline(state => state.view?.seats);
+  const ownerLabel = (owner: number) => playerDisplayName(owner, settings.playerNames, online ? onlineSeats?.[owner]?.name : undefined);
 
   const activeBanks = useMemo(
     () => mapData.filter(t => t.type === 'BANK' && (t.hackProgress || 0) < 100),
@@ -906,7 +917,7 @@ const HoveredTacticalPreview: React.FC<{
     if (crossfireBonus > 0) notes.push(`Crossfire Ally: +${crossfireBonus} DMG`);
     if (hoveredEnemy.isOverwatching) notes.push('Breaks Overwatch (SUPPRESSED!)');
     combatPreview = {
-      title: `P${hoveredEnemy.owner + 1} ${UNIT_STATS[hoveredEnemy.type].name}`,
+      title: `${ownerLabel(hoveredEnemy.owner)} ${UNIT_STATS[hoveredEnemy.type].name}`,
       damage,
       hpBefore: hoveredEnemy.hp,
       hpAfter: Math.max(0, hoveredEnemy.hp - damage),
@@ -916,7 +927,7 @@ const HoveredTacticalPreview: React.FC<{
     const damage = calculateSiegeDamage(selectedUnit, selectedUnitTile);
     const piercesBase = selectedUnit.type === 'ASSAULTER' && (selectedUnit.rank ?? 0) >= 3;
     combatPreview = {
-      title: `P${(hoveredTile.owner ?? 0) + 1} Headquarters`,
+      title: `${ownerLabel(hoveredTile.owner ?? 0)} Headquarters`,
       damage,
       hpBefore: hoveredTile.hp,
       hpAfter: Math.max(0, hoveredTile.hp - damage),
@@ -1048,6 +1059,10 @@ export const RightPanel: React.FC = () => {
   const fogOfWar = useGameStore(state => state.settings.fogOfWar);
   const isAiTurn = useGameStore(state => state.isAiTurn);
   const winner = useGameStore(state => state.winner);
+  const mode = useGameStore(state => state.mode);
+  const localNames = useGameStore(state => state.settings.playerNames);
+  const onlineSeats = useOnline(state => state.view?.seats);
+  const unitOwnerLabel = (owner: number) => playerDisplayName(owner, localNames, mode === 'ONLINE' ? onlineSeats?.[owner]?.name : undefined);
   const reloadUnit = useGameStore(state => state.reloadUnit);
   const enterOverwatch = useGameStore(state => state.enterOverwatch);
   const cancelPlacement = useGameStore(state => state.cancelPlacement);
@@ -1218,7 +1233,7 @@ export const RightPanel: React.FC = () => {
                         </GeoChip>
                       </div>
                       <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600, display: 'flex', justifyContent: 'space-between', marginTop: '2px' }}>
-                        <span>{selectedUnit.owner === viewer ? 'Your Unit' : `P${selectedUnit.owner + 1} Unit`}</span>
+                        <span style={{ color: (PLAYER_UI_THEME[selectedUnit.owner] ?? PLAYER_UI_THEME[0]).ink, fontWeight: 800 }}>{unitOwnerLabel(selectedUnit.owner)} Unit</span>
                         <span>{nextThreshold !== null ? `XP ${xp}/${nextThreshold}` : `MAX (${xp})`} • {selectedUnit.kills ?? 0}K</span>
                       </div>
                     </div>
@@ -1510,7 +1525,8 @@ export const WinnerOverlay: React.FC = () => {
   if (winner === null) return null;
   const online = mode === 'ONLINE';
   const isHost = Boolean(onlineView?.seats[mySeat]?.isHost);
-  const winnerName = online ? onlineView?.seats[winner]?.name : undefined;
+  const localNames = useGameStore(state => state.settings.playerNames);
+  const winnerName = playerDisplayName(winner, localNames, online ? onlineView?.seats[winner]?.name : undefined);
   const seedValue = matchSummary?.seed || activeSeed;
   const pTheme = PLAYER_UI_THEME[winner] || PLAYER_UI_THEME[0];
 
@@ -1538,8 +1554,8 @@ export const WinnerOverlay: React.FC = () => {
               {activeMission
                 ? winner === 0 ? 'OPERATION COMPLETE!' : 'OPERATION FAILED'
                 : online
-                  ? winner === mySeat ? 'VICTORY!' : `${(winnerName ?? `PLAYER ${winner + 1}`).toUpperCase()} WINS`
-                  : `PLAYER ${winner + 1} WINS!`}
+                  ? winner === mySeat ? 'VICTORY!' : `${winnerName.toUpperCase()} WINS`
+                  : `${winnerName.toUpperCase()} WINS!`}
             </h1>
             <p style={{ color: 'var(--op-ink-muted)', fontSize: '13px', margin: 0, fontWeight: 600 }}>
               {activeMission

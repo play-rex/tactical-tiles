@@ -30,6 +30,8 @@ import {
   getPostMoveTargetTiles,
 } from '../../../core/hoverMovePreview';
 import { useGameStore, viewerSeat } from '../../../store/useGameStore';
+import { useOnline } from '../../../net/useOnline';
+import { playerDisplayName } from '../../ui/GeoPrimitives';
 
 interface ScreenPt {
   left: number;
@@ -70,6 +72,10 @@ export const MapHoverCard: React.FC = () => {
   const viewer = useGameStore(viewerSeat);
   const isAiTurn = useGameStore(s => s.isAiTurn);
   const winner = useGameStore(s => s.winner);
+  const mode = useGameStore(s => s.mode);
+  const onlineSeats = useOnline(s => s.view?.seats);
+  const ownerLabel = (owner: number) =>
+    playerDisplayName(owner, settings.playerNames, mode === 'ONLINE' ? onlineSeats?.[owner]?.name : undefined);
 
   useEffect(() => {
     if (!viewport) return;
@@ -173,7 +179,7 @@ export const MapHoverCard: React.FC = () => {
           if (visibleUnit.isOverwatching) tags.push('SUPPRESS OW');
           return {
             tone: 'red',
-            headerLeft: `IN RANGE • P${visibleUnit.owner + 1} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
+            headerLeft: `IN RANGE • ${ownerLabel(visibleUnit.owner).toUpperCase()} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
             headerRight: `${atkCost} CP`,
             body: `${hpAfter === 0 ? 'LETHAL' : 'HIT'} -${preview.damage} DMG (${visibleUnit.hp} → ${hpAfter} HP)`,
             tags,
@@ -195,8 +201,8 @@ export const MapHoverCard: React.FC = () => {
           headerLeft: selectedUnit.completed
             ? 'CANT ATTACK • DONE'
             : isOutOfRange
-            ? `OUT OF RANGE • P${visibleUnit.owner + 1} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`
-            : `BLOCKED • P${visibleUnit.owner + 1} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
+            ? `OUT OF RANGE • ${ownerLabel(visibleUnit.owner).toUpperCase()} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`
+            : `BLOCKED • ${ownerLabel(visibleUnit.owner).toUpperCase()} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
           headerRight: `${visibleUnit.hp}/${getUnitMaxHp(visibleUnit)} HP`,
           body: reason,
           tags: [
@@ -246,7 +252,7 @@ export const MapHoverCard: React.FC = () => {
         const hpAfter = Math.max(0, anchorTile.hp - dmg);
         return {
           tone: 'red',
-          headerLeft: `SIEGE P${(anchorTile.owner ?? 0) + 1} HQ`,
+          headerLeft: `SIEGE ${ownerLabel(anchorTile.owner ?? 0).toUpperCase()} HQ`,
           headerRight: `${atkCost} CP`,
           body: `${hpAfter === 0 ? 'DESTROYS HQ!' : 'SIEGE'} -${dmg} DMG (${anchorTile.hp} → ${hpAfter} HP)`,
           tags: selectedUnit.type === 'ASSAULTER' && (selectedUnit.rank ?? 0) >= 3 ? ['ACE PIERCE 100%'] : ['BASE ARMOR -20%'],
@@ -460,7 +466,7 @@ export const MapHoverCard: React.FC = () => {
       else if (visibleUnit.hasMoved) tags.push('MOVED');
       return {
         tone: visibleUnit.completed && visibleUnit.owner === currentPlayer ? 'amber' : 'slate',
-        headerLeft: `${visibleUnit.completed && visibleUnit.owner === currentPlayer ? 'DONE • ' : ''}P${visibleUnit.owner + 1} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
+        headerLeft: `${visibleUnit.completed && visibleUnit.owner === currentPlayer ? 'DONE • ' : ''}${ownerLabel(visibleUnit.owner).toUpperCase()} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
         headerRight: `${visibleUnit.hp}/${getUnitMaxHp(visibleUnit)} HP`,
         body: tags.slice(0, 4).join(' • '),
         tags: tags.slice(4),
@@ -511,12 +517,12 @@ export const MapHoverCard: React.FC = () => {
     let rightTag = '';
     if (anchorTile.type === 'BUILDING' && anchorTile.subType) {
       title = BUILDING_STATS[anchorTile.subType].name.toUpperCase();
-      rightTag = anchorTile.owner !== undefined && anchorTile.owner !== null ? `P${anchorTile.owner + 1} • +5€/t` : 'NEUTRAL • +5€/t';
+      rightTag = anchorTile.owner !== undefined && anchorTile.owner !== null ? `${ownerLabel(anchorTile.owner).toUpperCase()} • +5€/t` : 'NEUTRAL • +5€/t';
     } else if (anchorTile.type === 'BANK') {
       title = 'BANK VAULT';
       rightTag = (anchorTile.hackProgress || 0) >= 100 ? 'LOOTED' : `€${anchorTile.bankGoldReward || 200}`;
     } else if (anchorTile.type === 'BASE') {
-      title = `P${(anchorTile.owner ?? 0) + 1} HQ`;
+      title = `${ownerLabel(anchorTile.owner ?? 0).toUpperCase()} HQ`;
       if (anchorTile.hp !== undefined) rightTag = `${anchorTile.hp}/${anchorTile.maxHp} HP`;
     } else if (anchorTile.type === 'BARRIER') {
       title = 'BARRIER';
@@ -556,6 +562,8 @@ export const MapHoverCard: React.FC = () => {
     placementMode,
     pendingDrops,
     mines,
+    mode,
+    onlineSeats,
   ]);
 
   const tonePalette: Record<string, { bg: string; border: string; headBg: string; headInk: string }> = {

@@ -319,7 +319,8 @@ const reuseSettings = (prev: GameSettings, next: GameSettings): GameSettings =>
   prev.unitCounts.SNIPER === next.unitCounts.SNIPER &&
   Boolean(prev.mutators?.blitzCp) === Boolean(next.mutators?.blitzCp) &&
   Boolean(prev.mutators?.scarcity) === Boolean(next.mutators?.scarcity) &&
-  Boolean(prev.mutators?.ironman) === Boolean(next.mutators?.ironman)
+  Boolean(prev.mutators?.ironman) === Boolean(next.mutators?.ironman) &&
+  (prev.playerNames ?? []).join('\u0000') === (next.playerNames ?? []).join('\u0000')
     ? prev
     : next;
 

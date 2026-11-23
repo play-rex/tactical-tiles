@@ -492,6 +492,37 @@ export const GameSetup: React.FC = () => {
                           onChange={e => setSettings({ ...settings, playerCount: parseInt(e.target.value, 10) })}
                           style={{ width: '100%' }}
                         />
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
+                          {Array.from({ length: settings.playerCount }).map((_, i) => (
+                            <label key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontSize: '12px', fontWeight: 900, minWidth: '28px' }}>P{i + 1}</span>
+                              <input
+                                type="text"
+                                maxLength={18}
+                                placeholder={`Player ${i + 1}`}
+                                value={settings.playerNames?.[i] ?? ''}
+                                onChange={e => {
+                                  const next = [...(settings.playerNames ?? [])];
+                                  next[i] = e.target.value;
+                                  setSettings({ ...settings, playerNames: next });
+                                }}
+                                style={{
+                                  flex: 1,
+                                  minWidth: 0,
+                                  padding: '7px 9px',
+                                  background: '#FFFFFF',
+                                  border: '1.5px solid var(--op-line)',
+                                  borderRadius: '6px',
+                                  fontSize: '13px',
+                                  fontWeight: 700,
+                                  fontFamily: 'inherit',
+                                  color: 'var(--op-ink)',
+                                  outline: 'none',
+                                }}
+                              />
+                            </label>
+                          ))}
+                        </div>
                         {selectedMap && settings.playerCount === selectedMap.baseCount && (
                           <div style={{ fontSize: '12px', color: 'var(--acc-amber-ink)', fontWeight: 700 }}>
                             Max players limited by map bases.

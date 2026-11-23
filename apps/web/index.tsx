@@ -15,7 +15,7 @@ import { MapHoverCard } from './src/components/game/ui/MapHoverCard';
 import { TurnBanner } from './src/components/game/ui/TurnBanner';
 import { CameraFollow } from './src/components/game/ui/CameraFollow';
 import { useNarrow } from './src/hooks/useNarrow';
-import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from './src/components/ui/GeoPrimitives';
+import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME, playerDisplayName } from './src/components/ui/GeoPrimitives';
 import { getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { canUnitAttackFromTile } from '@tactical/engine/rules/CombatRules';
 import { SoundFX } from './src/core/audio/SoundFX';
@@ -69,7 +69,9 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
   const mode = useGameStore(state => state.mode);
   const seats = useOnline(state => state.view?.seats);
   const reconnecting = useOnline(state => state.reconnecting);
-  const seatName = (p: number) => (mode === 'ONLINE' && seats?.[p] ? `${seats[p].name} (P${p + 1})` : `P${p + 1}`);
+  const playerNames = useGameStore(state => state.settings.playerNames);
+  const seatName = (p: number) => playerDisplayName(p, playerNames, mode === 'ONLINE' ? seats?.[p]?.name : undefined);
+  const turnName = seatName(currentPlayer);
 
   let guidance = 'Select a unit to command, or press TAB.';
   if (mode === 'ONLINE' && reconnecting) {
@@ -82,7 +84,7 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
       ? `${seatName(currentPlayer)} — bot is playing the turn...`
       : `${seatName(currentPlayer)} is taking their turn...`;
   } else if (isAiTurn) {
-    guidance = `Enemy Commander (P${currentPlayer + 1}) is executing moves...`;
+    guidance = `${turnName} is executing moves...`;
   } else if (bankRewardPending && bankRewardPending.playerId === currentPlayer) {
     guidance = 'Vault Breached! Choose Euros or CP loot.';
   } else if (placementMode && placementMode.active) {
@@ -126,9 +128,7 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
         flexShrink: 0,
       }}
     >
-      {mode === 'ONLINE'
-        ? (isAiTurn ? `P${currentPlayer + 1} TURN` : `YOUR TURN (P${currentPlayer + 1})`)
-        : isAiTurn ? `P${currentPlayer + 1} AI` : `P${currentPlayer + 1} TURN`}
+      {turnName.toUpperCase()} • P{currentPlayer + 1}
     </span>
   );
   const leave = () => {

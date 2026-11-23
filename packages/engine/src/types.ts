@@ -27,6 +27,8 @@ export interface GameMutators {
 
 export interface GameSettings {
   playerCount: number; // 2 to 6
+  /** Local hot-seat display names (seat order). Empty entries fall back to Player N. */
+  playerNames?: string[];
   unitCounts: {
     SOLDIER: number;
     ASSAULTER: number;

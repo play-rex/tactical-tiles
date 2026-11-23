@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useGameStore } from '../../../store/useGameStore';
 import { useOnline } from '../../../net/useOnline';
-import { PLAYER_UI_THEME } from '../../ui/GeoPrimitives';
+import { PLAYER_UI_THEME, playerDisplayName } from '../../ui/GeoPrimitives';
 
 /**
  * A banner over the map each time you can act: your turn online or against the AI, and each
@@ -15,7 +15,9 @@ export const TurnBanner: React.FC = () => {
   const winner = useGameStore(s => s.winner);
   const mode = useGameStore(s => s.mode);
   const gameMode = useGameStore(s => s.settings.gameMode);
-  const name = useOnline(s => (mode === 'ONLINE' ? s.view?.seats[currentPlayer]?.name : undefined));
+  const playerNames = useGameStore(s => s.settings.playerNames);
+  const seatName = useOnline(s => (mode === 'ONLINE' ? s.view?.seats[currentPlayer]?.name : undefined));
+  const displayName = playerDisplayName(currentPlayer, playerNames, seatName);
   const [shown, setShown] = useState<number | null>(null);
 
   const myMove = !isAiTurn && winner === null;
@@ -29,15 +31,14 @@ export const TurnBanner: React.FC = () => {
   if (shown === null || !myMove) return null;
   const theme = PLAYER_UI_THEME[currentPlayer] ?? PLAYER_UI_THEME[0];
   const sharedScreen = mode === 'LOCAL' && gameMode !== 'PVE';
-  const title = sharedScreen ? `Player ${currentPlayer + 1}, you're up` : 'Your turn';
+  const title = sharedScreen ? `${displayName} — you're up` : `${displayName} — your turn`;
 
   return (
     <div className="tt-turn-banner" key={`${shown}-${currentPlayer}`} role="status" aria-live="polite">
       <div className="tt-turn-banner__plate" style={{ background: theme.badgeBg, color: theme.badgeText }}>
         <span className="tt-turn-banner__title">{title}</span>
         <span className="tt-turn-banner__sub">
-          Round {totalTurns + 1}
-          {name ? ` · ${name}` : ''}
+          Round {totalTurns + 1} · Player {currentPlayer + 1}
         </span>
       </div>
     </div>
