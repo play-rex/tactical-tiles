@@ -118,6 +118,44 @@
 .geo-rim.armed {
   background: linear-gradient(135deg, #FF9500 0%, #F43F24 55%, #FFB74D 100%);
 }
+
+/* ── Active-turn player card: calm base + 40% comet tail flowing around corners ── */
+@property --ta {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+.geo-drop.geo-turn-active > .geo-rim {
+  padding: 2.5px;
+  background: #B2BCCB;
+  background: color-mix(in srgb, var(--turn-color, #1D5EFF) 26%, #B2BCCB);
+}
+.geo-drop.geo-turn-active > .geo-rim::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+  padding: 2.5px;
+  background: conic-gradient(
+    from var(--ta, 0deg),
+    transparent 0%,
+    transparent 58%,
+    var(--turn-color, #1D5EFF) 86%,
+    #FFFFFF 100%
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  animation: tt-turn-spin 3.2s linear infinite;
+  pointer-events: none;
+}
+@keyframes tt-turn-spin {
+  to { --ta: 360deg; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .geo-drop.geo-turn-active > .geo-rim::after { animation: none; }
+}
 .geo-body {
   min-width: 0;
   background: linear-gradient(180deg, var(--op-card-top) 0%, var(--op-card-bot) 100%);

@@ -434,7 +434,7 @@ export const LeftPanel: React.FC = React.memo(() => {
     return (
       <GeoCard
         key={pid}
-        accentColor={isCurrent ? pTheme.border : undefined}
+        className={isCurrent ? 'geo-turn-active' : undefined}
         onClick={() => {
           if (isCompactMode) setExpandedId(pid);
         }}
@@ -442,7 +442,8 @@ export const LeftPanel: React.FC = React.memo(() => {
           opacity: isCurrent ? 1 : isCompactMode && !isExpanded ? 0.72 : 0.92,
           cursor: isCompactMode ? 'pointer' : 'default',
           flexShrink: 0,
-        }}
+          '--turn-color': pTheme.border,
+        } as React.CSSProperties}
       >
         <div style={{ padding: '9px 10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
           {/* Player Header & Objective Counter */}

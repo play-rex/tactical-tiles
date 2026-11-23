@@ -84,6 +84,33 @@ const MapCard: React.FC<MapCardProps> = ({ map, isSelected, onClick, onDelete, o
   </GeoCard>
 );
 
+const HOTSEAT_NAMES_KEY = 'tactical_tiles_hotseat_names';
+
+const loadPersistedHotseatNames = (): string[] | undefined => {
+  try {
+    const raw = localStorage.getItem(HOTSEAT_NAMES_KEY);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return undefined;
+    const names = parsed.filter((n): n is string => typeof n === 'string').slice(0, 6);
+    return names.length > 0 ? names : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const savePersistedHotseatNames = (names: string[] | undefined) => {
+  try {
+    if (!names || names.every(n => !n || !n.trim())) {
+      localStorage.removeItem(HOTSEAT_NAMES_KEY);
+      return;
+    }
+    localStorage.setItem(HOTSEAT_NAMES_KEY, JSON.stringify(names.slice(0, 6)));
+  } catch {
+    // Storage full/blocked: names still work for this session via the store.
+  }
+};
+
 export const GameSetup: React.FC = () => {
   const startGame = useGameStore(state => state.startGame);
   const startChallenge = useGameStore(state => state.startChallenge);
@@ -100,18 +127,43 @@ export const GameSetup: React.FC = () => {
   const [customMaps, setCustomMaps] = useState<SavedMap[]>([]);
   const career = CareerStorage.get();
 
-  const [settings, setSettings] = useState<GameSettings>({
-    playerCount: 2,
-    unitCounts: { SOLDIER: 3, ASSAULTER: 2, SNIPER: 1 },
-    dynamicWeather: true,
-    fogOfWar: false,
-    doomsdayEnabled: false,
-    gameMode: 'PVP',
-    victoryMode: 'CONQUER',
-    aiDifficulty: 'MEDIUM',
-    mapSeed: '',
-    mutators: { blitzCp: false, scarcity: false, ironman: false },
+  const [settings, setSettings] = useState<GameSettings>(() => {
+    const base: GameSettings = {
+      playerCount: 2,
+      unitCounts: { SOLDIER: 3, ASSAULTER: 2, SNIPER: 1 },
+      dynamicWeather: true,
+      fogOfWar: false,
+      doomsdayEnabled: false,
+      gameMode: 'PVP',
+      victoryMode: 'CONQUER',
+      aiDifficulty: 'MEDIUM',
+      mapSeed: '',
+      mutators: { blitzCp: false, scarcity: false, ironman: false },
+    };
+    // Keep last match's names: the store survives resetGame (same session),
+    // localStorage survives reloads (across sessions).
+    const storeSettings = useGameStore.getState().settings;
+    const hasStoreNames = (storeSettings.playerNames ?? []).some(n => n && n.trim());
+    if (hasStoreNames) {
+      return {
+        ...base,
+        playerCount: Math.min(6, Math.max(2, storeSettings.playerCount)),
+        playerNames: storeSettings.playerNames,
+      };
+    }
+    const persistedNames = loadPersistedHotseatNames();
+    if (!persistedNames) return base;
+    return {
+      ...base,
+      playerCount: Math.min(6, Math.max(2, persistedNames.length)),
+      playerNames: persistedNames,
+    };
   });
+
+  // Persist hot-seat callsigns so the next match / next session reuses them.
+  useEffect(() => {
+    savePersistedHotseatNames(settings.playerNames);
+  }, [settings.playerNames]);
 
   useEffect(() => {
     if (activeTab === 'CUSTOM') {
@@ -134,6 +186,7 @@ export const GameSetup: React.FC = () => {
       startChallenge(selectedChallenge.id);
       return;
     }
+    savePersistedHotseatNames(settings.playerNames);
     setGameSettings(settings);
     if (activeTab === 'RANDOM') {
       startGame();
