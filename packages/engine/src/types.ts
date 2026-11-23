@@ -100,7 +100,7 @@ export interface Tile {
   maxHp?: number; // For Base
   
   // Drops
-  loot?: 'AMMO' | 'MEDKIT' | null;
+  loot?: SupplyLootType | null;
 }
 
 export interface SavedMap {
@@ -193,10 +193,18 @@ export interface BankReward {
   playerId: number;
 }
 
+export type SupplyLootType = 'AMMO' | 'MEDKIT' | 'FIRST_AID';
+
 export interface PendingDrop {
   playerId: number;
   tileId: string;
-  item: 'AMMO' | 'MEDKIT';
+  item: SupplyLootType;
+}
+
+export interface LandMine {
+  id: string;
+  tileId: string;
+  owner: number;
 }
 
 export interface LogEntry {

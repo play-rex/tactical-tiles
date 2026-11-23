@@ -1,14 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { useGameStore } from '../store/useGameStore';
-import { GameSettings, UnitType, AIDifficulty, SavedMap, MissionConfig } from '@tactical/engine/types';
+import { GameSettings, SavedMap, MissionConfig } from '@tactical/engine/types';
 import { PRESET_MAPS } from '@tactical/engine/assets/Presets';
 import { CHALLENGE_OPERATIONS } from '@tactical/engine/assets/ChallengeOps';
 import { UNIT_STATS } from '@tactical/engine/constants/Config';
-import { UNIT_LIMITS } from '@tactical/engine';
 import { MapStorage } from '../core/storage/MapStorageManager';
 import { generateSectorSeed } from '@tactical/engine/utils/SeededRandom';
 import { CareerStorage } from '@tactical/engine/storage/CareerStatsManager';
-import { GeoButton, GeoCard, GeoChip, GeoToggle, GeoWell } from '../components/ui/GeoPrimitives';
+import { GeoButton, GeoCard, GeoChip, GeoWell } from '../components/ui/GeoPrimitives';
+import {
+  BrandHeader,
+  DifficultyButtons,
+  EnvironmentToggles,
+  MutatorToggles,
+  SECTION_LABEL,
+  SquadLoadoutControls,
+  StageShell,
+  VictoryModeControl,
+} from '../components/ui/MatchRulesControls';
 
 interface MapCardProps {
   map: SavedMap;
@@ -120,15 +129,6 @@ export const GameSetup: React.FC = () => {
     }
   }, [selectedMap]);
 
-  const updateCount = (type: UnitType, delta: number) => {
-    const current = settings.unitCounts[type];
-    const next = Math.min(UNIT_LIMITS[type], Math.max(0, current + delta));
-    setSettings({
-      ...settings,
-      unitCounts: { ...settings.unitCounts, [type]: next },
-    });
-  };
-
   const handleDeploy = () => {
     if (activeTab === 'CHALLENGES') {
       startChallenge(selectedChallenge.id);
@@ -180,66 +180,24 @@ export const GameSetup: React.FC = () => {
   const totalUnits = settings.unitCounts.SOLDIER + settings.unitCounts.ASSAULTER + settings.unitCounts.SNIPER;
   const canDeploy = activeTab === 'CHALLENGES' || (totalUnits > 0 && (activeTab === 'RANDOM' || Boolean(selectedMap)));
   const randomGridPreview = settings.playerCount >= 6 ? '30×30' : settings.playerCount >= 4 ? '25×25' : '20×20';
-
-  const unitMeta: Array<{ type: UnitType; label: string; max: number; role: string }> = [
-    { type: 'SOLDIER', label: 'SCOUT', max: UNIT_LIMITS.SOLDIER, role: 'Fast recon, captures & heists (3 CP)' },
-    { type: 'ASSAULTER', label: 'BREACHER', max: UNIT_LIMITS.ASSAULTER, role: 'Heavy frontline siege unit (5 CP)' },
-    { type: 'SNIPER', label: 'SNIPER', max: UNIT_LIMITS.SNIPER, role: 'High-ground precision cannon (8 CP)' },
-  ];
+  const patchSettings = (patch: Partial<GameSettings>) => setSettings(prev => ({ ...prev, ...patch }));
 
   return (
-    <div
-      className="opgeo-stage opgeo-scroll"
-      style={{
-        width: '100vw',
-        height: '100dvh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        padding: 'clamp(8px, 2vw, 16px)',
-        overflowY: 'auto',
-      }}
-    >
-      {/* margin: auto centres it when it fits, and lets it scroll from the top when it doesn't */}
-      <div style={{ width: 'min(1140px, 100%)', margin: 'auto 0', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+    <StageShell width={1140}>
         {/* TOP CONSOLE HEADER BAR */}
-        <GeoCard>
-          <div
-            style={{
-              padding: '10px 16px',
-              display: 'flex',
-              flexWrap: 'wrap',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '10px',
-            }}
-          >
-            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
-              <span
-                className="geo-chip"
-                style={{
-                  background: 'var(--acc-violet)',
-                  color: '#FFFFFF',
-                  padding: '6px 14px',
-                  fontSize: '15px',
-                  fontWeight: 900,
-                  letterSpacing: '0.8px',
-                }}
-              >
-                TACTICAL TILES
-              </span>
-
-              {(career.gamesPlayed > 0 || Object.keys(career.challengeMedals || {}).length > 0) ? (
-                <GeoChip variant="softMint" style={{ padding: '5px 10px' }}>
-                  {career.wins}W–{career.losses}L • {Object.keys(career.challengeMedals || {}).length}/{CHALLENGE_OPERATIONS.length} OPS • BEST {career.bestGrade ?? '-'} • STREAK {career.bestStreak} • {career.fastestWinRounds ? `${career.fastestWinRounds}R FAST` : 'NO WIN'} • {career.totalAcesPromoted} ACES
-                </GeoChip>
-              ) : (
-                <GeoChip variant="softBlue" style={{ padding: '5px 10px' }}>
-                  STEP 1: PICK MAP → STEP 2: SET RULES &amp; SQUAD → DEPLOY
-                </GeoChip>
-              )}
-            </div>
-
+        <BrandHeader
+          badge={
+            (career.gamesPlayed > 0 || Object.keys(career.challengeMedals || {}).length > 0) ? (
+              <GeoChip variant="softMint" style={{ padding: '5px 10px' }}>
+                {career.wins}W–{career.losses}L • {Object.keys(career.challengeMedals || {}).length}/{CHALLENGE_OPERATIONS.length} OPS • BEST {career.bestGrade ?? '-'} • STREAK {career.bestStreak} • {career.fastestWinRounds ? `${career.fastestWinRounds}R FAST` : 'NO WIN'} • {career.totalAcesPromoted} ACES
+              </GeoChip>
+            ) : (
+              <GeoChip variant="softBlue" style={{ padding: '5px 10px' }}>
+                STEP 1: PICK MAP → STEP 2: SET RULES &amp; SQUAD → DEPLOY
+              </GeoChip>
+            )
+          }
+          right={
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
               <GeoButton variant="violet" onClick={openOnline} coreStyle={{ padding: '7px 14px' }}>
                 PLAY ONLINE
@@ -251,8 +209,8 @@ export const GameSetup: React.FC = () => {
                 OPEN MAP EDITOR
               </GeoButton>
             </div>
-          </div>
-        </GeoCard>
+          }
+        />
 
         {/* MAIN 2-COLUMN DECK */}
         <div
@@ -541,166 +499,46 @@ export const GameSetup: React.FC = () => {
                         )}
                       </GeoWell>
                     ) : (
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
-                        {(['EASY', 'MEDIUM', 'HARD'] as AIDifficulty[]).map(d => (
-                          <GeoButton
-                            key={d}
-                            variant={
-                              settings.aiDifficulty === d
-                                ? d === 'EASY'
-                                  ? 'mint'
-                                  : d === 'MEDIUM'
-                                    ? 'amber'
-                                    : 'red'
-                                : 'default'
-                            }
-                            fullWidth
-                            onClick={() => setSettings({ ...settings, aiDifficulty: d })}
-                            coreStyle={{ padding: '7px 4px' }}
-                          >
-                            {d}
-                          </GeoButton>
-                        ))}
-                      </div>
+                      <DifficultyButtons value={settings.aiDifficulty} onChange={aiDifficulty => patchSettings({ aiDifficulty })} />
                     )}
 
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-                      <GeoButton
-                        variant={settings.victoryMode === 'CONQUER' ? 'amber' : 'default'}
-                        fullWidth
-                        onClick={() => setSettings({ ...settings, victoryMode: 'CONQUER' })}
-                      >
-                        CONQUER (HQ)
-                      </GeoButton>
-                      <GeoButton
-                        variant={settings.victoryMode === 'DEATHMATCH' ? 'red' : 'default'}
-                        fullWidth
-                        onClick={() => setSettings({ ...settings, victoryMode: 'DEATHMATCH' })}
-                      >
-                        DEATHMATCH
-                      </GeoButton>
-                    </div>
+                    <VictoryModeControl
+                      victoryMode={settings.victoryMode}
+                      doomsdayEnabled={settings.doomsdayEnabled}
+                      showConquerNote
+                      onPatch={patchSettings}
+                    />
 
-                    {settings.victoryMode === 'DEATHMATCH' ? (
-                      <GeoToggle
-                        label="Doomsday Protocol (Shrinking Map)"
-                        value={settings.doomsdayEnabled}
-                        onChange={v => setSettings({ ...settings, doomsdayEnabled: v })}
-                        variant="amber"
-                      />
-                    ) : (
-                      <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontStyle: 'italic', paddingLeft: '2px' }}>
-                        Destroy enemy Headquarters to win.
-                      </div>
-                    )}
-
-                    <div style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)', letterSpacing: '0.6px', marginTop: '4px' }}>
+                    <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>
                       ENVIRONMENT
                     </div>
-                    <GeoToggle
-                      label="Dynamic Weather (Voronoi Shifts)"
-                      value={settings.dynamicWeather}
-                      onChange={v => setSettings({ ...settings, dynamicWeather: v })}
-                    />
-                    <GeoToggle
-                      label="Fog of War (Line-of-Sight Vision)"
-                      value={settings.fogOfWar}
-                      onChange={v => setSettings({ ...settings, fogOfWar: v })}
+                    <EnvironmentToggles
+                      dynamicWeather={settings.dynamicWeather}
+                      fogOfWar={settings.fogOfWar}
+                      detailedLabels
+                      onPatch={patchSettings}
                     />
                   </div>
 
                   {/* COLUMN B: SQUAD LOADOUT & MUTATORS */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                    <div style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)', letterSpacing: '0.6px' }}>
+                    <div style={SECTION_LABEL}>
                       3. STARTING SQUAD ({totalUnits} UNITS)
                     </div>
 
-                    {unitMeta.map(({ type, label, max, role }) => (
-                      <GeoWell
-                        key={type}
-                        coreStyle={{
-                          padding: '8px 10px',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          gap: '8px',
-                        }}
-                      >
-                        <div>
-                          <div style={{ fontSize: '13px', fontWeight: 900 }}>
-                            {label} <span style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600 }}>(Max {max})</span>
-                          </div>
-                          <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)' }}>{role}</div>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <GeoButton
-                            onClick={() => updateCount(type, -1)}
-                            disabled={settings.unitCounts[type] <= 0}
-                            coreStyle={{ padding: '4px 10px' }}
-                          >
-                            -
-                          </GeoButton>
-                          <span style={{ fontSize: '15px', fontWeight: 900, width: '18px', textAlign: 'center' }}>
-                            {settings.unitCounts[type]}
-                          </span>
-                          <GeoButton
-                            onClick={() => updateCount(type, 1)}
-                            disabled={settings.unitCounts[type] >= max}
-                            coreStyle={{ padding: '4px 10px' }}
-                          >
-                            +
-                          </GeoButton>
-                        </div>
-                      </GeoWell>
-                    ))}
+                    <SquadLoadoutControls
+                      unitCounts={settings.unitCounts}
+                      showDetails
+                      onChange={unitCounts => patchSettings({ unitCounts })}
+                    />
 
-                    <div style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)', letterSpacing: '0.6px', marginTop: '4px' }}>
+                    <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>
                       FUN MUTATORS
                     </div>
-                    <GeoToggle
-                      label="Blitz CP (30 Max / +15 CP/turn)"
-                      value={Boolean(settings.mutators?.blitzCp)}
-                      onChange={v =>
-                        setSettings({
-                          ...settings,
-                          mutators: {
-                            blitzCp: v,
-                            scarcity: Boolean(settings.mutators?.scarcity),
-                            ironman: Boolean(settings.mutators?.ironman),
-                          },
-                        })
-                      }
-                      variant="amber"
-                    />
-                    <GeoToggle
-                      label="Scarcity (50% Ammo / +50% Bank)"
-                      value={Boolean(settings.mutators?.scarcity)}
-                      onChange={v =>
-                        setSettings({
-                          ...settings,
-                          mutators: {
-                            blitzCp: Boolean(settings.mutators?.blitzCp),
-                            scarcity: v,
-                            ironman: Boolean(settings.mutators?.ironman),
-                          },
-                        })
-                      }
-                      variant="amber"
-                    />
-                    <GeoToggle
-                      label="Ironman (0 Graveyard Respawns)"
-                      value={Boolean(settings.mutators?.ironman)}
-                      onChange={v =>
-                        setSettings({
-                          ...settings,
-                          mutators: {
-                            blitzCp: Boolean(settings.mutators?.blitzCp),
-                            scarcity: Boolean(settings.mutators?.scarcity),
-                            ironman: v,
-                          },
-                        })
-                      }
-                      variant="amber"
+                    <MutatorToggles
+                      mutators={settings.mutators}
+                      detailedLabels
+                      onChange={mutators => patchSettings({ mutators })}
                     />
                   </div>
                 </div>
@@ -726,7 +564,6 @@ export const GameSetup: React.FC = () => {
             </div>
           </GeoCard>
         </div>
-      </div>
-    </div>
+    </StageShell>
   );
 };

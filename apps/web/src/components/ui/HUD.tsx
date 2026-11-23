@@ -1,10 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { isUnitVisible } from '@tactical/engine';
 import { useGameStore, viewerSeat } from '../../store/useGameStore';
 import { useOnline } from '../../net/useOnline';
+import { useCopyState } from '../../hooks/useCopyState';
+import { getHoverMoveResolution, computeUnitAttackPreview, getHoveredEnemyBlocker } from '../../core/hoverMovePreview';
 import {
   UNIT_STATS,
+  TERRAIN_COSTS,
   TERRAIN_DEFENSE,
   CP_SYSTEM,
+  GOLD_SETTINGS,
+  LAND_MINE_STATS,
   UNIT_COSTS,
   SHOP_ITEMS,
   BUILDING_STATS,
@@ -15,10 +21,9 @@ import {
   OVERWATCH_STATS,
   MUTATOR_CONFIG,
 } from '@tactical/engine/constants/Config';
-import { Tile, Unit, WeatherType, LogEntry } from '@tactical/engine/types';
-import { getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
+import { Tile, Unit, WeatherType, LogEntry, MatchSummary } from '@tactical/engine/types';
+import { getManhattanDistance, getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import {
-  calculateAttackOutcome,
   calculateSiegeDamage,
   calculateDemolishDamage,
   canUnitAttackFromTile,
@@ -29,7 +34,6 @@ import {
   getUnitBaseDamage,
   getUnitAttackCost,
 } from '@tactical/engine/rules/CombatRules';
-import { resolveMoveWithOverwatch } from '@tactical/engine/rules/OverwatchRules';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from './GeoPrimitives';
 
 /**
@@ -47,9 +51,11 @@ const logWeight = (log: LogEntry): 'turn' | 'routine' | 'normal' | 'key' => {
 
 const LogView: React.FC = React.memo(() => {
   const gameLog = useGameStore(state => state.gameLog);
+  const viewer = useGameStore(viewerSeat);
 
   const groupedLogs: Record<number, LogEntry[]> = {};
   gameLog.forEach(log => {
+    if (log.playerId !== viewer && log.message.startsWith('Planted Land Mine')) return;
     if (!groupedLogs[log.round]) groupedLogs[log.round] = [];
     groupedLogs[log.round].push(log);
   });
@@ -145,6 +151,7 @@ const BuildingInfoPanel: React.FC<{ tile: Tile }> = React.memo(({ tile }) => {
     stats.push({ label: 'DEFENSE', value: `+${Math.round(config.defense * 100)}%` });
     stats.push({ label: 'RANGE', value: `+${config.rangeBonus}` });
     stats.push({ label: 'DMG', value: `x${config.damageBonus}` });
+    stats.push({ label: 'INCOME', value: `+${GOLD_SETTINGS.BUILDING_INCOME}€/t` });
   } else if (tile.type === 'BANK') {
     name = 'BANK VAULT';
     const hacked = (tile.hackProgress || 0) >= 100;
@@ -195,13 +202,12 @@ const BuildingInfoPanel: React.FC<{ tile: Tile }> = React.memo(({ tile }) => {
       case 'SCORCHED':
         weatherLabel = '🔥 SCORCHED';
         weatherColor = '#C2410C';
-        if (tile.type === 'PLAINS') weatherEffects.push('Move Cost: 2 CP');
-        if (tile.type === 'SAND') weatherEffects.push('Move Cost: 2 CP');
+        if (tile.type === 'PLAINS' || tile.type === 'SAND') weatherEffects.push('2x Move Cost (Rank 2+ Scout immune)');
         break;
       case 'MONSOON':
         weatherLabel = '🌧️ MONSOON';
         weatherColor = '#1344C4';
-        if (tile.type === 'PLAINS') weatherEffects.push('Mud: Heavy Units Slow');
+        if (tile.type === 'PLAINS') weatherEffects.push('Mud: 2x Move Cost (Rank 2+ Scout immune)');
         break;
       case 'FOG':
         weatherLabel = '🌫️ DENSE FOG';
@@ -212,13 +218,14 @@ const BuildingInfoPanel: React.FC<{ tile: Tile }> = React.memo(({ tile }) => {
       case 'TAILWIND':
         weatherLabel = '🍃 TAILWIND';
         weatherColor = '#046C3E';
-        if (tile.type === 'PLAINS') weatherEffects.push('Move Cost: 0.5 CP');
+        if (tile.type === 'PLAINS') weatherEffects.push('0.5x Move Cost (Scout 0.5, Heavy 1)');
         weatherEffects.push('Unit Range: +1');
         break;
       case 'SANDSTORM':
         weatherLabel = '🌪️ SANDSTORM';
         weatherColor = '#8D5B1C';
         weatherEffects.push('Vision Max: 3');
+        if (tile.type === 'SAND') weatherEffects.push('2x Sand Move Cost');
         break;
     }
   }
@@ -331,13 +338,14 @@ export const LeftPanel: React.FC = React.memo(() => {
   const mapData = useGameStore(state => state.mapData);
   const units = useGameStore(state => state.units);
   const isAiTurn = useGameStore(state => state.isAiTurn);
+  const winner = useGameStore(state => state.winner);
   const buyShopItem = useGameStore(state => state.buyShopItem);
   const placementMode = useGameStore(state => state.placementMode);
   const cancelPlacement = useGameStore(state => state.cancelPlacement);
 
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const maxCp = settings.mutators?.blitzCp ? MUTATOR_CONFIG.BLITZ_CP.MAX_CP : CP_SYSTEM.MAX_CP;
-  const isMyTurn = !isAiTurn;
+  const isMyTurn = !isAiTurn && winner === null;
 
   useEffect(() => {
     if (playerCount > 4) {
@@ -347,6 +355,35 @@ export const LeftPanel: React.FC = React.memo(() => {
     }
   }, [currentPlayer, playerCount]);
 
+  const casualtiesByOwner = useMemo(() => {
+    const grouped = new Map<number, typeof graveyard>();
+    for (const dead of graveyard) {
+      let list = grouped.get(dead.owner);
+      if (!list) {
+        list = [];
+        grouped.set(dead.owner, list);
+      }
+      list.push(dead);
+    }
+    return grouped;
+  }, [graveyard]);
+
+  const baseByOwner = useMemo(() => {
+    const map = new Map<number, Tile>();
+    if (settings.victoryMode !== 'CONQUER') return map;
+    for (const t of mapData) {
+      if (t.type === 'BASE' && t.owner !== undefined && t.owner !== null) map.set(t.owner, t);
+    }
+    return map;
+  }, [mapData, settings.victoryMode]);
+
+  const unitCountsByOwner = useMemo(() => {
+    const counts = new Map<number, number>();
+    if (settings.victoryMode === 'CONQUER') return counts;
+    for (const u of units) counts.set(u.owner, (counts.get(u.owner) ?? 0) + 1);
+    return counts;
+  }, [units, settings.victoryMode]);
+
   const renderPlayerSection = (pid: number) => {
     const isCompactMode = playerCount > 4;
     const isExpanded = !isCompactMode || expandedId === pid;
@@ -354,7 +391,7 @@ export const LeftPanel: React.FC = React.memo(() => {
     const isCurrent = currentPlayer === pid;
     const isEliminated = playerStatus[pid] === 'ELIMINATED';
     const pTheme = PLAYER_UI_THEME[pid] || PLAYER_UI_THEME[0];
-    const casualties = graveyard.filter(u => u.owner === pid);
+    const casualties = casualtiesByOwner.get(pid) ?? [];
     const respawnsUsed = playerRespawns[pid] || 0;
     const maxRespawns = getEffectiveMaxRespawns(settings.mutators);
     const respawnsLeft = Math.max(0, maxRespawns - respawnsUsed);
@@ -363,13 +400,12 @@ export const LeftPanel: React.FC = React.memo(() => {
     let statsLabel = '';
     let statsValue = '';
     if (settings.victoryMode === 'CONQUER') {
-      const base = mapData.find(t => t.type === 'BASE' && t.owner === pid);
+      const base = baseByOwner.get(pid);
       statsLabel = 'BASE';
       statsValue = base && base.hp !== undefined ? `${base.hp} HP` : 'DESTROYED';
     } else {
-      const count = units.filter(u => u.owner === pid).length;
       statsLabel = 'UNITS';
-      statsValue = `${count}`;
+      statsValue = `${unitCountsByOwner.get(pid) ?? 0}`;
     }
 
     if (isEliminated) {
@@ -435,11 +471,11 @@ export const LeftPanel: React.FC = React.memo(() => {
             </span>
           </div>
 
-          {/* Gold & CP Recessed Wells */}
+          {/* Euros & CP Recessed Wells */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
             <GeoWell coreStyle={{ padding: '4px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>GOLD</span>
-              <span style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-amber-ink)' }}>${playerGold[pid]}</span>
+              <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>EUROS</span>
+              <span style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-amber-ink)' }}>€{playerGold[pid]}</span>
             </GeoWell>
             <GeoWell coreStyle={{ padding: '4px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>CP</span>
@@ -471,7 +507,7 @@ export const LeftPanel: React.FC = React.memo(() => {
                         disabled={!isCurrent}
                         coreStyle={{ padding: '4px 8px', fontSize: '12px' }}
                       >
-                        {item}
+                        {item === 'FIRST_AID' ? 'FIRST AID' : item}
                       </GeoButton>
                     ))}
                   </div>
@@ -512,7 +548,7 @@ export const LeftPanel: React.FC = React.memo(() => {
                             coreStyle={{ padding: '4px 8px', justifyContent: 'space-between' }}
                           >
                             <span>{UNIT_STATS[unit.type].name.toUpperCase()}</span>
-                            <span>${cost}</span>
+                            <span>€{cost}</span>
                           </GeoButton>
                         );
                       }
@@ -532,7 +568,7 @@ export const LeftPanel: React.FC = React.memo(() => {
                         >
                           <span style={{ color: pTheme.ink }}>{UNIT_STATS[unit.type].name.toUpperCase()}</span>
                           <span style={{ color: 'var(--op-ink-muted)' }}>
-                            {isReady ? `$${cost}` : `${unit.turnsUntilRespawn}t`}
+                            {isReady ? `€${cost}` : `${unit.turnsUntilRespawn}t`}
                           </span>
                         </GeoWell>
                       );
@@ -602,7 +638,7 @@ export const LeftPanel: React.FC = React.memo(() => {
                   padding: '2px 7px',
                 }}
               >
-                P{currentPlayer + 1} • ${playerGold[currentPlayer] ?? 0}
+                P{currentPlayer + 1} • €{playerGold[currentPlayer] ?? 0}
               </span>
             ) : (
               <GeoChip variant="default" style={{ fontSize: '12px', padding: '2px 7px' }}>
@@ -622,14 +658,22 @@ export const LeftPanel: React.FC = React.memo(() => {
                   onClick={() => buyShopItem(key)}
                   disabled={!canBuy}
                   fullWidth
-                  title={`${item.name} ($${item.cost}) — ${item.type === 'CONSUMABLE' ? 'Delivered via Drop Pod near base' : 'Select placement tile on map'}`}
+                  title={
+                    item.type === 'CONSUMABLE'
+                      ? `${item.name} (€${item.cost}) — Pick drop zone vs AI; random drop near HQ in Multiplayer`
+                      : key === 'LAND_MINE'
+                        ? `Land Mine (€${item.cost}) — Hidden to enemies (${LAND_MINE_STATS.DAMAGE} DMG + stops move). Restricted within ${LAND_MINE_STATS.ENEMY_HQ_EXCLUSION_RADIUS} tiles of enemy HQ.`
+                        : key === 'BARRIER'
+                          ? `Deploy Barrier (x3) (€${item.cost}) — Click up to ${BARRIER_STATS.BUILD_COUNT} tiles to build ${BARRIER_STATS.HP} HP waist-high cover.`
+                          : `${item.name} (€${item.cost}) — Select placement tile on map`
+                  }
                   coreStyle={{ padding: '6px 8px', justifyContent: 'space-between' }}
                 >
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {item.name.replace('Deploy ', '').replace(' Drop', '').replace(' (Full Heal)', '')}
+                    {item.name.replace('Deploy ', '').replace(' Drop', '').replace(' Kit (50% Heal)', '').replace(' (Full Heal)', '').replace(' (x3)', ' x3')}
                   </span>
                   <span style={{ color: isPlacingThis ? '#1C1200' : 'var(--acc-amber-ink)', fontFamily: 'monospace' }}>
-                    ${item.cost}
+                    €{item.cost}
                   </span>
                 </GeoButton>
               );
@@ -647,7 +691,7 @@ export const LeftPanel: React.FC = React.memo(() => {
   );
 });
 
-const TurnStatusBar: React.FC = () => {
+const TurnStatusBar: React.FC = React.memo(() => {
   const totalTurns = useGameStore(state => state.totalTurns);
   const weather = useGameStore(state => state.weather);
   const currentPlayer = useGameStore(state => state.currentPlayer);
@@ -696,10 +740,10 @@ const TurnStatusBar: React.FC = () => {
               </span>
             )}
           </span>
-          <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--acc-blue-ink)', display: 'inline-flex', alignItems: 'center' }}>
+          <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--acc-blue-ink)', display: 'inline-flex', alignItems: 'center' }} title="Your home zone weather (each player zone has its own weather)">
             <WeatherIcon type={dynamicWeather ? zoneWeather : 'CLEAR'} />
             <span style={{ marginLeft: '4px' }}>
-              {dynamicWeather ? `${zoneWeather} • ${weather.turnsRemaining}t` : 'CLEAR'}
+              {dynamicWeather ? `Z${currentPlayer + 1} ${zoneWeather} • ${weather.turnsRemaining}t` : 'CLEAR'}
             </span>
           </span>
         </div>
@@ -725,7 +769,7 @@ const TurnStatusBar: React.FC = () => {
       </div>
     </GeoCard>
   );
-};
+});
 
 /** Shown over everything (it renders fixed), so it's mounted once at the app level. */
 export const BankRewardModal: React.FC = () => {
@@ -733,10 +777,11 @@ export const BankRewardModal: React.FC = () => {
   const resolveBankReward = useGameStore(state => state.resolveBankReward);
   const currentPlayer = useGameStore(state => state.currentPlayer);
   const mapData = useGameStore(state => state.mapData);
+  const gridSize = useGameStore(state => state.gridSize);
   const mutators = useGameStore(state => state.settings.mutators);
 
   if (!bankRewardPending || bankRewardPending.playerId !== currentPlayer) return null;
-  const bankTile = mapData.find(t => t.id === bankRewardPending.tileId);
+  const bankTile = getTileByIdFast(mapData, bankRewardPending.tileId, gridSize);
   const { gold: goldReward, cp: cpReward } = getEffectiveBankRewards(bankTile, mutators);
 
   return (
@@ -769,8 +814,8 @@ export const BankRewardModal: React.FC = () => {
               onClick={() => resolveBankReward('GOLD')}
               coreStyle={{ padding: '18px 12px', flexDirection: 'column' }}
             >
-              <span style={{ fontSize: '22px' }}>💰</span>
-              <span style={{ fontSize: '15px', fontWeight: 900 }}>{goldReward} GOLD</span>
+              <span style={{ fontSize: '22px' }}>💶</span>
+              <span style={{ fontSize: '15px', fontWeight: 900 }}>{goldReward} EUROS</span>
               <span style={{ fontSize: '12px', fontWeight: 600 }}>Fund drops &amp; respawns</span>
             </GeoButton>
 
@@ -799,6 +844,7 @@ const HoveredTacticalPreview: React.FC<{
   const hoveredTileId = useGameStore(state => state.hoveredTileId);
   const validAttackTargets = useGameStore(state => state.validAttackTargets);
   const validMoveCosts = useGameStore(state => state.validMoveCosts);
+  const validMoveParents = useGameStore(state => state.validMoveParents);
   const validSiegeTile = useGameStore(state => state.validSiegeTile);
   const validDemolishTile = useGameStore(state => state.validDemolishTile);
   const mapData = useGameStore(state => state.mapData);
@@ -808,31 +854,56 @@ const HoveredTacticalPreview: React.FC<{
   const weather = useGameStore(state => state.weather);
   const gridSize = useGameStore(state => state.gridSize);
   const visibleTiles = useGameStore(state => state.visibleTiles);
-  const fogOfWar = useGameStore(state => state.settings.fogOfWar);
-  const victoryMode = useGameStore(state => state.settings.victoryMode);
+  const viewer = useGameStore(viewerSeat);
+  const settings = useGameStore(state => state.settings);
+  const fogOfWar = settings.fogOfWar;
+  const victoryMode = settings.victoryMode;
   const isAiTurn = useGameStore(state => state.isAiTurn);
+  const winner = useGameStore(state => state.winner);
 
-  // Attack previews are for planning your own moves, not for units you're only inspecting
-  if (!hoveredTileId || isAiTurn || selectedUnit.owner !== currentPlayer) return null;
+  const activeBanks = useMemo(
+    () => mapData.filter(t => t.type === 'BANK' && (t.hackProgress || 0) < 100),
+    [mapData]
+  );
+  const enemyBases = useMemo(
+    () => victoryMode === 'CONQUER'
+      ? mapData.filter(t => t.type === 'BASE' && t.owner !== currentPlayer && (t.hp || 0) > 0)
+      : [],
+    [mapData, victoryMode, currentPlayer]
+  );
+
+  // Attack & status previews apply whenever your own unit is selected during your turn
+  if (!hoveredTileId || isAiTurn || winner !== null || selectedUnit.owner !== currentPlayer) {
+    return null;
+  }
   const hoveredTile = getTileByIdFast(mapData, hoveredTileId, gridSize);
   if (!hoveredTile) return null;
 
-  const hoveredEnemy = units.find(u => u.tileId === hoveredTile.id && validAttackTargets.includes(u.id));
+  const hoveredEnemy = !selectedUnit.completed
+    ? units.find(u => u.tileId === hoveredTile.id && validAttackTargets.includes(u.id))
+    : undefined;
+  const hoveredAnyVisibleEnemy = units.find(
+    u => u.tileId === hoveredTile.id && u.owner !== currentPlayer && isUnitVisible(u, viewer, fogOfWar, visibleTiles)
+  );
 
   let combatPreview: { title: string; damage: number; hpBefore: number; hpAfter: number; notes: string[] } | null = null;
   if (hoveredEnemy) {
-    const { damage, defense, watchtowerBoosted, coverArmorApplied } = calculateAttackOutcome(
-      selectedUnit,
-      selectedUnitTile,
-      hoveredTile,
-      hoveredEnemy.owner,
-      hoveredEnemy
-    );
+    const { damage, defense, watchtowerBoosted, coverArmorApplied, crossfireBonus } = computeUnitAttackPreview({
+      attacker: selectedUnit,
+      attTile: selectedUnitTile,
+      target: hoveredEnemy,
+      tarTile: hoveredTile,
+      units,
+      mapData,
+      weather,
+      gridSize,
+    });
     const notes: string[] = [];
     if (defense > 0) notes.push(`Target Cover: -${Math.round(defense * 100)}% DMG`);
     if (defense < 0) notes.push(`Exposed (${hoveredTile.type}): +${Math.round(Math.abs(defense) * 100)}% DMG`);
     if (coverArmorApplied) notes.push(`Cover Armor: -${VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG`);
     if (watchtowerBoosted) notes.push('Watchtower Bonus: x1.2 DMG');
+    if (crossfireBonus > 0) notes.push(`Crossfire Ally: +${crossfireBonus} DMG`);
     if (hoveredEnemy.isOverwatching) notes.push('Breaks Overwatch (SUPPRESSED!)');
     combatPreview = {
       title: `P${hoveredEnemy.owner + 1} ${UNIT_STATS[hoveredEnemy.type].name}`,
@@ -841,7 +912,7 @@ const HoveredTacticalPreview: React.FC<{
       hpAfter: Math.max(0, hoveredEnemy.hp - damage),
       notes,
     };
-  } else if (validSiegeTile && hoveredTile.id === validSiegeTile && hoveredTile.hp !== undefined) {
+  } else if (!selectedUnit.completed && validSiegeTile && hoveredTile.id === validSiegeTile && hoveredTile.hp !== undefined) {
     const damage = calculateSiegeDamage(selectedUnit, selectedUnitTile);
     const piercesBase = selectedUnit.type === 'ASSAULTER' && (selectedUnit.rank ?? 0) >= 3;
     combatPreview = {
@@ -851,7 +922,7 @@ const HoveredTacticalPreview: React.FC<{
       hpAfter: Math.max(0, hoveredTile.hp - damage),
       notes: [piercesBase ? 'Ace Siege Pierce: 100% DMG' : 'Base Armor: -20% DMG'],
     };
-  } else if (validDemolishTile && hoveredTile.id === validDemolishTile && hoveredTile.hp !== undefined) {
+  } else if (!selectedUnit.completed && validDemolishTile && hoveredTile.id === validDemolishTile && hoveredTile.hp !== undefined) {
     const damage = calculateDemolishDamage(selectedUnit, selectedUnitTile);
     combatPreview = {
       title: 'Defense Barrier',
@@ -862,74 +933,104 @@ const HoveredTacticalPreview: React.FC<{
     };
   }
 
-  const movePreviewCost = validMoveCosts.has(hoveredTile.id) ? validMoveCosts.get(hoveredTile.id)! : null;
-  const movePreviewWarnings: string[] = [];
-  if (!combatPreview && movePreviewCost !== null) {
-    if (hoveredTile.type === 'QUICKSAND') movePreviewWarnings.push('Quicksand: Roots unit next turn!');
-    if ((TERRAIN_DEFENSE[hoveredTile.type] || 0) < 0) movePreviewWarnings.push(`${hoveredTile.type}: -10% Exposed Cover`);
-    if ((TERRAIN_DEFENSE[hoveredTile.type] || 0) > 0) movePreviewWarnings.push(`${hoveredTile.type}: +${Math.round((TERRAIN_DEFENSE[hoveredTile.type] || 0) * 100)}% Cover`);
-    const inBankRange = mapData.some(
-      t => t.type === 'BANK' && (t.hackProgress || 0) < 100 && Math.abs(t.x - hoveredTile.x) + Math.abs(t.y - hoveredTile.y) <= BANK_STATS.RANGE
+  if (combatPreview) {
+    return (
+      <GeoChip variant="softRed" style={{ display: 'block', padding: '7px 10px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '3px' }}>
+          <span>IN RANGE • TARGET PREVIEW</span>
+          {combatPreview.hpAfter === 0 && (
+            <span className="geo-chip" style={{ background: 'var(--acc-red)', color: '#fff', padding: '1px 5px' }}>LETHAL</span>
+          )}
+        </div>
+        <div style={{ fontWeight: 900 }}>{combatPreview.title}</div>
+        <div>
+          DMG: <strong>-{combatPreview.damage}</strong> • HP: {combatPreview.hpBefore} → <strong>{combatPreview.hpAfter}</strong>
+        </div>
+        {combatPreview.notes.map((n, idx) => (
+          <div key={idx} style={{ fontWeight: 600 }}>• {n}</div>
+        ))}
+      </GeoChip>
     );
-    if (inBankRange) movePreviewWarnings.push(`Inside Bank Turret Range (${BANK_STATS.DAMAGE} DMG/t)`);
-    if (victoryMode === 'CONQUER') {
-      const inBaseArtillery = mapData.some(
-        t => t.type === 'BASE' && t.owner !== currentPlayer && (t.hp || 0) > 0 && Math.abs(t.x - hoveredTile.x) + Math.abs(t.y - hoveredTile.y) <= BASE_STATS.RANGE
+  }
+
+  if (hoveredAnyVisibleEnemy) {
+    const blocker = selectedUnit.completed
+      ? 'Already acted this turn — cannot attack anymore'
+      : getHoveredEnemyBlocker(
+          { mapData, units, weather, gridSize, settings, playerCp, currentPlayer },
+          selectedUnit,
+          hoveredTile,
+          visibleTiles
+        ) || 'Target cannot be attacked right now';
+    return (
+      <GeoChip variant="softAmber" style={{ display: 'block', padding: '7px 10px' }}>
+        <div style={{ fontWeight: 900, marginBottom: '2px' }}>
+          {selectedUnit.completed ? 'CANT ATTACK • DONE' : blocker.startsWith('Out of range') ? 'OUT OF RANGE' : 'TARGET BLOCKED'}
+        </div>
+        <div style={{ fontWeight: 700 }}>{blocker}</div>
+      </GeoChip>
+    );
+  }
+
+  if (selectedUnit.completed) return null;
+
+  const movePreviewCost = validMoveCosts.get(hoveredTile.id);
+  if (movePreviewCost === undefined) {
+    if ((selectedUnit.hasMoved || selectedUnit.isRooted) && TERRAIN_COSTS[hoveredTile.type] < 90 && hoveredTile.id !== selectedUnit.tileId) {
+      return (
+        <GeoChip variant="softAmber" style={{ display: 'block', padding: '7px 10px' }}>
+          <div style={{ fontWeight: 900 }}>{selectedUnit.isRooted ? 'ROOTED — CANT MOVE' : "CAN'T MOVE"}</div>
+          <div style={{ fontWeight: 600 }}>
+            {selectedUnit.isRooted ? 'Trapped in Quicksand this turn' : 'Already moved this turn — attack or Overwatch only'}
+          </div>
+        </GeoChip>
       );
-      if (inBaseArtillery) movePreviewWarnings.push(`Inside Enemy Base Artillery (${BASE_STATS.MIN_DMG}-${BASE_STATS.MAX_DMG} DMG/t)`);
     }
-    const owCheck = resolveMoveWithOverwatch({
-      movingUnit: selectedUnit,
-      targetTileId: hoveredTile.id,
-      mapData,
-      units,
-      weather,
-      gridSize,
-      fogOfWar,
-      maxBudget: playerCp[currentPlayer] ?? 0,
-      knownVisibleTiles: fogOfWar ? visibleTiles : null,
-    });
-    if (owCheck.trigger) {
-      movePreviewWarnings.push(
-        owCheck.trigger.pinResisted
-          ? `Enemy Overwatch on path (-${owCheck.trigger.damage} DMG, Pin Resisted)`
-          : `Enemy Overwatch on path (-${owCheck.trigger.damage} DMG, Pins)`
-      );
-    }
+    return null;
+  }
+
+  const movePreviewWarnings: string[] = [];
+  if (hoveredTile.type === 'QUICKSAND') movePreviewWarnings.push('Quicksand: Roots unit next turn!');
+  const terrainDef = TERRAIN_DEFENSE[hoveredTile.type] || 0;
+  if (terrainDef < 0) movePreviewWarnings.push(`${hoveredTile.type}: -10% Exposed Cover`);
+  if (terrainDef > 0) movePreviewWarnings.push(`${hoveredTile.type}: +${Math.round(terrainDef * 100)}% Cover`);
+  if (activeBanks.some(b => getManhattanDistance(b, hoveredTile) <= BANK_STATS.RANGE)) {
+    movePreviewWarnings.push(`Inside Bank Turret Range (${BANK_STATS.DAMAGE} DMG/t)`);
+  }
+  if (enemyBases.some(b => getManhattanDistance(b, hoveredTile) <= BASE_STATS.RANGE)) {
+    movePreviewWarnings.push(`Inside Enemy Base Artillery (${BASE_STATS.MIN_DMG}-${BASE_STATS.MAX_DMG} DMG/t)`);
+  }
+  const owCheck = getHoverMoveResolution({
+    movingUnit: selectedUnit,
+    targetTileId: hoveredTile.id,
+    validMoveCosts,
+    validMoveParents,
+    mapData,
+    units,
+    weather,
+    gridSize,
+    fogOfWar,
+    maxBudget: playerCp[currentPlayer] ?? 0,
+    visibleTiles: fogOfWar ? visibleTiles : null,
+  });
+  if (owCheck.trigger) {
+    movePreviewWarnings.push(
+      owCheck.trigger.pinResisted
+        ? `Enemy Overwatch on path (-${owCheck.trigger.damage} DMG, Pin Resisted)`
+        : `Enemy Overwatch on path (-${owCheck.trigger.damage} DMG, Pins)`
+    );
   }
 
   return (
-    <>
-      {combatPreview && (
-        <GeoChip variant="softRed" style={{ display: 'block', padding: '7px 10px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '3px' }}>
-            <span>TARGET PREVIEW</span>
-            {combatPreview.hpAfter === 0 && (
-              <span className="geo-chip" style={{ background: 'var(--acc-red)', color: '#fff', padding: '1px 5px' }}>LETHAL</span>
-            )}
-          </div>
-          <div style={{ fontWeight: 900 }}>{combatPreview.title}</div>
-          <div>
-            DMG: <strong>-{combatPreview.damage}</strong> • HP: {combatPreview.hpBefore} → <strong>{combatPreview.hpAfter}</strong>
-          </div>
-          {combatPreview.notes.map((n, idx) => (
-            <div key={idx} style={{ fontWeight: 600 }}>• {n}</div>
-          ))}
-        </GeoChip>
-      )}
-
-      {movePreviewCost !== null && !combatPreview && (
-        <GeoChip variant="softBlue" style={{ display: 'block', padding: '7px 10px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '2px' }}>
-            <span>MOVE TO ({hoveredTile.x},{hoveredTile.y})</span>
-            <span>{movePreviewCost} CP</span>
-          </div>
-          {movePreviewWarnings.map((w, idx) => (
-            <div key={idx} style={{ fontWeight: 600 }}>• {w}</div>
-          ))}
-        </GeoChip>
-      )}
-    </>
+    <GeoChip variant="softBlue" style={{ display: 'block', padding: '7px 10px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, marginBottom: '2px' }}>
+        <span>MOVE TO ({hoveredTile.x},{hoveredTile.y})</span>
+        <span>{movePreviewCost} CP</span>
+      </div>
+      {movePreviewWarnings.map((w, idx) => (
+        <div key={idx} style={{ fontWeight: 600 }}>• {w}</div>
+      ))}
+    </GeoChip>
   );
 });
 
@@ -946,11 +1047,13 @@ export const RightPanel: React.FC = () => {
   const viewer = useGameStore(viewerSeat);
   const fogOfWar = useGameStore(state => state.settings.fogOfWar);
   const isAiTurn = useGameStore(state => state.isAiTurn);
+  const winner = useGameStore(state => state.winner);
   const reloadUnit = useGameStore(state => state.reloadUnit);
   const enterOverwatch = useGameStore(state => state.enterOverwatch);
   const cancelPlacement = useGameStore(state => state.cancelPlacement);
+  const confirmConstruct = useGameStore(state => state.confirmConstruct);
+  const confirmAutoDrop = useGameStore(state => state.confirmAutoDrop);
   const placementMode = useGameStore(state => state.placementMode);
-  const bankRewardPending = useGameStore(state => state.bankRewardPending);
 
   const secureBuilding = useGameStore(state => state.secureBuilding);
   const heistBank = useGameStore(state => state.heistBank);
@@ -964,13 +1067,16 @@ export const RightPanel: React.FC = () => {
   const validLootTile = useGameStore(state => state.validLootTile);
   const validDemolishTile = useGameStore(state => state.validDemolishTile);
 
-  const selectedUnit = units.find(u => u.id === selectedUnitId);
+  const selectedUnit = selectedUnitId
+    ? units.find(u => u.id === selectedUnitId && isUnitVisible(u, viewer, fogOfWar, visibleTiles))
+    : undefined;
   const selectedTile = selectedTileId ? getTileByIdFast(mapData, selectedTileId, gridSize) : undefined;
   const selectedUnitTile = selectedUnit ? getTileByIdFast(mapData, selectedUnit.tileId, gridSize) : undefined;
 
   const sniperCanFire = selectedUnit?.type === 'SNIPER' ? canUnitAttackFromTile(selectedUnit, selectedUnitTile) : true;
 
-  const isMyTurn = !isAiTurn;
+  const isMyTurn = !isAiTurn && winner === null;
+  const canCommandSelected = Boolean(selectedUnit && selectedUnit.owner === currentPlayer && isMyTurn && !selectedUnit.completed);
   const intelBadge = selectedUnit?.isOverwatching
     ? { label: 'OVERWATCH', variant: 'amber' as const }
     : selectedUnit
@@ -983,21 +1089,44 @@ export const RightPanel: React.FC = () => {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '8px', paddingRight: '4px' }}>
       <TurnStatusBar />
 
-      {/* ARMED CONSTRUCTION MODE PROMPT */}
+      {/* ARMED CONSTRUCTION / AIRDROP MODE PROMPT */}
       {placementMode && placementMode.active && isMyTurn && (
         <GeoCard armed style={{ flexShrink: 0 }}>
           <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px', textAlign: 'center' }}>
-            <div style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-amber-ink)' }}>CONSTRUCTION MODE</div>
+            <div style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-amber-ink)' }}>
+              {placementMode.kind === 'DROP' ? 'SUPPLY AIRDROP MODE' : 'CONSTRUCTION MODE'}
+            </div>
             <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600 }}>
-              Click any highlighted cyan tile on the battlefield to deploy.
+              {placementMode.kind === 'DROP'
+                ? 'Click any highlighted amber tile for targeted delivery, or auto-drop near HQ.'
+                : placementMode.itemKey === 'LAND_MINE'
+                  ? `Click a cyan tile to plant hidden mine (excluded within ${LAND_MINE_STATS.ENEMY_HQ_EXCLUSION_RADIUS} tiles of enemy HQ).`
+                  : (placementMode.requiredCount ?? 1) > 1
+                    ? (() => {
+                        const selectedCount = placementMode.selectedTiles?.length ?? 0;
+                        const reqCount = placementMode.requiredCount ?? BARRIER_STATS.BUILD_COUNT;
+                        const remaining = Math.max(0, reqCount - selectedCount);
+                        return `Click ${remaining} more cyan tile${remaining === 1 ? '' : 's'} (${selectedCount}/${reqCount} selected — click picked tile to undo).`;
+                      })()
+                    : 'Click any highlighted cyan tile on the battlefield to deploy.'}
             </div>
             <GeoWell coreStyle={{ padding: '6px 10px' }}>
               <div style={{ fontSize: '12px', fontWeight: 900 }}>
-                {SHOP_ITEMS[placementMode.itemKey as keyof typeof SHOP_ITEMS]?.name} (${placementMode.cost})
+                {SHOP_ITEMS[placementMode.itemKey as keyof typeof SHOP_ITEMS]?.name} (€{placementMode.cost})
               </div>
             </GeoWell>
+            {placementMode.kind === 'CONSTRUCT' && (placementMode.requiredCount ?? 1) > 1 && (placementMode.selectedTiles?.length ?? 0) > 0 && (
+              <GeoButton variant="mint" fullWidth onClick={confirmConstruct} coreStyle={{ padding: '7px 10px' }}>
+                BUILD SELECTED ({placementMode.selectedTiles?.length}/{placementMode.requiredCount})
+              </GeoButton>
+            )}
+            {placementMode.kind === 'DROP' && (
+              <GeoButton variant="amber" fullWidth onClick={confirmAutoDrop} coreStyle={{ padding: '7px 10px' }}>
+                AUTO-DROP NEAR HQ
+              </GeoButton>
+            )}
             <GeoButton variant="red" fullWidth onClick={cancelPlacement} coreStyle={{ padding: '7px 10px' }}>
-              CANCEL BUILD
+              {placementMode.kind === 'DROP' ? 'CANCEL DROP' : 'CANCEL BUILD'}
             </GeoButton>
           </div>
         </GeoCard>
@@ -1095,6 +1224,19 @@ export const RightPanel: React.FC = () => {
                     </div>
                   </div>
 
+                  {isMyTurn && selectedUnit.owner === currentPlayer && (selectedUnit.completed || selectedUnit.hasMoved || selectedUnit.isRooted) && (
+                    <GeoChip
+                      variant={selectedUnit.completed || selectedUnit.isRooted ? 'softAmber' : 'softBlue'}
+                      style={{ display: 'block', padding: '5px 8px', lineHeight: 1.35 }}
+                    >
+                      {selectedUnit.completed
+                        ? 'DONE THIS TURN • Already acted (cannot move or attack anymore)'
+                        : selectedUnit.isRooted
+                        ? 'ROOTED • Trapped in Quicksand (cannot move this turn)'
+                        : 'ALREADY MOVED • Cannot move again (Attack, Action, or Overwatch)'}
+                    </GeoChip>
+                  )}
+
                   {rankPerkSummary && (
                     <GeoChip variant="softAmber" style={{ display: 'block', padding: '5px 8px', lineHeight: 1.35 }}>
                       {rankPerkSummary}
@@ -1142,13 +1284,13 @@ export const RightPanel: React.FC = () => {
                     </GeoWell>
                   )}
 
-                  {selectedUnit.type === 'SNIPER' && selectedUnit.owner === currentPlayer && isMyTurn && (
+                  {selectedUnit.type === 'SNIPER' && canCommandSelected && (
                     <GeoChip variant={sniperCanFire ? 'softMint' : 'softAmber'} style={{ display: 'block', padding: '5px 8px' }}>
                       {sniperCanFire ? '🎯 High-Ground Firing Ready' : '⚠️ Move to Mountain, Dunes, or Owned Building to Fire'}
                     </GeoChip>
                   )}
 
-                  {selectedUnit.owner === currentPlayer && isMyTurn && (
+                  {selectedUnit.owner === currentPlayer && isMyTurn && (selectedUnit.isOverwatching || !selectedUnit.completed) && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                       {selectedUnit.isOverwatching && (
                         <GeoChip variant="amber" style={{ display: 'block', padding: '7px 9px', fontWeight: 900 }}>
@@ -1172,7 +1314,7 @@ export const RightPanel: React.FC = () => {
                         );
                       })()}
 
-                      {selectedUnit.ammo < selectedUnit.maxAmmo && !selectedUnit.completed && (
+                      {!selectedUnit.completed && selectedUnit.ammo < selectedUnit.maxAmmo && (
                         <GeoButton
                           variant="softBlue"
                           fullWidth
@@ -1184,27 +1326,27 @@ export const RightPanel: React.FC = () => {
                         </GeoButton>
                       )}
 
-                      {validSecureTile && (
+                      {!selectedUnit.completed && validSecureTile && (
                         <GeoButton variant="amber" fullWidth onClick={secureBuilding} coreStyle={{ padding: '7px 10px' }}>
                           SECURE BUILDING (4 CP)
                         </GeoButton>
                       )}
-                      {validHeistTile && (
+                      {!selectedUnit.completed && validHeistTile && (
                         <GeoButton variant="amber" fullWidth onClick={heistBank} coreStyle={{ padding: '7px 10px' }}>
                           HEIST BANK (4 CP)
                         </GeoButton>
                       )}
-                      {validSiegeTile && (
+                      {!selectedUnit.completed && validSiegeTile && (
                         <GeoButton variant="red" fullWidth onClick={siegeBase} coreStyle={{ padding: '7px 10px' }}>
                           SIEGE BASE
                         </GeoButton>
                       )}
-                      {validDemolishTile && (
+                      {!selectedUnit.completed && validDemolishTile && (
                         <GeoButton variant="red" fullWidth onClick={demolishBarrier} coreStyle={{ padding: '7px 10px' }}>
                           DEMOLISH BARRIER
                         </GeoButton>
                       )}
-                      {validLootTile && (
+                      {!selectedUnit.completed && validLootTile && (
                         <GeoButton variant="mint" fullWidth onClick={lootSupply} coreStyle={{ padding: '7px 10px' }}>
                           RETRIEVE SUPPLY (4 CP)
                         </GeoButton>
@@ -1215,34 +1357,9 @@ export const RightPanel: React.FC = () => {
                   <HoveredTacticalPreview selectedUnit={selectedUnit} selectedUnitTile={selectedUnitTile} />
                 </div>
               );
-            })() : selectedTile ? (() => {
-              const tileUnit = units.find(
-                u => u.tileId === selectedTile.id && (!fogOfWar || u.owner === viewer || visibleTiles.has(u.tileId))
-              );
-              const tuTheme = tileUnit ? PLAYER_UI_THEME[tileUnit.owner] : null;
-              return (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {tileUnit && tuTheme && (
-                    <GeoWell coreStyle={{ padding: '8px 10px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ fontSize: '12px', fontWeight: 900, color: tuTheme.ink }}>
-                          P{tileUnit.owner + 1} {UNIT_STATS[tileUnit.type].name.toUpperCase()}
-                        </span>
-                        <span style={{ fontSize: '12px', fontWeight: 800 }}>
-                          HP {tileUnit.hp}/{getUnitMaxHp(tileUnit)}
-                        </span>
-                      </div>
-                      {tileUnit.isOverwatching && (
-                        <div style={{ fontSize: '12px', fontWeight: 800, color: 'var(--acc-amber-ink)', marginTop: '3px' }}>
-                          🎯 OVERWATCH ACTIVE ({OVERWATCH_STATS[tileUnit.type].damage} DMG reaction)
-                        </div>
-                      )}
-                    </GeoWell>
-                  )}
-                  <BuildingInfoPanel tile={selectedTile} />
-                </div>
-              );
-            })() : (
+            })() : selectedTile ? (
+              <BuildingInfoPanel tile={selectedTile} />
+            ) : (
               <div style={{ color: 'var(--op-ink-muted)', fontStyle: 'italic', textAlign: 'center', padding: '12px 6px', fontSize: '12px' }}>
                 Select a unit or tile for tactical analysis. Hover targets to preview damage &amp; CP.
               </div>
@@ -1283,6 +1400,100 @@ export const RightPanel: React.FC = () => {
   );
 };
 
+const GRADE_COLORS: Record<string, { bg: string; ink: string }> = {
+  S: { bg: '#FFF0D4', ink: '#994D00' },
+  A: { bg: '#D3F9E8', ink: '#046C3E' },
+  B: { bg: '#DCE6FF', ink: '#1344C4' },
+  C: { bg: '#FFE1DC', ink: '#B42318' },
+  D: { bg: '#FFE1DC', ink: '#B42318' },
+};
+
+const MatchScorecardSummary: React.FC<{
+  matchSummary: MatchSummary;
+  winner: number;
+  seedValue: string;
+}> = ({ matchSummary, winner, seedValue }) => {
+  const { copied, copy } = useCopyState(1800);
+  const winnerStats = matchSummary.playerStats?.[winner];
+  const grade = GRADE_COLORS[matchSummary.grade];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', textAlign: 'left' }}>
+      <GeoWell coreStyle={{ padding: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 800 }}>AFTER-ACTION EFFICIENCY</div>
+          <div style={{ fontSize: '17px', fontWeight: 900, color: 'var(--op-ink)', marginTop: '2px' }}>
+            {matchSummary.score} / 100 PTS
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', marginTop: '2px' }}>
+            Completed in <strong>{matchSummary.rounds}</strong> Rounds (Par {matchSummary.parRounds})
+          </div>
+        </div>
+        <div
+          className="geo-chip"
+          style={{
+            width: '56px',
+            height: '56px',
+            background: grade?.bg || '#DCE6FF',
+            color: grade?.ink || 'var(--acc-blue-ink)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <span style={{ fontSize: '24px', fontWeight: 900, lineHeight: 1 }}>{matchSummary.grade}</span>
+          <span style={{ fontSize: '12px', fontWeight: 800 }}>GRADE</span>
+        </div>
+      </GeoWell>
+
+      {winnerStats && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+          {[
+            ['KILLS', winnerStats.kills, 'var(--op-ink)'],
+            ['LOSSES', winnerStats.unitsLost, winnerStats.unitsLost === 0 ? 'var(--acc-mint-ink)' : 'var(--acc-red-ink)'],
+            ['DAMAGE', winnerStats.damageDealt, 'var(--op-ink)'],
+            ['HEISTS', winnerStats.heists, 'var(--acc-amber-ink)'],
+            ['SECURED', winnerStats.buildingsSecured, 'var(--acc-blue-ink)'],
+            ['ACES', winnerStats.acesPromoted, 'var(--acc-amber-ink)'],
+          ].map(([lbl, val, col]) => (
+            <GeoWell key={String(lbl)} coreStyle={{ padding: '7px 9px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>{lbl}</div>
+              <div style={{ fontSize: '15px', fontWeight: 900, color: String(col) }}>{val}</div>
+            </GeoWell>
+          ))}
+        </div>
+      )}
+
+      {matchSummary.mvp && (
+        <GeoWell coreStyle={{ padding: '9px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: '12px', color: 'var(--acc-amber-ink)', fontWeight: 900 }}>MATCH MVP</div>
+            <div style={{ fontSize: '14px', fontWeight: 900 }}>
+              {matchSummary.mvp.unitName} {matchSummary.mvp.rank > 0 ? VETERANCY_CONFIG.RANK_LABELS[matchSummary.mvp.rank] : ''}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right', fontSize: '12px', fontWeight: 800 }}>
+            <div>{matchSummary.mvp.kills} Kills</div>
+            <div style={{ color: 'var(--op-ink-muted)' }}>{matchSummary.mvp.damageDealt} DMG</div>
+          </div>
+        </GeoWell>
+      )}
+
+      {seedValue && (
+        <GeoWell coreStyle={{ padding: '7px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>
+            SECTOR SEED: <strong style={{ color: 'var(--acc-amber-ink)', fontFamily: 'monospace' }}>{seedValue}</strong>
+          </span>
+          <GeoButton onClick={() => void copy(seedValue)} coreStyle={{ padding: '4px 10px' }}>
+            {copied ? 'COPIED' : 'COPY SEED'}
+          </GeoButton>
+        </GeoWell>
+      )}
+    </div>
+  );
+};
+
 export const WinnerOverlay: React.FC = () => {
   const winner = useGameStore(state => state.winner);
   const resetGame = useGameStore(state => state.resetGame);
@@ -1295,31 +1506,13 @@ export const WinnerOverlay: React.FC = () => {
   const mySeat = useGameStore(state => state.mySeat);
   const onlineView = useOnline(state => state.view);
   const rematch = useOnline(state => state.rematch);
-  const [copiedSeed, setCopiedSeed] = useState(false);
 
   if (winner === null) return null;
   const online = mode === 'ONLINE';
   const isHost = Boolean(onlineView?.seats[mySeat]?.isHost);
   const winnerName = online ? onlineView?.seats[winner]?.name : undefined;
-
-  const gradeColors: Record<string, { bg: string; ink: string }> = {
-    S: { bg: '#FFF0D4', ink: '#994D00' },
-    A: { bg: '#D3F9E8', ink: '#046C3E' },
-    B: { bg: '#DCE6FF', ink: '#1344C4' },
-    C: { bg: '#FFE1DC', ink: '#B42318' },
-    D: { bg: '#FFE1DC', ink: '#B42318' },
-  };
-  const winnerStats = matchSummary?.playerStats?.[winner];
   const seedValue = matchSummary?.seed || activeSeed;
   const pTheme = PLAYER_UI_THEME[winner] || PLAYER_UI_THEME[0];
-
-  const handleCopySeed = () => {
-    if (!seedValue) return;
-    navigator.clipboard?.writeText(seedValue).then(() => {
-      setCopiedSeed(true);
-      setTimeout(() => setCopiedSeed(false), 1800);
-    }).catch(() => {});
-  };
 
   return (
     <div
@@ -1364,79 +1557,7 @@ export const WinnerOverlay: React.FC = () => {
           )}
 
           {matchSummary && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', textAlign: 'left' }}>
-              <GeoWell coreStyle={{ padding: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 800 }}>AFTER-ACTION EFFICIENCY</div>
-                  <div style={{ fontSize: '17px', fontWeight: 900, color: 'var(--op-ink)', marginTop: '2px' }}>
-                    {matchSummary.score} / 100 PTS
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', marginTop: '2px' }}>
-                    Completed in <strong>{matchSummary.rounds}</strong> Rounds (Par {matchSummary.parRounds})
-                  </div>
-                </div>
-                <div
-                  className="geo-chip"
-                  style={{
-                    width: '56px',
-                    height: '56px',
-                    background: gradeColors[matchSummary.grade]?.bg || '#DCE6FF',
-                    color: gradeColors[matchSummary.grade]?.ink || 'var(--acc-blue-ink)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <span style={{ fontSize: '24px', fontWeight: 900, lineHeight: 1 }}>{matchSummary.grade}</span>
-                  <span style={{ fontSize: '12px', fontWeight: 800 }}>GRADE</span>
-                </div>
-              </GeoWell>
-
-              {winnerStats && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-                  {[
-                    ['KILLS', winnerStats.kills, 'var(--op-ink)'],
-                    ['LOSSES', winnerStats.unitsLost, winnerStats.unitsLost === 0 ? 'var(--acc-mint-ink)' : 'var(--acc-red-ink)'],
-                    ['DAMAGE', winnerStats.damageDealt, 'var(--op-ink)'],
-                    ['HEISTS', winnerStats.heists, 'var(--acc-amber-ink)'],
-                    ['SECURED', winnerStats.buildingsSecured, 'var(--acc-blue-ink)'],
-                    ['ACES', winnerStats.acesPromoted, 'var(--acc-amber-ink)'],
-                  ].map(([lbl, val, col]) => (
-                    <GeoWell key={String(lbl)} coreStyle={{ padding: '7px 9px' }}>
-                      <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>{lbl}</div>
-                      <div style={{ fontSize: '15px', fontWeight: 900, color: String(col) }}>{val}</div>
-                    </GeoWell>
-                  ))}
-                </div>
-              )}
-
-              {matchSummary.mvp && (
-                <GeoWell coreStyle={{ padding: '9px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <div style={{ fontSize: '12px', color: 'var(--acc-amber-ink)', fontWeight: 900 }}>MATCH MVP</div>
-                    <div style={{ fontSize: '14px', fontWeight: 900 }}>
-                      {matchSummary.mvp.unitName} {matchSummary.mvp.rank > 0 ? VETERANCY_CONFIG.RANK_LABELS[matchSummary.mvp.rank] : ''}
-                    </div>
-                  </div>
-                  <div style={{ textAlign: 'right', fontSize: '12px', fontWeight: 800 }}>
-                    <div>{matchSummary.mvp.kills} Kills</div>
-                    <div style={{ color: 'var(--op-ink-muted)' }}>{matchSummary.mvp.damageDealt} DMG</div>
-                  </div>
-                </GeoWell>
-              )}
-
-              {seedValue && (
-                <GeoWell coreStyle={{ padding: '7px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>
-                    SECTOR SEED: <strong style={{ color: 'var(--acc-amber-ink)', fontFamily: 'monospace' }}>{seedValue}</strong>
-                  </span>
-                  <GeoButton onClick={handleCopySeed} coreStyle={{ padding: '4px 10px' }}>
-                    {copiedSeed ? 'COPIED' : 'COPY SEED'}
-                  </GeoButton>
-                </GeoWell>
-              )}
-            </div>
+            <MatchScorecardSummary matchSummary={matchSummary} winner={winner} seedValue={seedValue} />
           )}
 
           {online ? (
@@ -1455,16 +1576,16 @@ export const WinnerOverlay: React.FC = () => {
               </GeoButton>
             </div>
           ) : (
-          <div style={{ display: 'flex', gap: '10px' }}>
-            {seedValue && (
-              <GeoButton variant="blue" fullWidth onClick={retryCurrentMatch} coreStyle={{ padding: '12px 14px' }}>
-                {activeMission ? 'RETRY OPERATION' : 'RETRY THIS SEED'}
+            <div style={{ display: 'flex', gap: '10px' }}>
+              {seedValue && (
+                <GeoButton variant="blue" fullWidth onClick={retryCurrentMatch} coreStyle={{ padding: '12px 14px' }}>
+                  {activeMission ? 'RETRY OPERATION' : 'RETRY THIS SEED'}
+                </GeoButton>
+              )}
+              <GeoButton variant="mint" fullWidth onClick={resetGame} coreStyle={{ padding: '12px 14px' }}>
+                RETURN TO BASE
               </GeoButton>
-            )}
-            <GeoButton variant="mint" fullWidth onClick={resetGame} coreStyle={{ padding: '12px 14px' }}>
-              RETURN TO BASE
-            </GeoButton>
-          </div>
+            </div>
           )}
         </div>
       </GeoCard>

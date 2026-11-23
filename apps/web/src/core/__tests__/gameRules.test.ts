@@ -28,6 +28,8 @@ import { CHALLENGE_OPERATIONS } from '@tactical/engine/assets/ChallengeOps';
 import { PRESET_MAPS } from '@tactical/engine/assets/Presets';
 import { calculateMatchScorecard } from '@tactical/engine/storage/CareerStatsManager';
 import { createSeededRng, normalizeSeed } from '@tactical/engine/utils/SeededRandom';
+import { createGeneratedGame, DEFAULT_GAME_SETTINGS, DEFAULT_TABLE_SETTINGS, viewFor } from '@tactical/engine';
+import { nextBoardRotation, rotateBoardPoint, unrotateBoardPoint, type BoardRotation } from '../boardRotation';
 import { useGameStore } from '../../store/useGameStore';
 import { Tile, Unit, WeatherState } from '@tactical/engine/types';
 
@@ -459,7 +461,7 @@ test('Random map generation: 25 random maps all connect P0 and P1 bases', () => 
                 const ny = cur.y + dy;
                 if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
                 const nt = mapData[ny * gridSize + nx];
-                if (!nt || visited.has(nt.id) || TERRAIN_COSTS[nt.type] >= 90) continue;
+                if (!nt || visited.has(nt.id) || TERRAIN_COSTS[nt.type] >= 90 || nt.type === 'MOUNTAIN' || nt.type === 'BUILDING') continue;
                 visited.add(nt.id);
                 queue.push(nt);
             }
@@ -669,7 +671,7 @@ test('Store Veterancy Rules: anti-exploit XP (SECURE/DEMOLISH/SIEGE), Ace $75 bo
         playerGold: { 0: 100, 1: 100 },
         playerRespawns: { 0: 0, 1: 0 },
         playerStatus: { 0: 'ACTIVE', 1: 'ACTIVE' },
-        playerInventory: { 0: ['MEDKIT', 'AMMO'], 1: [] },
+        playerInventory: { 0: ['FIRST_AID', 'MEDKIT', 'AMMO'], 1: [] },
         weather: clearWeather,
         gameLog: [],
         matchSummary: null
@@ -708,10 +710,12 @@ test('Store Veterancy Rules: anti-exploit XP (SECURE/DEMOLISH/SIEGE), Ace $75 bo
     assert.equal(promoted.kills, 1);
     assert.equal(st.playerGold[0], 100 + VETERANCY_CONFIG.ACE_BOUNTY_GOLD);
 
-    // 5. MEDKIT heals promoted unit to 36 HP (not base 30) and AMMO refills to 8
+    // 5. FIRST_AID heals 50% (+18 HP to 30 HP), MEDKIT heals to full 36 HP, AMMO refills to 8
     useGameStore.setState({
         units: st.units.map(u => u.id === 'p0_a' ? { ...u, hp: 12, ammo: 1 } : u)
     });
+    useGameStore.getState().executeAiAction({ type: 'USE_ITEM', unitId: 'p0_a', itemIndex: 0, cost: 2 });
+    assert.equal(useGameStore.getState().units.find(u => u.id === 'p0_a')?.hp, 30);
     useGameStore.getState().executeAiAction({ type: 'USE_ITEM', unitId: 'p0_a', itemIndex: 0, cost: 2 });
     useGameStore.getState().executeAiAction({ type: 'USE_ITEM', unitId: 'p0_a', itemIndex: 0, cost: 2 });
     st = useGameStore.getState();
@@ -1337,4 +1341,217 @@ test('Challenge Ops: All 5 missions initialize validly and trigger surviveTurns,
     assert.equal(st.matchSummary?.challengeId, 'ace_hunt');
     assert.equal(st.matchSummary?.challengeMedal, 'S');
     useGameStore.getState().resetGame();
+});
+
+test('UX & tactical flow: local non-fog move undo, smart attack blocker feedback, and targeted shop drop', () => {
+    useGameStore.getState().setGameSettings({
+        playerCount: 2,
+        gameMode: 'PVP',
+        fogOfWar: false,
+        mapSeed: 'UXTEST1',
+    });
+    useGameStore.getState().startGame();
+    let st = useGameStore.getState();
+
+    // Force open PLAINS board near P0 unit for deterministic move/undo + attack blocker test
+    const openMap = st.mapData.map(t => ({
+        ...t,
+        type: t.type === 'BASE' ? ('BASE' as const) : ('PLAINS' as const),
+        hazardState: undefined,
+        owner: t.type === 'BASE' ? t.owner : undefined,
+    }));
+    const clearWeather = { ...st.weather, playerZones: { 0: 'CLEAR' as const, 1: 'CLEAR' as const } };
+    const p0Unit = st.units.find(u => u.owner === 0)!;
+    const p1Enemy = st.units.find(u => u.owner === 1)!;
+    const farEnemy = { ...p1Enemy, tileId: '10,10', hp: 15 };
+    const heroUnit = { ...p0Unit, tileId: '2,2', hasMoved: false, completed: false };
+
+    useGameStore.setState({
+        mapData: openMap,
+        weather: clearWeather,
+        units: [heroUnit, farEnemy],
+        currentPlayer: 0,
+        isAiTurn: false,
+        playerCp: { 0: 20, 1: 20 },
+        playerGold: { 0: 300, 1: 300 },
+        lastMoveSnapshot: null,
+        mapFeedback: null,
+    });
+
+    // 1. Clicking out-of-range enemy keeps selection and raises tactical blocker feedback
+    useGameStore.getState().handleTileClick(2, 2);
+    assert.equal(useGameStore.getState().selectedUnitId, heroUnit.id);
+    useGameStore.getState().handleTileClick(10, 10);
+    st = useGameStore.getState();
+    assert.equal(st.selectedUnitId, heroUnit.id, 'blocker preserves active unit selection');
+    assert.ok(st.mapFeedback?.text.includes('Out of range'), `expected Out of range blocker, got: ${st.mapFeedback?.text}`);
+
+    // 2. Non-fog local move can be undone once, restoring tile & CP
+    const cpBefore = st.playerCp[0];
+    useGameStore.getState().handleTileClick(3, 2);
+    st = useGameStore.getState();
+    const movedHero = st.units.find(u => u.id === heroUnit.id)!;
+    assert.equal(movedHero.tileId, '3,2');
+    assert.ok(st.playerCp[0] < cpBefore);
+    assert.ok(st.lastMoveSnapshot !== null);
+
+    // Clicking walkable empty ground after moving explains unit already moved & keeps selection on 1st click
+    useGameStore.getState().handleTileClick(3, 2);
+    useGameStore.getState().handleTileClick(4, 2);
+    st = useGameStore.getState();
+    assert.ok(st.mapFeedback?.text.includes('already moved'), `expected moved blocker, got: ${st.mapFeedback?.text}`);
+
+    // Clicking a completed unit or attacking with it raises clear Done feedback
+    useGameStore.setState({
+        units: st.units.map(u => u.id === heroUnit.id ? { ...u, completed: true } : u),
+        selectedUnitId: heroUnit.id,
+        selectedTileId: movedHero.tileId,
+        mapFeedback: null,
+    });
+    useGameStore.getState().handleTileClick(10, 10);
+    assert.ok(useGameStore.getState().mapFeedback?.text.includes('Already acted'));
+
+    useGameStore.getState().undoLastMove();
+    st = useGameStore.getState();
+    assert.equal(st.units.find(u => u.id === heroUnit.id)?.tileId, '2,2');
+    assert.equal(st.playerCp[0], cpBefore);
+    assert.equal(st.lastMoveSnapshot, null);
+
+    // Undo is blocked under Fog of War
+    useGameStore.setState(prev => ({
+        settings: { ...prev.settings, fogOfWar: true },
+    }));
+    useGameStore.getState().handleTileClick(2, 2);
+    useGameStore.getState().handleTileClick(3, 2);
+    st = useGameStore.getState();
+    assert.equal(st.lastMoveSnapshot, null, 'fog move must not record undo snapshot');
+    useGameStore.setState(prev => ({
+        settings: { ...prev.settings, fogOfWar: false },
+    }));
+
+    // 3. Supply Drops: Multiplayer (PVP) drops randomly right away; vs AI (PVE) enters targeted DROP selection
+    useGameStore.getState().buyShopItem('AMMO_REFILL');
+    st = useGameStore.getState();
+    assert.equal(st.placementMode, null, 'PVP multiplayer should skip targeted DROP selection');
+    assert.ok(st.pendingDrops.some(d => d.item === 'AMMO'));
+
+    useGameStore.setState(prev => ({
+        settings: { ...prev.settings, gameMode: 'PVE' },
+        playerGold: { ...prev.playerGold, 0: 500 },
+    }));
+    useGameStore.getState().buyShopItem('FIRST_AID');
+    st = useGameStore.getState();
+    assert.equal(st.placementMode?.active, true);
+    assert.equal(st.placementMode?.kind, 'DROP');
+    const faChosenDrop = st.placementMode!.validTiles[0];
+    const [fx, fy] = faChosenDrop.split(',').map(Number);
+    useGameStore.getState().handleTileClick(fx, fy);
+    st = useGameStore.getState();
+    assert.equal(st.placementMode, null);
+    assert.ok(st.pendingDrops.some(d => d.tileId === faChosenDrop && d.item === 'FIRST_AID'));
+
+    useGameStore.getState().buyShopItem('MEDKIT');
+    st = useGameStore.getState();
+    assert.equal(st.placementMode?.active, true);
+    assert.equal(st.placementMode?.kind, 'DROP');
+    const chosenDrop = st.placementMode!.validTiles[0];
+    const [dx, dy] = chosenDrop.split(',').map(Number);
+    useGameStore.getState().handleTileClick(dx, dy);
+    st = useGameStore.getState();
+    assert.equal(st.placementMode, null);
+    assert.ok(st.pendingDrops.some(d => d.tileId === chosenDrop && d.item === 'MEDKIT'));
+
+    // 4. Barrier x3 (150€): 3 clicks with toggle unselect & auto-submit on 3rd tile; Land Mine (75€): HQ radius block feedback
+    useGameStore.setState({ playerGold: { 0: 500, 1: 500 } });
+    useGameStore.getState().buyShopItem('BARRIER');
+    st = useGameStore.getState();
+    assert.equal(st.placementMode?.requiredCount, 3);
+    const bTiles = st.placementMode!.validTiles.slice(0, 4);
+    const clickId = (id: string) => {
+        const [bx, by] = id.split(',').map(Number);
+        useGameStore.getState().handleTileClick(bx, by);
+    };
+    clickId(bTiles[0]);
+    assert.deepEqual(useGameStore.getState().placementMode?.selectedTiles, [bTiles[0]]);
+    clickId(bTiles[0]); // toggle off
+    assert.deepEqual(useGameStore.getState().placementMode?.selectedTiles, []);
+    clickId(bTiles[1]);
+    clickId(bTiles[2]);
+    clickId(bTiles[3]);
+    st = useGameStore.getState();
+    assert.equal(st.placementMode, null);
+    assert.equal(st.playerGold[0], 350);
+    assert.equal(st.mapData.find(t => t.id === bTiles[1])?.type, 'BARRIER');
+    assert.equal(st.mapData.find(t => t.id === bTiles[2])?.type, 'BARRIER');
+    assert.equal(st.mapData.find(t => t.id === bTiles[3])?.type, 'BARRIER');
+
+    useGameStore.getState().buyShopItem('LAND_MINE');
+    st = useGameStore.getState();
+    assert.equal(st.placementMode?.itemKey, 'LAND_MINE');
+    const enemyBase = st.mapData.find(t => t.type === 'BASE' && t.owner === 1)!;
+    const blockedNearHq = st.mapData.find(
+        t => t.type === 'PLAINS' && Math.max(Math.abs(t.x - enemyBase.x), Math.abs(t.y - enemyBase.y)) <= 5
+    );
+    if (blockedNearHq) {
+        assert.equal(st.placementMode!.validTiles.includes(blockedNearHq.id), false);
+        clickId(blockedNearHq.id);
+        assert.ok(useGameStore.getState().mapFeedback?.text.includes('5 tiles of enemy HQ'));
+    }
+    const mineTarget = useGameStore.getState().placementMode!.validTiles[0];
+    clickId(mineTarget);
+    st = useGameStore.getState();
+    assert.equal(st.placementMode, null);
+    assert.equal(st.mines.some(m => m.tileId === mineTarget && m.owner === 0), true);
+    assert.equal(st.playerGold[0], 275);
+
+    useGameStore.getState().resetGame();
+});
+
+test('Map rotation helpers invert accurately across 0/90/180/270 and multiplayer updates preserve user rotation', () => {
+    const boardSize = 20 * 64;
+    const angles: BoardRotation[] = [0, 90, 180, 270];
+    assert.equal(nextBoardRotation(0, 90), 90);
+    assert.equal(nextBoardRotation(270, 90), 0);
+    assert.equal(nextBoardRotation(0, -90), 270);
+
+    for (const angle of angles) {
+        const rot = rotateBoardPoint(96, 224, angle, boardSize);
+        const back = unrotateBoardPoint(rot.x, rot.y, angle, boardSize);
+        assert.equal(back.x, 96);
+        assert.equal(back.y, 224);
+    }
+
+    assert.deepEqual(rotateBoardPoint(0, 0, 90, 1280), { x: 1280, y: 0 });
+    assert.deepEqual(rotateBoardPoint(0, 0, 180, 1280), { x: 1280, y: 1280 });
+    assert.deepEqual(rotateBoardPoint(0, 0, 270, 1280), { x: 0, y: 1280 });
+
+    useGameStore.getState().setMapRotation(0);
+    useGameStore.getState().rotateMap(90);
+    assert.equal(useGameStore.getState().mapRotation, 90);
+    useGameStore.getState().rotateMap(90);
+    assert.equal(useGameStore.getState().mapRotation, 180);
+
+    // Online server views never reset a player's chosen camera angle
+    const game = createGeneratedGame({ ...DEFAULT_GAME_SETTINGS, gameMode: 'PVP', mapSeed: 'ROTAT1' });
+    const p2View = viewFor(game, 1);
+    useGameStore.getState().applyServerView({
+        code: 'ROOM01',
+        status: 'playing',
+        seats: [
+            { name: 'P1', isBot: false, connected: true, isHost: true, autopilot: false },
+            { name: 'P2', isBot: false, connected: true, isHost: false, autopilot: false },
+        ],
+        mySeat: 1,
+        settings: DEFAULT_TABLE_SETTINGS,
+        game: p2View,
+        events: [],
+        seq: 1,
+    });
+    assert.equal(useGameStore.getState().mode, 'ONLINE');
+    assert.equal(useGameStore.getState().mySeat, 1);
+    assert.equal(useGameStore.getState().mapRotation, 180);
+
+    useGameStore.getState().exitOnline();
+    assert.equal(useGameStore.getState().mapRotation, 180);
+    useGameStore.getState().setMapRotation(0);
 });

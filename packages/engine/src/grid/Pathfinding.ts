@@ -1,5 +1,5 @@
 
-import { Tile, Unit, UnitRank, UnitType, WeatherState } from '../types';
+import { Tile, Unit, UnitRank, UnitType, WeatherState, WeatherType } from '../types';
 import { TERRAIN_COSTS, UNIT_STATS } from '../constants/Config';
 import { getUnitVision } from '../rules/CombatRules';
 
@@ -16,7 +16,7 @@ export const getTileByIdFast = (mapData: Tile[], id: string, gridSize?: number):
     if (comma > 0) {
       const x = Number(id.slice(0, comma));
       const y = Number(id.slice(comma + 1));
-      if (x >= 0 && x < gridSize && y >= 0 && y < gridSize) {
+      if (Number.isInteger(x) && Number.isInteger(y) && x >= 0 && x < gridSize && y >= 0 && y < gridSize) {
         const candidate = mapData[y * gridSize + x];
         if (candidate && candidate.id === id) return candidate;
       }
@@ -24,6 +24,24 @@ export const getTileByIdFast = (mapData: Tile[], id: string, gridSize?: number):
   }
   return mapData.find(t => t.id === id);
 };
+
+const ORTHOGONAL_DIRS: readonly (readonly [number, number])[] = [
+  [0, -1],
+  [0, 1],
+  [-1, 0],
+  [1, 0],
+];
+
+const KING_DIRS: readonly (readonly [number, number])[] = [
+  [0, 1],
+  [0, -1],
+  [1, 0],
+  [-1, 0],
+  [1, 1],
+  [1, -1],
+  [-1, 1],
+  [-1, -1],
+];
 
 const heapPush = (heap: MoveNode[], node: MoveNode) => {
   heap.push(node);
@@ -63,18 +81,47 @@ const heapPop = (heap: MoveNode[]): MoveNode | undefined => {
   return top;
 };
 
-export const getManhattanDistance = (t1: Tile, t2: Tile): number => {
+export const getManhattanDistance = (t1: { x: number; y: number }, t2: { x: number; y: number }): number => {
   return Math.abs(t1.x - t2.x) + Math.abs(t1.y - t2.y);
+};
+
+export const getMinManhattanDistance = (
+  origin: { x: number; y: number },
+  targets: readonly { x: number; y: number }[],
+  fallback = 999
+): number => {
+  let min = fallback;
+  for (let i = 0; i < targets.length; i++) {
+    const d = getManhattanDistance(origin, targets[i]);
+    if (d < min) min = d;
+  }
+  return min;
+};
+
+export const hasTileWithinRange = (
+  origin: { x: number; y: number },
+  targets: readonly { x: number; y: number }[],
+  maxRange: number
+): boolean => {
+  for (let i = 0; i < targets.length; i++) {
+    if (getManhattanDistance(origin, targets[i]) <= maxRange) return true;
+  }
+  return false;
+};
+
+/** Resolves the effective weather for a tile based on its zone. */
+export const getTileWeather = (
+  tile: Pick<Tile, 'zone'> | undefined,
+  weatherState: WeatherState,
+): WeatherType => {
+  const zoneId = tile?.zone !== undefined ? tile.zone : -1;
+  return zoneId >= 0 && weatherState.playerZones[zoneId] ? weatherState.playerZones[zoneId] : 'CLEAR';
 };
 
 // Check if a tile is visible under current weather conditions
 const isTileVisibleInWeather = (start: Tile, end: Tile, weatherState: WeatherState): boolean => {
   const dist = getManhattanDistance(start, end);
-  
-  // Determine weather at the *viewer's* location (Start Tile)
-  // Use the Voronoi zone of the start tile
-  const zoneId = start.zone !== undefined ? start.zone : -1;
-  const weather = zoneId >= 0 && weatherState.playerZones[zoneId] ? weatherState.playerZones[zoneId] : 'CLEAR';
+  const weather = getTileWeather(start, weatherState);
 
   if (weather === 'FOG') {
     // Fog Cap: Max vision 2 tiles
@@ -95,11 +142,12 @@ const traceLineOfSight = (
   mapData: Tile[],
   weatherState: WeatherState,
   gridSize: number,
-  options: { blockBarriers?: boolean; checkTargetWeather?: boolean } = {}
+  blockBarriers = false,
+  checkTargetWeather = false
 ): boolean => {
   // 1. Check Weather Visibility first
   if (!isTileVisibleInWeather(start, end, weatherState)) return false;
-  if (options.checkTargetWeather && !isTileVisibleInWeather(end, start, weatherState)) return false;
+  if (checkTargetWeather && !isTileVisibleInWeather(end, start, weatherState)) return false;
 
   let x0 = start.x;
   let y0 = start.y;
@@ -126,7 +174,7 @@ const traceLineOfSight = (
            return false;
        }
        // Barriers block Overwatch reaction lines
-       if (options.blockBarriers && tile.type === 'BARRIER' && tile.id !== start.id && tile.id !== end.id) {
+       if (blockBarriers && tile.type === 'BARRIER' && tile.id !== start.id && tile.id !== end.id) {
            return false;
        }
 
@@ -165,10 +213,7 @@ export const hasLineOfSight = (start: Tile, end: Tile, mapData: Tile[], _unitTyp
 
 // Overwatch Line of Sight: additionally blocked by Barriers and bidirectional Fog/Sandstorm caps
 export const hasOverwatchLineOfSight = (start: Tile, end: Tile, mapData: Tile[], _unitType: UnitType, weatherState: WeatherState, gridSize: number): boolean => {
-  return traceLineOfSight(start, end, mapData, weatherState, gridSize, {
-    blockBarriers: true,
-    checkTargetWeather: true
-  });
+  return traceLineOfSight(start, end, mapData, weatherState, gridSize, true, true);
 };
 
 const getWeatherMoveCost = (
@@ -178,21 +223,16 @@ const getWeatherMoveCost = (
     weatherState: WeatherState,
     unitRank: UnitRank = 0
 ): number => {
-    // 1. Identify Weather
-    const zoneId = tile.zone !== undefined ? tile.zone : -1;
-    const weather = zoneId >= 0 && weatherState.playerZones[zoneId] ? weatherState.playerZones[zoneId] : 'CLEAR';
-    
+    const weather = getTileWeather(tile, weatherState);
     const ignorePlainsSlow = unitType === 'SOLDIER' && unitRank >= 2;
 
-    // 2. Apply Effects
     if (tile.type === 'PLAINS') {
         if (weather === 'SCORCHED' && !ignorePlainsSlow) return 2;
-        if (weather === 'MONSOON' && unitType === 'ASSAULTER') return 2;
+        if (weather === 'MONSOON' && !ignorePlainsSlow) return 2;
         if (weather === 'TAILWIND') return 0.5;
     }
-    
-    // SCORCHED increases cost on SAND too
-    if (tile.type === 'SAND' && weather === 'SCORCHED') {
+
+    if (tile.type === 'SAND' && (weather === 'SCORCHED' || weather === 'SANDSTORM') && !ignorePlainsSlow) {
         return baseCost + 1;
     }
 
@@ -207,7 +247,11 @@ export const getStepCost = (
     unitRank: UnitRank = 0
 ): number | null => {
     if (tile.hazardState === 'LAVA') return null;
-    if (unitType === 'SNIPER' && tile.type === 'BUILDING' && tile.owner !== currentPlayer) return null;
+    if (tile.type === 'MOUNTAIN' && unitType !== 'SNIPER') return null;
+    if (tile.type === 'BUILDING') {
+        if (tile.owner !== currentPlayer) return null;
+        if (tile.subType === 'WATCHTOWER' && unitType !== 'SNIPER') return null;
+    }
 
     // Ace Sniper climbs high ground effortlessly (1 CP per Mountain/Dunes tile)
     if (unitType === 'SNIPER' && unitRank >= 3 && (tile.type === 'MOUNTAIN' || tile.type === 'DUNES')) {
@@ -221,77 +265,6 @@ export const getStepCost = (
     return terrainMod * UNIT_STATS[unitType].moveCost;
 };
 
-const runDijkstra = (
-  startTile: Tile,
-  currentGlobalCp: number,
-  mapData: Tile[],
-  units: Unit[],
-  unitType: UnitType,
-  currentPlayer: number,
-  weatherState: WeatherState,
-  gridSize: number,
-  unitRank: UnitRank = 0
-): { validMoves: Map<string, number>; parents: Map<string, string> } => {
-  const validMoves = new Map<string, number>();
-  const parents = new Map<string, string>();
-  
-  // ROOTED CHECK (From Quicksand)
-  const myUnit = units.find(u => u.tileId === startTile.id);
-  if (myUnit && myUnit.isRooted) {
-      return { validMoves, parents };
-  }
-
-  const visited = new Map<string, number>(); 
-  const queue: MoveNode[] = [{ x: startTile.x, y: startTile.y, cost: 0 }];
-  
-  const occupiedTiles = new Set(units.map(u => u.tileId));
-  occupiedTiles.delete(startTile.id);
-
-  // Enemies block movement
-  const enemyTiles = new Set(units.filter(u => u.owner !== currentPlayer).map(u => u.tileId));
-
-  visited.set(startTile.id, 0);
-
-  const directions = [{dx:0, dy:-1}, {dx:0, dy:1}, {dx:-1, dy:0}, {dx:1, dy:0}];
-
-  while (queue.length > 0) {
-    const current = heapPop(queue);
-    if (!current) break;
-    const currentId = `${current.x},${current.y}`;
-    if (current.cost > (visited.get(currentId) ?? Infinity)) continue;
-
-    for (const dir of directions) {
-      const nx = current.x + dir.dx;
-      const ny = current.y + dir.dy;
-      const nId = `${nx},${ny}`;
-
-      if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
-
-      const tileIndex = ny * gridSize + nx;
-      const tile = mapData[tileIndex];
-      if (!tile) continue;
-
-      const moveCost = getStepCost(tile, unitType, currentPlayer, weatherState, unitRank);
-      if (moveCost === null) continue;
-
-      const newCost = current.cost + moveCost;
-
-      if (newCost > currentGlobalCp) continue;
-      if (enemyTiles.has(nId)) continue;
-      if (visited.has(nId) && visited.get(nId)! <= newCost) continue;
-
-      visited.set(nId, newCost);
-      parents.set(nId, currentId);
-      if (!occupiedTiles.has(nId)) {
-        validMoves.set(nId, newCost);
-      }
-      heapPush(queue, { x: nx, y: ny, cost: newCost });
-    }
-  }
-
-  return { validMoves, parents };
-};
-
 export const getValidMovesWithParents = (
   startTile: Tile,
   currentGlobalCp: number,
@@ -301,9 +274,86 @@ export const getValidMovesWithParents = (
   currentPlayer: number,
   weatherState: WeatherState,
   gridSize: number,
-  unitRank: UnitRank = 0
+  unitRank: UnitRank = 0,
+  stopAtTileId?: string
 ): { validMoves: Map<string, number>; parents: Map<string, string> } => {
-  return runDijkstra(startTile, currentGlobalCp, mapData, units, unitType, currentPlayer, weatherState, gridSize, unitRank);
+  const validMoves = new Map<string, number>();
+  const parents = new Map<string, string>();
+
+  // ROOTED CHECK (From Quicksand)
+  const myUnit = units.find(u => u.tileId === startTile.id);
+  if (myUnit && myUnit.isRooted) {
+      return { validMoves, parents };
+  }
+
+  const totalCells = gridSize * gridSize;
+  const occupiedFlags = new Uint8Array(totalCells);
+  const enemyFlags = new Uint8Array(totalCells);
+  for (let i = 0; i < units.length; i++) {
+    const u = units[i];
+    const ut = getTileByIdFast(mapData, u.tileId, gridSize);
+    if (!ut || ut.x < 0 || ut.x >= gridSize || ut.y < 0 || ut.y >= gridSize) continue;
+    const idx = ut.y * gridSize + ut.x;
+    if (u.tileId !== startTile.id) occupiedFlags[idx] = 1;
+    if (u.owner !== currentPlayer) enemyFlags[idx] = 1;
+  }
+
+  if (stopAtTileId !== undefined) {
+    if (stopAtTileId === startTile.id) return { validMoves, parents };
+    const stopTile = getTileByIdFast(mapData, stopAtTileId, gridSize);
+    if (!stopTile || stopTile.x < 0 || stopTile.x >= gridSize || stopTile.y < 0 || stopTile.y >= gridSize) {
+      return { validMoves, parents };
+    }
+    const stopIdx = stopTile.y * gridSize + stopTile.x;
+    if (occupiedFlags[stopIdx] || enemyFlags[stopIdx]) return { validMoves, parents };
+    if (getStepCost(stopTile, unitType, currentPlayer, weatherState, unitRank) === null) {
+      return { validMoves, parents };
+    }
+  }
+
+  const visitedCosts = new Float64Array(totalCells);
+  visitedCosts.fill(Infinity);
+  const startIdx = startTile.y * gridSize + startTile.x;
+  if (startIdx >= 0 && startIdx < totalCells) visitedCosts[startIdx] = 0;
+
+  const queue: MoveNode[] = [{ x: startTile.x, y: startTile.y, cost: 0 }];
+
+  while (queue.length > 0) {
+    const current = heapPop(queue);
+    if (!current) break;
+    const currentIdx = current.y * gridSize + current.x;
+    if (current.cost > visitedCosts[currentIdx]) continue;
+    const currentTile = mapData[currentIdx];
+    const currentId = currentTile ? currentTile.id : `${current.x},${current.y}`;
+    if (stopAtTileId !== undefined && currentId === stopAtTileId) break;
+
+    for (let d = 0; d < ORTHOGONAL_DIRS.length; d++) {
+      const nx = current.x + ORTHOGONAL_DIRS[d][0];
+      const ny = current.y + ORTHOGONAL_DIRS[d][1];
+      if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
+
+      const tileIndex = ny * gridSize + nx;
+      const tile = mapData[tileIndex];
+      if (!tile || enemyFlags[tileIndex]) continue;
+
+      const moveCost = getStepCost(tile, unitType, currentPlayer, weatherState, unitRank);
+      if (moveCost === null) continue;
+
+      const newCost = current.cost + moveCost;
+      if (newCost > currentGlobalCp) continue;
+      if (visitedCosts[tileIndex] <= newCost) continue;
+
+      visitedCosts[tileIndex] = newCost;
+      const nId = tile.id;
+      parents.set(nId, currentId);
+      if (!occupiedFlags[tileIndex]) {
+        validMoves.set(nId, newCost);
+      }
+      heapPush(queue, { x: nx, y: ny, cost: newCost });
+    }
+  }
+
+  return { validMoves, parents };
 };
 
 export const reconstructMovePathFromParents = (
@@ -342,7 +392,7 @@ export const getValidMoves = (
   gridSize: number,
   unitRank: UnitRank = 0
 ): Map<string, number> => {
-  return runDijkstra(startTile, currentGlobalCp, mapData, units, unitType, currentPlayer, weatherState, gridSize, unitRank).validMoves;
+  return getValidMovesWithParents(startTile, currentGlobalCp, mapData, units, unitType, currentPlayer, weatherState, gridSize, unitRank).validMoves;
 };
 
 export const getMovePath = (
@@ -357,7 +407,7 @@ export const getMovePath = (
   gridSize: number,
   unitRank: UnitRank = 0
 ): Tile[] => {
-  const { validMoves, parents } = runDijkstra(
+  const { validMoves, parents } = getValidMovesWithParents(
       startTile,
       currentGlobalCp,
       mapData,
@@ -366,7 +416,8 @@ export const getMovePath = (
       currentPlayer,
       weatherState,
       gridSize,
-      unitRank
+      unitRank,
+      targetTileId
   );
   return reconstructMovePathFromParents(startTile, targetTileId, validMoves, parents, mapData, gridSize);
 };
@@ -377,17 +428,18 @@ export const calculateVisibility = (player: number, units: Unit[], mapData: Tile
         return visible; 
     }
     
-    const myUnits = units.filter(u => u.owner === player);
-    
-    myUnits.forEach(unit => {
+    for (let i = 0; i < units.length; i++) {
+        const unit = units[i];
+        if (unit.owner !== player) continue;
         const uTile = getTileByIdFast(mapData, unit.tileId, gridSize);
-        if (!uTile) return;
+        if (!uTile) continue;
         let vision = getUnitVision(unit);
         
-        // Sandstorm reduces all vision
-        const zoneId = uTile.zone !== undefined ? uTile.zone : -1;
-        const wType = zoneId >= 0 ? weather.playerZones[zoneId] : 'CLEAR';
-        if (wType === 'SANDSTORM') {
+        // Fog / Sandstorm reduce all vision
+        const wType = getTileWeather(uTile, weather);
+        if (wType === 'FOG') {
+            vision = Math.min(vision, 2);
+        } else if (wType === 'SANDSTORM') {
             vision = Math.min(vision, 3);
         }
 
@@ -400,7 +452,7 @@ export const calculateVisibility = (player: number, units: Unit[], mapData: Tile
                 const ty = uTile.y + y;
                 if (tx >= 0 && tx < gridSize && ty >= 0 && ty < gridSize) {
                     const targetTile = mapData[ty * gridSize + tx];
-                    if (targetTile) {
+                    if (targetTile && !visible.has(targetTile.id)) {
                         if (hasLineOfSight(uTile, targetTile, mapData, unit.type, weather, gridSize)) {
                             visible.add(targetTile.id);
                         }
@@ -408,50 +460,35 @@ export const calculateVisibility = (player: number, units: Unit[], mapData: Tile
                 }
             }
         }
-    });
+    }
     
-    mapData.filter(t => (t.type === 'BASE' || t.type === 'BUILDING') && t.owner === player).forEach(b => {
+    for (let i = 0; i < mapData.length; i++) {
+        const b = mapData[i];
+        if ((b.type !== 'BASE' && b.type !== 'BUILDING') || b.owner !== player) continue;
         visible.add(b.id);
-        const adj = [{x:0,y:1}, {x:0,y:-1}, {x:1,y:0}, {x:-1,y:0},{x:1,y:1}, {x:1,y:-1}, {x:-1,y:1}, {x:-1,y:-1}];
-        adj.forEach(d => {
-            const tx = b.x + d.x; 
-            const ty = b.y + d.y;
-            if(tx >= 0 && tx < gridSize && ty >= 0 && ty < gridSize) visible.add(`${tx},${ty}`);
-        });
-    });
+        for (let d = 0; d < KING_DIRS.length; d++) {
+            const tx = b.x + KING_DIRS[d][0];
+            const ty = b.y + KING_DIRS[d][1];
+            if (tx >= 0 && tx < gridSize && ty >= 0 && ty < gridSize) {
+                const nt = mapData[ty * gridSize + tx];
+                visible.add(nt ? nt.id : `${tx},${ty}`);
+            }
+        }
+    }
     return visible;
 };
 
 /** The four tiles next to `tile` (fewer at the map's edge). */
 export const getNeighbors = (tile: Tile, map: Tile[], gridSize?: number): Tile[] => {
     const out: Tile[] = [];
-    if (gridSize && gridSize > 0 && map.length === gridSize * gridSize) {
-        const { x, y } = tile;
-        if (x + 1 < gridSize) {
-            const t = map[y * gridSize + (x + 1)];
-            if (t) out.push(t);
-        }
-        if (x - 1 >= 0) {
-            const t = map[y * gridSize + (x - 1)];
-            if (t) out.push(t);
-        }
-        if (y + 1 < gridSize) {
-            const t = map[(y + 1) * gridSize + x];
-            if (t) out.push(t);
-        }
-        if (y - 1 >= 0) {
-            const t = map[(y - 1) * gridSize + x];
-            if (t) out.push(t);
-        }
-        return out;
+    const useGrid = Boolean(gridSize && gridSize > 0 && map.length === gridSize * gridSize);
+    for (let d = 0; d < ORTHOGONAL_DIRS.length; d++) {
+        const nx = tile.x + ORTHOGONAL_DIRS[d][0];
+        const ny = tile.y + ORTHOGONAL_DIRS[d][1];
+        const t = useGrid
+            ? (nx >= 0 && nx < gridSize! && ny >= 0 && ny < gridSize! ? map[ny * gridSize! + nx] : undefined)
+            : map.find(candidate => candidate.x === nx && candidate.y === ny);
+        if (t) out.push(t);
     }
-    const r = map.find(t => t.x === tile.x + 1 && t.y === tile.y);
-    const l = map.find(t => t.x === tile.x - 1 && t.y === tile.y);
-    const d = map.find(t => t.x === tile.x && t.y === tile.y + 1);
-    const u = map.find(t => t.x === tile.x && t.y === tile.y - 1);
-    if (r) out.push(r);
-    if (l) out.push(l);
-    if (d) out.push(d);
-    if (u) out.push(u);
     return out;
 };

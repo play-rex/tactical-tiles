@@ -4,18 +4,19 @@
  * rules say. The local game skips this (its UI only offers legal actions); the server and
  * the bots always go through it.
  */
-import { CP_SYSTEM, OVERWATCH_STATS, SHOP_ITEMS, UNIT_COSTS } from '../constants/Config';
-import { canConstructOnTile, canUnitEnterOverwatch, getUnitAttackCost } from '../rules/CombatRules';
+import { BARRIER_STATS, CP_SYSTEM, OVERWATCH_STATS, SHOP_ITEMS, UNIT_COSTS } from '../constants/Config';
+import { getManhattanDistance, getValidMovesWithParents, hasLineOfSight } from '../grid/Pathfinding';
+import { canConstructOnTile, canUnitAttackFromTile, canUnitEnterOverwatch, getUnitAttackCost, getUnitRange } from '../rules/CombatRules';
 import {
-  attackOptionsFor,
-  dropTilesFor,
-  getSpawnTiles,
   INTERACT_COST,
-  interactOptionsFor,
+  dropTilesFor,
+  getSupplyDropTargets,
   isConstruct,
   isConsumable,
-  moveCostsFor,
+  isValidSpawnTile,
+  interactOptionsFor,
   spawnBlocker,
+  tileOf,
   visibleSet,
 } from './options';
 import type { GameAction, GameState } from './state';
@@ -27,7 +28,7 @@ export type Prepared =
 const fail = (error: string): Prepared => ({ ok: false, error });
 const ok = (action: GameAction): Prepared => ({ ok: true, action });
 
-export function prepareAction(state: GameState, seat: number, action: GameAction): Prepared {
+export function prepareAction(state: GameState, seat: number, action: GameAction, knownVisible?: Set<string>): Prepared {
   if (state.winner !== null) return fail('The match is over');
   if (seat !== state.currentPlayer) return fail("It isn't your turn");
   if (state.playerStatus[seat] === 'ELIMINATED') return fail("You're out of this match");
@@ -46,11 +47,7 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
     const u = ownUnit(id);
     return u && !u.completed ? u : undefined;
   };
-  // Only the part of a unit's options an action needs: pathfinding for moves, sight for shots.
-  const attacksOf = (id: string) => {
-    const u = readyUnit(id);
-    return u ? attackOptionsFor(state, u, visibleSet(state, seat)) : null;
-  };
+  const getVisible = () => (state.settings.fogOfWar ? (knownVisible ?? visibleSet(state, seat)) : null);
   const interactionsOf = (id: string) => {
     const u = readyUnit(id);
     return u ? interactOptionsFor(state, u) : null;
@@ -63,24 +60,71 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
 
     case 'MOVE': {
       const unit = readyUnit(action.unitId);
-      const cost = unit ? moveCostsFor(state, unit).get(action.targetTileId) : undefined;
+      const startTile = unit ? tileOf(state, unit.tileId) : undefined;
+      const cost =
+        unit && startTile && !unit.hasMoved && cp > 0 && !unit.isRooted
+          ? getValidMovesWithParents(
+              startTile,
+              cp,
+              state.mapData,
+              state.units,
+              unit.type,
+              seat,
+              state.weather,
+              state.gridSize,
+              unit.rank ?? 0,
+              action.targetTileId,
+            ).validMoves.get(action.targetTileId)
+          : undefined;
       if (cost === undefined) return fail("That unit can't move there");
       return afford(cost, { type: 'MOVE', unitId: action.unitId, targetTileId: action.targetTileId, cost });
     }
 
     case 'ATTACK': {
-      const opts = attacksOf(action.attackerId);
-      if (!opts?.attackTargets.includes(action.targetUnitId)) return fail("That target isn't in range");
-      const cost = getUnitAttackCost(ownUnit(action.attackerId)!);
+      const unit = readyUnit(action.attackerId);
+      const attTile = unit ? tileOf(state, unit.tileId) : undefined;
+      const cost = unit ? getUnitAttackCost(unit) : 0;
+      const target = unit ? state.units.find(u => u.id === action.targetUnitId && u.owner !== seat) : undefined;
+      const tarTile = target ? tileOf(state, target.tileId) : undefined;
+      if (!unit || !attTile || !tarTile || cp < cost || unit.ammo <= 0 || !canUnitAttackFromTile(unit, attTile)) {
+        return fail("That target isn't in range");
+      }
+      const range = getUnitRange(unit, state.mapData, state.weather, attTile);
+      const vis = getVisible();
+      if (
+        getManhattanDistance(attTile, tarTile) > range ||
+        (vis && !vis.has(tarTile.id)) ||
+        !hasLineOfSight(attTile, tarTile, state.mapData, unit.type, state.weather, state.gridSize)
+      ) {
+        return fail("That target isn't in range");
+      }
       return afford(cost, { type: 'ATTACK', attackerId: action.attackerId, targetUnitId: action.targetUnitId, cost });
     }
 
     case 'SIEGE':
     case 'DEMOLISH': {
-      const opts = attacksOf(action.unitId);
-      const tiles = action.type === 'SIEGE' ? opts?.siegeTiles : opts?.demolishTiles;
-      if (!tiles?.includes(action.tileId)) return fail("That target isn't in range");
-      const cost = getUnitAttackCost(ownUnit(action.unitId)!);
+      const unit = readyUnit(action.unitId);
+      const attTile = unit ? tileOf(state, unit.tileId) : undefined;
+      const cost = unit ? getUnitAttackCost(unit) : 0;
+      const tarTile = tileOf(state, action.tileId);
+      const validType =
+        tarTile &&
+        (tarTile.hp || 0) > 0 &&
+        (action.type === 'DEMOLISH'
+          ? tarTile.type === 'BARRIER'
+          : state.settings.victoryMode === 'CONQUER' && tarTile.type === 'BASE' && tarTile.owner !== seat);
+      if (!unit || !attTile || !validType || cp < cost || unit.ammo <= 0 || !canUnitAttackFromTile(unit, attTile)) {
+        return fail("That target isn't in range");
+      }
+      const range = getUnitRange(unit, state.mapData, state.weather, attTile);
+      const vis = getVisible();
+      if (
+        getManhattanDistance(attTile, tarTile) > range ||
+        (vis && !vis.has(tarTile.id)) ||
+        !hasLineOfSight(attTile, tarTile, state.mapData, unit.type, state.weather, state.gridSize)
+      ) {
+        return fail("That target isn't in range");
+      }
       return afford(cost, { type: action.type, unitId: action.unitId, tileId: action.tileId, cost });
     }
 
@@ -95,7 +139,7 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
 
     case 'OVERWATCH': {
       const unit = readyUnit(action.unitId);
-      const tile = unit && state.mapData.find(t => t.id === unit.tileId);
+      const tile = unit ? tileOf(state, unit.tileId) : undefined;
       if (!unit || !canUnitEnterOverwatch(unit, tile, cp)) return fail("That unit can't go on Overwatch");
       return ok({ type: 'OVERWATCH', unitId: unit.id, cost: OVERWATCH_STATS[unit.type].cost });
     }
@@ -118,7 +162,7 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
       if (!action.deadUnitId) return fail('Pick a fallen unit');
       const blocked = spawnBlocker(state, seat, action.deadUnitId);
       if (blocked) return fail(blocked);
-      if (!getSpawnTiles(state, seat).includes(action.tileId)) return fail("Can't redeploy there");
+      if (!isValidSpawnTile(state, seat, action.tileId)) return fail("Can't redeploy there");
       const dead = state.graveyard.find(u => u.id === action.deadUnitId)!;
       return ok({
         type: 'SPAWN',
@@ -133,23 +177,50 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
     case 'BUY_DROP': {
       if (!isConsumable(action.itemKey)) return fail('Not a supply item');
       const goldCost = SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS].cost;
-      if (gold < goldCost) return fail('Not enough gold');
+      if (gold < goldCost) return fail('Not enough Euros');
       if (!dropTilesFor(state, seat).has(action.tileId)) return fail('Drops land beside your own units');
       return ok({ type: 'BUY_DROP', itemKey: action.itemKey, tileId: action.tileId, cost: 0, goldCost });
     }
 
     case 'BUY_ITEM': {
       if (!isConsumable(action.itemKey)) return fail('Not a supply item');
-      if (gold < SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS].cost) return fail('Not enough gold');
+      if (gold < SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS].cost) return fail('Not enough Euros');
+      if (action.tileId !== undefined) {
+        if (state.settings.gameMode !== 'PVE') return fail('Targeted drops are only available vs AI');
+        if (!getSupplyDropTargets(state, seat).has(action.tileId)) return fail('Pick a drop zone near your HQ or squad');
+        const vis = getVisible();
+        if (vis && !vis.has(action.tileId)) return fail('Drop zone must be visible');
+        return ok({ type: 'BUY_ITEM', itemKey: action.itemKey, tileId: action.tileId });
+      }
       return ok({ type: 'BUY_ITEM', itemKey: action.itemKey });
     }
 
     case 'BUILD': {
       if (!isConstruct(action.itemKey)) return fail('Not something you can build');
-      if (gold < SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS].cost) return fail('Not enough gold');
-      const tile = state.mapData.find(t => t.id === action.tileId);
-      if (!tile || !canConstructOnTile(action.itemKey, tile, state.units)) return fail("Can't build there");
-      const variant = action.variant === 'V' ? 'V' : undefined;
+      if (gold < SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS].cost) return fail('Not enough Euros');
+      const vis = action.itemKey === 'LAND_MINE' ? getVisible() : null;
+      const unitsForBuild = vis
+        ? state.units.filter(u => u.owner === seat || vis.has(u.tileId))
+        : state.units;
+      const ctx = { playerId: seat, mapData: state.mapData, mines: state.mines };
+
+      if (action.itemKey === 'BARRIER') {
+        const targetIds = action.tileIds && action.tileIds.length > 0
+          ? Array.from(new Set(action.tileIds))
+          : [action.tileId];
+        if (targetIds.length < 1 || targetIds.length > BARRIER_STATS.BUILD_COUNT) {
+          return fail(`Choose 1 to ${BARRIER_STATS.BUILD_COUNT} tiles for Barrier`);
+        }
+        for (const tid of targetIds) {
+          const t = tileOf(state, tid);
+          if (!t || !canConstructOnTile('BARRIER', t, unitsForBuild, ctx)) return fail("Can't build there");
+        }
+        return ok({ type: 'BUILD', itemKey: action.itemKey, tileId: targetIds[0], tileIds: targetIds });
+      }
+
+      const tile = tileOf(state, action.tileId);
+      if (!tile || !canConstructOnTile(action.itemKey, tile, unitsForBuild, ctx)) return fail("Can't build there");
+      const variant = action.itemKey === 'BRIDGE' && (action.variant === 'H' || action.variant === 'V') ? action.variant : undefined;
       return ok({ type: 'BUILD', itemKey: action.itemKey, tileId: tile.id, variant });
     }
 

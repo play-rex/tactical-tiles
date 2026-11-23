@@ -109,7 +109,7 @@ export const useEffectStore = create<EffectStore>((set, get) => ({
     reduceShake: () => {
         set(state => {
             const next = state.shakeIntensity * 0.9;
-            return { shakeIntensity: next < 0.05 ? 0 : next };
+            return { shakeIntensity: next <= 0.1 ? 0 : next };
         });
     }
 }));

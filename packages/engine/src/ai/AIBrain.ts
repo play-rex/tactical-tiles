@@ -1,4 +1,4 @@
-import { Tile, Unit, GameSettings, WeatherState, AIDifficulty, VictoryMode } from '../types';
+import { Tile, Unit, GameSettings, WeatherState, AIDifficulty, VictoryMode, SupplyLootType, LandMine } from '../types';
 import { UNIT_STATS, TERRAIN_DEFENSE, UNIT_COSTS, CP_SYSTEM, SHOP_ITEMS, DOOMSDAY_SETTINGS, TERRAIN_COSTS, BANK_STATS, BASE_STATS, OVERWATCH_STATS } from '../constants/Config';
 import {
     getValidMovesWithParents,
@@ -6,12 +6,15 @@ import {
     getTileByIdFast,
     hasLineOfSight,
     getManhattanDistance,
+    getMinManhattanDistance,
+    hasTileWithinRange,
     calculateVisibility,
     getNeighbors
 } from '../grid/Pathfinding';
+import { getSpawnTiles } from '../game/options';
 import { findBestTarget } from './TargetingLogic';
 import { getRingIndex } from '../grid/DoomsdayManager';
-import { calculateSiegeDamage, canHoldDrop, canUnitAttackFromTile, canUnitEnterOverwatch, getEffectiveMaxRespawns, getUnitAttackCost, getUnitMaxHp, getUnitRange } from '../rules/CombatRules';
+import { calculateSiegeDamage, canConstructOnTile, canHoldDrop, canUnitAttackFromTile, canUnitEnterOverwatch, getEffectiveMaxRespawns, getUnitAttackCost, getUnitMaxHp, getUnitRange } from '../rules/CombatRules';
 import { getOverwatchCoverageTiles, resolveMoveWithOverwatch } from '../rules/OverwatchRules';
 
 // AI Action Types
@@ -27,6 +30,7 @@ export type AIAction =
   | { type: 'DEMOLISH'; unitId: string; tileId: string; cost: number }
   | { type: 'LOOT'; unitId: string; tileId: string; cost: number }
   | { type: 'BUY_DROP'; itemKey: string; tileId: string; cost: number; goldCost: number }
+  | { type: 'BUILD'; itemKey: string; tileId: string; cost: number }
   | { type: 'USE_ITEM'; unitId: string; itemIndex: number; cost: number }
   | { type: 'SPAWN'; unitType: any; tileId: string; cost: number; goldCost: number; deadUnitId?: string };
 
@@ -37,7 +41,8 @@ interface GameStateProxy {
   playerCp: number;
   playerGold: number;
   playerRespawns?: number;
-  playerInventory: ('AMMO' | 'MEDKIT')[];
+  playerInventory: SupplyLootType[];
+  mines?: LandMine[];
   weather: WeatherState;
   difficulty: AIDifficulty;
   graveyard: any[];
@@ -47,48 +52,55 @@ interface GameStateProxy {
   totalTurns: number;
 }
 
+const BFS_DIRS = [[0, -1], [0, 1], [-1, 0], [1, 0]] as const;
+
 /**
  * Multi-source BFS over walkable terrain so AI units navigate around rivers, canyons, and walls via bridges.
  */
 const computePathDistanceField = (
     goalTiles: Tile[],
     mapData: Tile[],
-    gridSize: number
-): Map<string, number> => {
-    const distMap = new Map<string, number>();
-    if (goalTiles.length === 0) return distMap;
+    gridSize: number,
+    allowMountain = false,
+): Int32Array | null => {
+    if (goalTiles.length === 0) return null;
+    const dists = new Int32Array(gridSize * gridSize).fill(-1);
+    const qIdx: number[] = [];
 
-    const queue: { x: number; y: number; d: number }[] = [];
     for (const g of goalTiles) {
         if (g.hazardState === 'LAVA') continue;
-        distMap.set(g.id, 0);
-        queue.push({ x: g.x, y: g.y, d: 0 });
+        const idx = g.y * gridSize + g.x;
+        dists[idx] = 0;
+        qIdx.push(idx);
     }
 
-    const dirs = [
-        { dx: 0, dy: -1 },
-        { dx: 0, dy: 1 },
-        { dx: -1, dy: 0 },
-        { dx: 1, dy: 0 }
-    ];
-
     let head = 0;
-    while (head < queue.length) {
-        const cur = queue[head++];
-        for (const dir of dirs) {
-            const nx = cur.x + dir.dx;
-            const ny = cur.y + dir.dy;
+    while (head < qIdx.length) {
+        const curIdx = qIdx[head++];
+        const cx = curIdx % gridSize;
+        const cy = (curIdx / gridSize) | 0;
+        const nextDist = dists[curIdx] + 1;
+
+        for (let i = 0; i < 4; i++) {
+            const nx = cx + BFS_DIRS[i][0];
+            const ny = cy + BFS_DIRS[i][1];
             if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
-            const nId = `${nx},${ny}`;
-            if (distMap.has(nId)) continue;
-            const tile = mapData[ny * gridSize + nx];
-            if (!tile || tile.hazardState === 'LAVA' || TERRAIN_COSTS[tile.type] >= 90) continue;
-            distMap.set(nId, cur.d + 1);
-            queue.push({ x: nx, y: ny, d: cur.d + 1 });
+            const nIdx = ny * gridSize + nx;
+            if (dists[nIdx] !== -1) continue;
+            const tile = mapData[nIdx];
+            if (
+                !tile ||
+                tile.hazardState === 'LAVA' ||
+                TERRAIN_COSTS[tile.type] >= 90 ||
+                tile.type === 'BUILDING' ||
+                (!allowMountain && tile.type === 'MOUNTAIN')
+            ) continue;
+            dists[nIdx] = nextDist;
+            qIdx.push(nIdx);
         }
     }
 
-    return distMap;
+    return dists;
 };
 
 // --- 1. MOVEMENT EVALUATION (Tactical Positions) ---
@@ -102,8 +114,8 @@ const evaluatePosition = (
     difficulty: AIDifficulty,
     victoryMode: VictoryMode | undefined,
     targetBase: Tile | undefined,
-    enemyDistField: Map<string, number>,
-    baseDistField: Map<string, number>,
+    enemyDistField: Int32Array | null,
+    baseDistField: Int32Array | null,
     doomsdayEnabled: boolean,
     totalTurns: number,
     gridSize: number,
@@ -146,14 +158,12 @@ const evaluatePosition = (
   }
 
   // D. Path & Range Assessment
-  let minEnemyDist = 999;
-  for (let i = 0; i < enemyTiles.length; i++) {
-    const d = getManhattanDistance(tile, enemyTiles[i]);
-    if (d < minEnemyDist) minEnemyDist = d;
-  }
-
-  const pathToEnemy = enemyDistField.get(tile.id);
-  const pathToBase = baseDistField.get(tile.id);
+  const minEnemyDist = getMinManhattanDistance(tile, enemyTiles);
+  const tileIdx = tile.y * gridSize + tile.x;
+  const rawEnemyDist = enemyDistField ? enemyDistField[tileIdx] : -1;
+  const rawBaseDist = baseDistField ? baseDistField[tileIdx] : -1;
+  const pathToEnemy = rawEnemyDist >= 0 ? rawEnemyDist : undefined;
+  const pathToBase = rawBaseDist >= 0 ? rawBaseDist : undefined;
 
   if (fogEnabled && enemyTiles.length === 0) {
       if (victoryMode === 'CONQUER' && pathToBase !== undefined) {
@@ -217,25 +227,12 @@ const evaluatePosition = (
           if (minEnemyDist < 3) score -= 35;
       }
 
-      let inBankTurretRange = false;
-      for (let i = 0; i < activeBanks.length; i++) {
-          if (getManhattanDistance(tile, activeBanks[i]) <= BANK_STATS.RANGE) {
-              inBankTurretRange = true;
-              break;
-          }
-      }
-      if (inBankTurretRange && tile.type !== 'BANK') {
+      if (hasTileWithinRange(tile, activeBanks, BANK_STATS.RANGE) && tile.type !== 'BANK') {
           score -= 25;
       }
 
       if (victoryMode === 'CONQUER') {
-          let inEnemyArtilleryRange = false;
-          for (let i = 0; i < activeEnemyBases.length; i++) {
-              if (getManhattanDistance(tile, activeEnemyBases[i]) <= BASE_STATS.RANGE) {
-                  inEnemyArtilleryRange = true;
-                  break;
-              }
-          }
+          const inEnemyArtilleryRange = hasTileWithinRange(tile, activeEnemyBases, BASE_STATS.RANGE);
           if (inEnemyArtilleryRange && !(minEnemyDist <= unitStats.range) && (!targetBase || getManhattanDistance(tile, targetBase) > unitStats.range)) {
               score -= 30;
           }
@@ -247,32 +244,36 @@ const evaluatePosition = (
 
 // --- 2. SHOP LOGIC (Logistics) ---
 
-const checkShop = (gameState: GameStateProxy, myUnits: Unit[]): AIAction | null => {
-    const { playerGold, playerCp, mapData, difficulty } = gameState;
+const checkShop = (gameState: GameStateProxy, myUnits: Unit[], visibleUnits: Unit[]): AIAction | null => {
+    const { playerGold, playerCp, mapData, gridSize, difficulty, currentPlayer, mines = [] } = gameState;
 
     if (playerCp < 4 && difficulty !== 'EASY') return null;
     if (difficulty === 'EASY') return null;
 
     for (const unit of myUnits) {
         const maxHp = getUnitMaxHp(unit);
-        const tile = mapData.find(t => t.id === unit.tileId);
+        const tile = getTileByIdFast(mapData, unit.tileId, gridSize);
         if (!tile) continue;
 
-        if (unit.hp <= maxHp * 0.6 && playerGold >= SHOP_ITEMS.MEDKIT.cost) {
-            const dropTile = findEmptyAdjacent(tile, mapData);
+        const healKey: 'MEDKIT' | 'FIRST_AID' | null =
+            unit.hp <= maxHp * 0.45 && playerGold >= SHOP_ITEMS.MEDKIT.cost ? 'MEDKIT'
+            : unit.hp <= maxHp * 0.7 && playerGold >= SHOP_ITEMS.FIRST_AID.cost ? 'FIRST_AID'
+            : null;
+        if (healKey) {
+            const dropTile = findEmptyAdjacent(tile, mapData, gridSize);
             if (dropTile) {
                 return {
                     type: 'BUY_DROP',
-                    itemKey: 'MEDKIT',
+                    itemKey: healKey,
                     tileId: dropTile.id,
                     cost: 0,
-                    goldCost: SHOP_ITEMS.MEDKIT.cost
+                    goldCost: SHOP_ITEMS[healKey].cost
                 };
             }
         }
 
         if (unit.ammo <= 1 && playerGold >= SHOP_ITEMS.AMMO_REFILL.cost) {
-            const dropTile = findEmptyAdjacent(tile, mapData);
+            const dropTile = findEmptyAdjacent(tile, mapData, gridSize);
             if (dropTile) {
                 return {
                     type: 'BUY_DROP',
@@ -281,6 +282,26 @@ const checkShop = (gameState: GameStateProxy, myUnits: Unit[]): AIAction | null 
                     cost: 0,
                     goldCost: SHOP_ITEMS.AMMO_REFILL.cost
                 };
+            }
+        }
+    }
+
+    const ownMines = mines.filter(m => m.owner === currentPlayer).length;
+    if (difficulty === 'HARD' && playerGold >= 225 && ownMines < 2 && myUnits.length > 0) {
+        for (const unit of myUnits) {
+            const tile = getTileByIdFast(mapData, unit.tileId, gridSize);
+            if (!tile) continue;
+            const adj = getNeighbors(tile, mapData, gridSize);
+            const sortedAdj = [...adj].sort((a, b) => {
+                const scoreTile = (t: Tile) =>
+                    t.type === 'BRIDGE' || t.type === 'BRIDGE_V' ? 3 : t.type === 'ROAD' || t.type === 'ROAD_H' ? 2 : 1;
+                return scoreTile(b) - scoreTile(a);
+            });
+            const mineTile = sortedAdj.find(t =>
+                canConstructOnTile('LAND_MINE', t, visibleUnits, { playerId: currentPlayer, mapData, mines })
+            );
+            if (mineTile) {
+                return { type: 'BUILD', itemKey: 'LAND_MINE', tileId: mineTile.id, cost: 0 };
             }
         }
     }
@@ -299,6 +320,11 @@ const checkInventory = (gameState: GameStateProxy, myUnits: Unit[]): AIAction | 
             return { type: 'USE_ITEM', unitId: unit.id, itemIndex: medIndex, cost: 0 };
         }
 
+        const firstAidIndex = playerInventory.indexOf('FIRST_AID');
+        if (firstAidIndex !== -1 && unit.hp <= maxHp * 0.75) {
+            return { type: 'USE_ITEM', unitId: unit.id, itemIndex: firstAidIndex, cost: 0 };
+        }
+
         const ammoIndex = playerInventory.indexOf('AMMO');
         if (ammoIndex !== -1 && unit.ammo <= 1) {
             return { type: 'USE_ITEM', unitId: unit.id, itemIndex: ammoIndex, cost: 0 };
@@ -307,53 +333,19 @@ const checkInventory = (gameState: GameStateProxy, myUnits: Unit[]): AIAction | 
     return null;
 };
 
-const findEmptyAdjacent = (center: Tile, map: Tile[]): Tile | null =>
-    getNeighbors(center, map).find(t => canHoldDrop(t) && t.type !== 'QUICKSAND') || null;
+const findEmptyAdjacent = (center: Tile, map: Tile[], gridSize: number): Tile | null =>
+    getNeighbors(center, map, gridSize).find(t => canHoldDrop(t) && t.type !== 'QUICKSAND') || null;
 
 // --- 3. REINFORCEMENTS (Spawning) ---
 
 const checkSpawn = (gameState: GameStateProxy): AIAction | null => {
-    const { playerGold, playerRespawns = 0, graveyard, mapData, currentPlayer, units, difficulty, gridSize, settings } = gameState;
+    const { playerGold, playerRespawns = 0, graveyard, currentPlayer, difficulty, settings } = gameState;
 
     if (playerRespawns >= getEffectiveMaxRespawns(settings.mutators)) return null;
 
-    const occupied = new Set(units.map(u => u.tileId));
-    const safeBases = mapData.filter(
-        t => t.type === 'BASE' && t.owner === currentPlayer && t.hazardState !== 'LAVA'
-    );
-
-    if (safeBases.length === 0) return null;
-
-    // Collect valid spawn tiles (base tile or adjacent safe tile if base is occupied)
-    let spawnTileId: string | null = null;
-    for (const base of safeBases) {
-        if (!occupied.has(base.id)) {
-            spawnTileId = base.id;
-            break;
-        }
-        for (let dy = -1; dy <= 1 && !spawnTileId; dy++) {
-            for (let dx = -1; dx <= 1 && !spawnTileId; dx++) {
-                if (dx === 0 && dy === 0) continue;
-                const nx = base.x + dx;
-                const ny = base.y + dy;
-                if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
-                const t = mapData[ny * gridSize + nx];
-                if (
-                    t &&
-                    t.hazardState !== 'LAVA' &&
-                    t.type !== 'WATER' &&
-                    t.type !== 'BARRIER' &&
-                    t.type !== 'CANYON' &&
-                    !occupied.has(t.id)
-                ) {
-                    spawnTileId = t.id;
-                }
-            }
-        }
-        if (spawnTileId) break;
-    }
-
-    if (!spawnTileId) return null;
+    const spawnTiles = getSpawnTiles(gameState, currentPlayer);
+    if (spawnTiles.length === 0) return null;
+    const spawnTileId = spawnTiles[0];
 
     const affordable = graveyard.filter(
         u => u.owner === currentPlayer && u.turnsUntilRespawn === 0 && playerGold >= UNIT_COSTS[u.type]
@@ -394,7 +386,6 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
       aiVisibleSet = calculateVisibility(currentPlayer, units, mapData, weather, true, gridSize);
       enemyUnits = enemyUnits.filter(u => aiVisibleSet!.has(u.tileId));
   }
-  const hasVisibleEnemyOverwatch = enemyUnits.some(e => e.isOverwatching && e.ammo > 0);
 
   // 0. Use Inventory (Free action)
   const inventoryAction = checkInventory(gameState, myUnits);
@@ -405,7 +396,8 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
   if (spawnAction) return spawnAction;
 
   // 2. Logistics
-  const shopAction = checkShop(gameState, myUnits);
+  const visibleUnitsForAi = aiVisibleSet ? units.filter(u => u.owner === currentPlayer || aiVisibleSet!.has(u.tileId)) : units;
+  const shopAction = checkShop(gameState, myUnits, visibleUnitsForAi);
   if (shopAction) return shopAction;
 
   if (myUnits.length === 0) return { type: 'END_TURN' };
@@ -418,39 +410,40 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
       ? mapData.filter(t => t.type === 'BASE' && t.owner !== currentPlayer && (t.hp || 0) > 0)
       : [];
 
-  // Precompute reverse-BFS path distance fields & tactical structures once per AI evaluation
+  // Precompute reverse-BFS path distance fields once per AI evaluation:
+  // ground units (Scouts/Breachers) flank around Mountains & Buildings; Snipers may traverse Mountains.
   const enemyTiles = enemyUnits
       .map(e => getTileByIdFast(mapData, e.tileId, gridSize))
       .filter((t): t is Tile => Boolean(t));
-  const enemyDistField = computePathDistanceField(enemyTiles, mapData, gridSize);
+  const groundEnemyDistField = computePathDistanceField(enemyTiles, mapData, gridSize, false);
+  const sniperEnemyDistField = computePathDistanceField(enemyTiles, mapData, gridSize, true);
 
   const activeBanks = mapData.filter(t => t.type === 'BANK' && (t.hackProgress || 0) < 100);
-  const baseDistCache = new Map<string, Map<string, number>>();
+  const baseDistCache = new Map<string, Int32Array | null>();
   const barTiles = mapData.filter(t => t.type === 'BARRIER' && t.hp !== undefined && t.hp > 0);
 
-  // Precompute Overwatch coverage & observer vision ONCE instead of per-candidate-tile
-  const visibleOverwatchers = (difficulty === 'HARD' && hasVisibleEnemyOverwatch)
+  // Precompute Overwatch coverage ONCE instead of per-candidate-tile; defer enemy team vision unless a path actually touches Overwatch
+  const visibleOverwatchers = difficulty === 'HARD'
       ? enemyUnits.filter(u => u.isOverwatching === true && u.ammo > 0)
       : [];
   const knownCoverageByOverwatcher = new Map<string, Set<string>>();
   const anyWatchedTileIds = new Set<string>();
   const knownTeamVisByOwner = new Map<number, Set<string>>();
+  let teamVisPopulated = false;
   if (visibleOverwatchers.length > 0) {
       for (const ow of visibleOverwatchers) {
           const cov = getOverwatchCoverageTiles(ow, mapData, weather, gridSize);
           knownCoverageByOverwatcher.set(ow.id, cov);
           cov.forEach(tid => anyWatchedTileIds.add(tid));
-          if (settings.fogOfWar && !knownTeamVisByOwner.has(ow.owner)) {
-              knownTeamVisByOwner.set(ow.owner, calculateVisibility(ow.owner, units, mapData, weather, true, gridSize));
-          }
       }
   }
 
   for (const unit of myUnits) {
-    const unitStats = UNIT_STATS[unit.type];
     const uTile = getTileByIdFast(mapData, unit.tileId, gridSize);
     if (!uTile) continue;
     const adj = [uTile, ...getNeighbors(uTile, mapData, gridSize)];
+    const canClimbMountain = unit.type === 'SNIPER';
+    const enemyDistField = canClimbMountain ? sniperEnemyDistField : groundEnemyDistField;
 
     // Pick closest enemy base for this unit
     let targetBase: Tile | undefined;
@@ -459,17 +452,16 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
             getManhattanDistance(uTile, cur) < getManhattanDistance(uTile, best) ? cur : best
         );
     }
-    let baseDistField: Map<string, number>;
+    let baseDistField: Int32Array | null = null;
     if (targetBase) {
-        const cached = baseDistCache.get(targetBase.id);
-        if (cached) {
+        const cacheKey = `${targetBase.id}:${canClimbMountain ? 1 : 0}`;
+        const cached = baseDistCache.get(cacheKey);
+        if (cached !== undefined) {
             baseDistField = cached;
         } else {
-            baseDistField = computePathDistanceField([targetBase], mapData, gridSize);
-            baseDistCache.set(targetBase.id, baseDistField);
+            baseDistField = computePathDistanceField([targetBase], mapData, gridSize, canClimbMountain);
+            baseDistCache.set(cacheKey, baseDistField);
         }
-    } else {
-        baseDistField = new Map<string, number>();
     }
 
     // --- INTERACTION ACTIONS ---
@@ -497,13 +489,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
 
     // C. Secure Buildings / Heist Banks (Avoid flipping building back and forth under active close threat)
     if (playerCp >= 4) {
-        let nearbyThreat = false;
-        for (let i = 0; i < enemyTiles.length; i++) {
-            if (getManhattanDistance(uTile, enemyTiles[i]) <= 3) {
-                nearbyThreat = true;
-                break;
-            }
-        }
+        const nearbyThreat = hasTileWithinRange(uTile, enemyTiles, 3);
 
         const b = adj.find(t => t.type === 'BUILDING' && t.owner !== currentPlayer);
         if (b && (difficulty !== 'EASY' || Math.random() < 0.4)) {
@@ -526,12 +512,12 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
 
     // --- COMBAT ACTIONS (Only against Visible Enemies) ---
     const canAttackFromHere = canUnitAttackFromTile(unit, uTile);
-    const effectiveRange = getUnitRange(unit, mapData, weather);
+    const effectiveRange = getUnitRange(unit, mapData, weather, uTile);
     const attackCost = getUnitAttackCost(unit);
 
     // D. Attack Unit
     if (playerCp >= attackCost && unit.ammo > 0 && canAttackFromHere) {
-        const result = findBestTarget(unit, [...myUnits, ...enemyUnits], mapData, difficulty, weather, gridSize);
+        const result = findBestTarget(unit, enemyUnits, mapData, difficulty, weather, gridSize, enemyUnits);
         if (result && result.score > bestScore) {
             bestScore = result.score;
             bestAction = { type: 'ATTACK', attackerId: unit.id, targetUnitId: result.unit.id, cost: attackCost };
@@ -587,6 +573,21 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         const { validMoves: moveMap, parents: moveParents } = getValidMovesWithParents(
             uTile, playerCp, mapData, units, unit.type, currentPlayer, weather, gridSize, unit.rank ?? 0
         );
+        const touchesCache = new Map<string, boolean>();
+        const pathTouchesOverwatch = (tid: string): boolean => {
+            if (tid === uTile.id) return false;
+            const cached = touchesCache.get(tid);
+            if (cached !== undefined) return cached;
+            if (anyWatchedTileIds.has(tid)) {
+                touchesCache.set(tid, true);
+                return true;
+            }
+            const p = moveParents.get(tid);
+            const res = p !== undefined && pathTouchesOverwatch(p);
+            touchesCache.set(tid, res);
+            return res;
+        };
+
         for (const [tileId, cost] of moveMap) {
             const destTile = getTileByIdFast(mapData, tileId, gridSize);
             if (!destTile) continue;
@@ -605,36 +606,35 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
             if (neighbors.some(n => n.type === 'BUILDING' && n.owner !== currentPlayer)) moveValue += 12;
 
             // Respect visible enemy Overwatch on HARD difficulty (Elite Breachers resist pin)
-            if (anyWatchedTileIds.size > 0) {
-                const candidatePath = reconstructMovePathFromParents(uTile, tileId, moveMap, moveParents, mapData, gridSize);
-                let touchesOverwatch = false;
-                for (let k = 1; k < candidatePath.length; k++) {
-                    if (anyWatchedTileIds.has(candidatePath[k].id)) {
-                        touchesOverwatch = true;
-                        break;
+            if (anyWatchedTileIds.size > 0 && pathTouchesOverwatch(tileId)) {
+                if (settings.fogOfWar && !teamVisPopulated) {
+                    teamVisPopulated = true;
+                    for (const ow of visibleOverwatchers) {
+                        if (!knownTeamVisByOwner.has(ow.owner)) {
+                            knownTeamVisByOwner.set(ow.owner, calculateVisibility(ow.owner, units, mapData, weather, true, gridSize));
+                        }
                     }
                 }
-                if (touchesOverwatch) {
-                    const res = resolveMoveWithOverwatch({
-                        movingUnit: unit,
-                        targetTileId: tileId,
-                        mapData,
-                        units,
-                        weather,
-                        gridSize,
-                        fogOfWar: settings.fogOfWar,
-                        maxBudget: playerCp,
-                        knownVisibleTiles: aiVisibleSet,
-                        precomputedPath: candidatePath,
-                        precomputedEnemyOverwatchers: visibleOverwatchers,
-                        knownTeamVisByOwner,
-                        knownCoverageByOverwatcher
-                    });
-                    if (res.trigger) {
-                        if (res.trigger.victimDead) moveValue -= 45;
-                        else if (res.trigger.pinResisted) moveValue -= 6;
-                        else moveValue -= (18 + res.trigger.damage);
-                    }
+                const candidatePath = reconstructMovePathFromParents(uTile, tileId, moveMap, moveParents, mapData, gridSize);
+                const res = resolveMoveWithOverwatch({
+                    movingUnit: unit,
+                    targetTileId: tileId,
+                    mapData,
+                    units,
+                    weather,
+                    gridSize,
+                    fogOfWar: settings.fogOfWar,
+                    maxBudget: playerCp,
+                    knownVisibleTiles: aiVisibleSet,
+                    precomputedPath: candidatePath,
+                    precomputedEnemyOverwatchers: visibleOverwatchers,
+                    knownTeamVisByOwner,
+                    knownCoverageByOverwatcher
+                });
+                if (res.trigger) {
+                    if (res.trigger.victimDead) moveValue -= 45;
+                    else if (res.trigger.pinResisted) moveValue -= 6;
+                    else moveValue -= (18 + res.trigger.damage);
                 }
             }
 
@@ -655,14 +655,10 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
     if (difficulty !== 'EASY' && canUnitEnterOverwatch(unit, uTile, playerCp)) {
         const uZoneWeather = uTile.zone !== undefined ? weather.playerZones[uTile.zone] || 'CLEAR' : 'CLEAR';
         if (uZoneWeather !== 'FOG' && uZoneWeather !== 'SANDSTORM') {
-            let minEnemyDist = 999;
-            for (let i = 0; i < enemyTiles.length; i++) {
-                const d = getManhattanDistance(uTile, enemyTiles[i]);
-                if (d < minEnemyDist) minEnemyDist = d;
-            }
+            const minEnemyDist = getMinManhattanDistance(uTile, enemyTiles);
             const watchingApproach =
                 minEnemyDist <= effectiveRange + 4 ||
-                (settings.fogOfWar && minEnemyDist === 999 && (uTile.type === 'BUILDING' || canUnitAttackFromTile(unit, uTile)));
+                (settings.fogOfWar && enemyTiles.length === 0 && (uTile.type === 'BUILDING' || canUnitAttackFromTile(unit, uTile)));
 
             if (watchingApproach) {
                 const owCost = OVERWATCH_STATS[unit.type].cost;

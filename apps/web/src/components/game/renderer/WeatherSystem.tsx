@@ -4,6 +4,7 @@ import * as PIXI from 'pixi.js';
 import { useGameStore } from '../../../store/useGameStore';
 import { TILE_SIZE } from '@tactical/engine/constants/Config';
 import { Tile, WeatherType, WeatherState } from '@tactical/engine/types';
+import { BoardRotation, rotateBoardPoint, unrotateBoardPoint } from '../../../core/boardRotation';
 
 // --- ZONE-AWARE WEATHER ENGINE ---
 
@@ -48,6 +49,8 @@ class ZoneWeatherEngine {
     private viewportRef: any = null;
     private zoneBounds: Map<number, ZoneBounds> = new Map();
     private zoneWeather: Record<number, WeatherType> = {};
+    private rotation: BoardRotation = 0;
+    private boardSize: number = 20 * TILE_SIZE;
 
     constructor(container: PIXI.Container) {
         this.container = container;
@@ -58,41 +61,50 @@ class ZoneWeatherEngine {
     public setViewport(viewport: any) {
         this.viewportRef = viewport;
     }
+
+    public setBoardTransform(rotation: BoardRotation, gridSize: number) {
+        const size = gridSize * TILE_SIZE;
+        if (this.rotation !== rotation || this.boardSize !== size) {
+            this.particles = [];
+            this.rotation = rotation;
+            this.boardSize = size;
+        }
+    }
     
     // Check if a pixel position is inside a zone's actual tiles
     private isInsideZone(px: number, py: number, zoneId: number): boolean {
         const bounds = this.zoneBounds.get(zoneId);
         if (!bounds) return false;
         
-        // Convert pixel to tile coordinates
-        const tileX = Math.floor(px / TILE_SIZE) * TILE_SIZE;
-        const tileY = Math.floor(py / TILE_SIZE) * TILE_SIZE;
+        // Unrotate viewport particle position back to map space before matching zone tile
+        const unrot = unrotateBoardPoint(px, py, this.rotation, this.boardSize);
+        const tileX = Math.floor(unrot.x / TILE_SIZE) * TILE_SIZE;
+        const tileY = Math.floor(unrot.y / TILE_SIZE) * TILE_SIZE;
         
         return bounds.tileSet.has(`${tileX},${tileY}`);
     }
     
-    // Get a random position inside the actual zone tiles
+    // Get a random position inside the actual zone tiles (projected into rotated viewport space)
     private getRandomZonePosition(zoneId: number): { x: number; y: number } | null {
         const bounds = this.zoneBounds.get(zoneId);
         if (!bounds || bounds.tiles.length === 0) return null;
         
-        // Pick a random tile from the zone
         const tile = bounds.tiles[Math.floor(Math.random() * bounds.tiles.length)];
-        
-        // Return random position within that tile
-        return {
-            x: tile.x + Math.random() * TILE_SIZE,
-            y: tile.y + Math.random() * TILE_SIZE
-        };
+        return rotateBoardPoint(
+            tile.x + Math.random() * TILE_SIZE,
+            tile.y + Math.random() * TILE_SIZE,
+            this.rotation,
+            this.boardSize,
+        );
     }
 
-    public setZoneData(tiles: Tile[], weather: WeatherState) {
+    public setZoneMapData(tiles: Tile[]) {
         // Build zone bounds from tiles
         this.zoneBounds.clear();
-        
+
         for (const tile of tiles) {
             if (tile.zone === undefined || tile.zone < 0) continue;
-            
+
             const zone = tile.zone;
             if (!this.zoneBounds.has(zone)) {
                 this.zoneBounds.set(zone, {
@@ -102,11 +114,11 @@ class ZoneWeatherEngine {
                     tileSet: new Set()
                 });
             }
-            
+
             const bounds = this.zoneBounds.get(zone)!;
             const px = tile.x * TILE_SIZE;
             const py = tile.y * TILE_SIZE;
-            
+
             bounds.minX = Math.min(bounds.minX, px);
             bounds.maxX = Math.max(bounds.maxX, px + TILE_SIZE);
             bounds.minY = Math.min(bounds.minY, py);
@@ -114,8 +126,9 @@ class ZoneWeatherEngine {
             bounds.tiles.push({ x: px, y: py });
             bounds.tileSet.add(`${px},${py}`);
         }
-        
-        // Store weather per zone
+    }
+
+    public setZoneWeather(weather: WeatherState) {
         this.zoneWeather = weather.playerZones || {};
     }
 
@@ -142,11 +155,7 @@ class ZoneWeatherEngine {
             this.zoneBounds.forEach((bounds, zoneId) => {
                 if (this.particles.length >= 70) return;
                 const weather = this.zoneWeather[zoneId] || 'CLEAR';
-                if (bounds.maxX < visLeft || bounds.minX > visRight ||
-                    bounds.maxY < visTop || bounds.minY > visBottom) {
-                    return;
-                }
-                this.spawnZoneParticles(dt, zoneId, bounds, weather);
+                this.spawnZoneParticles(zoneId, bounds, weather);
             });
         }
         
@@ -200,7 +209,7 @@ class ZoneWeatherEngine {
         }
     }
 
-    private spawnZoneParticles(dt: number, zoneId: number, bounds: ZoneBounds, weather: WeatherType) {
+    private spawnZoneParticles(zoneId: number, bounds: ZoneBounds, weather: WeatherType) {
         // Scale spawn rate by zone size (number of tiles)
         const areaFactor = Math.min(1, bounds.tiles.length / 50);
         
@@ -484,18 +493,18 @@ class ZoneWeatherEngine {
 // --- REACT COMPONENT ---
 
 interface WeatherSystemProps {
-    width: number;
-    height: number;
     viewportInstance?: any;
 }
 
-export const WeatherSystem: React.FC<WeatherSystemProps> = ({ width, height, viewportInstance }) => {
+export const WeatherSystem: React.FC<WeatherSystemProps> = ({ viewportInstance }) => {
     const app = useApp();
     const viewport = viewportInstance;
     
     // Get zone data from game store
     const mapData = useGameStore(state => state.mapData);
     const weather = useGameStore(state => state.weather);
+    const mapRotation = useGameStore(state => state.mapRotation);
+    const gridSize = useGameStore(state => state.gridSize) || 20;
     
     const containerRef = useRef<PIXI.Container>(null);
     const engineRef = useRef<ZoneWeatherEngine | null>(null);
@@ -513,20 +522,31 @@ export const WeatherSystem: React.FC<WeatherSystemProps> = ({ width, height, vie
         };
     }, []);
 
-    // Set viewport when available
     useEffect(() => {
         if (engineRef.current && viewport) {
             engineRef.current.setViewport(viewport);
         }
     }, [viewport]);
 
-    // Update zone data when map or weather changes
     useEffect(() => {
-        if (engineRef.current && mapData && weather) {
-            engineRef.current.setZoneData(mapData, weather);
-            engineRef.current.update(1);
+        if (engineRef.current && mapData) {
+            engineRef.current.setZoneMapData(mapData);
         }
-    }, [mapData, weather]);
+    }, [mapData]);
+
+    useEffect(() => {
+        if (engineRef.current && weather) {
+            engineRef.current.setZoneWeather(weather);
+        }
+    }, [weather]);
+
+    useEffect(() => {
+        engineRef.current?.setBoardTransform(mapRotation, gridSize);
+    }, [mapRotation, gridSize]);
+
+    useEffect(() => {
+        engineRef.current?.update(1);
+    }, [viewport, mapData, weather, mapRotation, gridSize]);
 
     // Attach to ticker (~30fps updates keep GPU graphics clear/draw light)
     useEffect(() => {

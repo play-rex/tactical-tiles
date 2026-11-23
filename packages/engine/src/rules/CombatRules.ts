@@ -1,5 +1,5 @@
-import { GameMutators, Tile, Unit, UnitRank, UnitType, WeatherState } from '../types';
-import { BUILDING_STATS, TERRAIN_DEFENSE, UNIT_STATS, BASE_STATS, VETERANCY_CONFIG, OVERWATCH_STATS, MUTATOR_CONFIG, CP_SYSTEM, MAX_RESPAWNS, GOLD_SETTINGS } from '../constants/Config';
+import { GameMutators, LandMine, Tile, Unit, UnitRank, UnitType, WeatherState } from '../types';
+import { BUILDING_STATS, TERRAIN_DEFENSE, UNIT_STATS, BASE_STATS, LAND_MINE_STATS, VETERANCY_CONFIG, OVERWATCH_STATS, MUTATOR_CONFIG, CP_SYSTEM, MAX_RESPAWNS, GOLD_SETTINGS } from '../constants/Config';
 
 /**
  * Returns active CP caps and regeneration accounting for the Blitz CP mutator.
@@ -60,6 +60,7 @@ export interface AttackOutcome {
     defense: number;
     watchtowerBoosted: boolean;
     coverArmorApplied: boolean;
+    crossfireBonus: number;
 }
 
 /**
@@ -183,9 +184,9 @@ export const canUnitAttackFromTile = (unit: Unit, tile: Tile | undefined): boole
 /**
  * Computes effective attack range including owned buildings and local zone weather.
  */
-export const getUnitRange = (unit: Unit, mapData: Tile[], weather: WeatherState): number => {
+export const getUnitRange = (unit: Unit, mapData: Tile[], weather: WeatherState, originTile?: Tile): number => {
     let range = UNIT_STATS[unit.type].range;
-    const tile = mapData.find(t => t.id === unit.tileId);
+    const tile = originTile ?? mapData.find(t => t.id === unit.tileId);
 
     if (tile?.type === 'BUILDING' && tile.owner === unit.owner) {
         if (tile.subType === 'WATCHTOWER') range += BUILDING_STATS.WATCHTOWER.rangeBonus;
@@ -217,10 +218,11 @@ const computeDamageOutcome = (
     attTile: Tile | undefined,
     targetTile: Tile | undefined,
     targetOwner: number,
-    targetUnit?: Unit
+    targetUnit?: Unit,
+    crossfireBonus = 0
 ): AttackOutcome => {
     if (!attTile || !targetTile) {
-        return { damage: 0, defense: 0, watchtowerBoosted: false, coverArmorApplied: false };
+        return { damage: 0, defense: 0, watchtowerBoosted: false, coverArmorApplied: false, crossfireBonus: 0 };
     }
 
     let dmg = baseDamage;
@@ -255,20 +257,24 @@ const computeDamageOutcome = (
         damage = Math.max(1, damage - VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR);
     }
 
-    return { damage, defense, watchtowerBoosted, coverArmorApplied };
+    const appliedCrossfire = crossfireBonus > 0 ? crossfireBonus : 0;
+    damage += appliedCrossfire;
+
+    return { damage, defense, watchtowerBoosted, coverArmorApplied, crossfireBonus: appliedCrossfire };
 };
 
 /**
- * Computes unit-vs-unit attack damage including Watchtower bonus, terrain cover, and Elite Breacher cover armor.
+ * Computes unit-vs-unit attack damage including Watchtower bonus, terrain cover, Elite Breacher cover armor, and optional Crossfire bonus.
  */
 export const calculateAttackOutcome = (
     attacker: Unit,
     attTile: Tile | undefined,
     targetTile: Tile | undefined,
     targetOwner: number,
-    targetUnit?: Unit
+    targetUnit?: Unit,
+    crossfireBonus = 0
 ): AttackOutcome => {
-    return computeDamageOutcome(getUnitBaseDamage(attacker), attacker, attTile, targetTile, targetOwner, targetUnit);
+    return computeDamageOutcome(getUnitBaseDamage(attacker), attacker, attTile, targetTile, targetOwner, targetUnit, crossfireBonus);
 };
 
 /**
@@ -327,10 +333,38 @@ export const getBaseArtilleryDamage = (): number => {
     return BASE_STATS.MIN_DMG + Math.floor(Math.random() * span);
 };
 
+export interface ConstructContext {
+    playerId?: number;
+    mapData?: Tile[];
+    mines?: LandMine[];
+}
+
 /**
- * Checks whether a shop construction item (BARRIER or BRIDGE) can be placed on a tile.
+ * Checks whether `tile` falls within the 5-tile square radius exclusion zone around any enemy HQ.
  */
-export const canConstructOnTile = (itemKey: string, tile: Tile, units: Unit[]): boolean => {
+export const isWithinEnemyHqExclusion = (
+    tile: Pick<Tile, 'x' | 'y'>,
+    playerId: number,
+    mapData: Tile[],
+    radius = LAND_MINE_STATS.ENEMY_HQ_EXCLUSION_RADIUS
+): boolean =>
+    mapData.some(
+        t =>
+            t.type === 'BASE' &&
+            t.owner !== undefined &&
+            t.owner !== playerId &&
+            Math.max(Math.abs(tile.x - t.x), Math.abs(tile.y - t.y)) <= radius
+    );
+
+/**
+ * Checks whether a shop construction item (BARRIER, LAND_MINE, or BRIDGE) can be placed on a tile.
+ */
+export const canConstructOnTile = (
+    itemKey: string,
+    tile: Tile,
+    units: Unit[],
+    ctx?: ConstructContext
+): boolean => {
     const isOccupied = units.some(u => u.tileId === tile.id);
     const isStructure =
         tile.type === 'BASE' ||
@@ -339,6 +373,10 @@ export const canConstructOnTile = (itemKey: string, tile: Tile, units: Unit[]): 
         tile.type === 'BARRIER';
     if (isOccupied || isStructure || tile.hazardState === 'LAVA') return false;
 
+    if (ctx?.mines && ctx.playerId !== undefined) {
+        if (ctx.mines.some(m => m.tileId === tile.id && m.owner === ctx.playerId)) return false;
+    }
+
     if (itemKey === 'BARRIER') {
         return (
             tile.type !== 'WATER' &&
@@ -346,6 +384,14 @@ export const canConstructOnTile = (itemKey: string, tile: Tile, units: Unit[]): 
             tile.type !== 'BRIDGE_V' &&
             tile.type !== 'CANYON'
         );
+    }
+
+    if (itemKey === 'LAND_MINE') {
+        if (tile.type === 'WATER' || tile.type === 'CANYON' || tile.type === 'MOUNTAIN') return false;
+        if (ctx?.mapData && ctx.playerId !== undefined && isWithinEnemyHqExclusion(tile, ctx.playerId, ctx.mapData)) {
+            return false;
+        }
+        return true;
     }
 
     if (itemKey === 'BRIDGE') {

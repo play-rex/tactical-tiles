@@ -2,10 +2,14 @@
  * The whole game as plain, serialisable data. The web store keeps these fields at its top
  * level (so components read them as before); the server keeps one per table.
  */
+import { getEffectiveUnitAmmo } from '../rules/CombatRules';
+import { UNIT_STATS } from '../constants/Config';
 import type {
   BankReward,
   DeadUnit,
+  GameMutators,
   GameSettings,
+  LandMine,
   LogEntry,
   MatchPlayerStats,
   MatchSummary,
@@ -15,10 +19,11 @@ import type {
   Unit,
   UnitType,
   WeatherState,
+  SupplyLootType,
 } from '../types';
 
 export type PlayerStatus = 'ACTIVE' | 'ELIMINATED';
-export type InventoryItem = 'AMMO' | 'MEDKIT';
+export type InventoryItem = SupplyLootType;
 
 export interface GameState {
   settings: GameSettings;
@@ -44,6 +49,7 @@ export interface GameState {
   matchSummary: MatchSummary | null;
   bankRewardPending: BankReward | null;
   pendingDrops: PendingDrop[];
+  mines: LandMine[];
   weather: WeatherState;
   gameLog: LogEntry[];
 }
@@ -69,10 +75,10 @@ export type GameAction =
   | { type: 'BUY_DROP'; itemKey: string; tileId: string; cost: number; goldCost: number }
   | { type: 'USE_ITEM'; unitId: string; itemIndex: number; cost: number }
   | { type: 'SPAWN'; unitType: UnitType; tileId: string; cost: number; goldCost: number; deadUnitId?: string }
-  /** A supply drop that lands near your base when your turn ends (the player's shop). */
-  | { type: 'BUY_ITEM'; itemKey: string }
-  /** Build a Barrier or Bridge from the shop. */
-  | { type: 'BUILD'; itemKey: string; tileId: string; variant?: string }
+  /** A supply drop that lands at your chosen drop zone (or near your base) when your turn ends. */
+  | { type: 'BUY_ITEM'; itemKey: string; tileId?: string }
+  /** Build a Barrier wall, Land Mine, or Bridge from the shop. */
+  | { type: 'BUILD'; itemKey: string; tileId: string; tileIds?: string[]; variant?: string }
   /** After a heist: take the vault's gold or its CP. */
   | { type: 'BANK_REWARD'; choice: 'GOLD' | 'CP' };
 
@@ -146,3 +152,62 @@ export const nextActivePlayer = (
   }
   return nextId;
 };
+
+/** Constructs a fresh unit at full HP with effective ammo for the active mutators. */
+export const createUnit = (params: {
+  id: string;
+  type: UnitType;
+  owner: number;
+  tileId: string;
+  mutators?: GameMutators;
+  hasMoved?: boolean;
+  completed?: boolean;
+}): Unit => {
+  const { id, type, owner, tileId, mutators, hasMoved = false, completed = false } = params;
+  const baseHp = UNIT_STATS[type].hp;
+  const maxAmmo = getEffectiveUnitAmmo(type, mutators);
+  return {
+    id,
+    type,
+    tileId,
+    hp: baseHp,
+    maxHp: baseHp,
+    ammo: maxAmmo,
+    maxAmmo,
+    owner,
+    xp: 0,
+    rank: 0,
+    kills: 0,
+    damageDealt: 0,
+    hasMoved,
+    completed,
+    isOverwatching: false,
+  };
+};
+
+/** Constructs a blank, serialisable GameState shell with the given settings. */
+export const createEmptyGameState = (settings: GameSettings, gridSize = 20): GameState => ({
+  settings,
+  mapData: [],
+  gridSize,
+  units: [],
+  graveyard: [],
+  currentPlayer: 0,
+  totalTurns: 0,
+  turnCounter: 0,
+  playerCp: {},
+  playerGold: {},
+  playerRespawns: {},
+  playerStatus: {},
+  playerInventory: {},
+  winner: null,
+  activeSeed: '',
+  activeMission: null,
+  matchStats: {},
+  matchSummary: null,
+  bankRewardPending: null,
+  pendingDrops: [],
+  mines: [],
+  weather: { playerZones: {}, turnsRemaining: 5 },
+  gameLog: [],
+});

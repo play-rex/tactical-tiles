@@ -62,7 +62,7 @@ const CREATE_BANK = () => `
   <path d="M 4 16 L 32 4 L 60 16 Z" fill="#607D8B"/>
   <rect x="22" y="28" width="20" height="28" fill="#455A64"/>
   <circle cx="32" cy="24" r="5" fill="#FFD700" stroke="#F57F17"/>
-  <text x="32" y="27" font-size="8" text-anchor="middle" fill="#000">$</text>
+  <text x="32" y="27" font-size="8" text-anchor="middle" fill="#000">€</text>
 </svg>`;
 
 const CREATE_BANK_EMPTY = () => `

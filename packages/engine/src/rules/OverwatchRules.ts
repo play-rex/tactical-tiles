@@ -1,4 +1,5 @@
-import { Tile, Unit, WeatherState } from '../types';
+import { LAND_MINE_STATS } from '../constants/Config';
+import { LandMine, Tile, Unit, WeatherState } from '../types';
 import {
     calculateVisibility,
     getManhattanDistance,
@@ -23,9 +24,18 @@ export interface OverwatchTriggerInfo {
     pinResisted: boolean;
 }
 
+export interface MineTriggerInfo {
+    mineId: string;
+    mineOwner: number;
+    interceptTile: Tile;
+    damage: number;
+    victimDead: boolean;
+}
+
 export interface OverwatchMoveResolution {
     path: Tile[];
     trigger: OverwatchTriggerInfo | null;
+    mineTrigger: MineTriggerInfo | null;
     finalTile: Tile | null;
     finalIndex: number;
     actualCost: number;
@@ -47,7 +57,7 @@ export const getOverwatchCoverageTiles = (
         return covered;
     }
 
-    const effectiveRange = getUnitRange(overwatcher, mapData, weather);
+    const effectiveRange = getUnitRange(overwatcher, mapData, weather, origin);
     for (let dy = -effectiveRange; dy <= effectiveRange; dy++) {
         for (let dx = -effectiveRange; dx <= effectiveRange; dx++) {
             const dist = Math.abs(dx) + Math.abs(dy);
@@ -80,6 +90,7 @@ export const resolveMoveWithOverwatch = (params: {
     gridSize: number;
     fogOfWar: boolean;
     maxBudget: number;
+    mines?: LandMine[];
     knownVisibleTiles?: Set<string> | null;
     precomputedPath?: Tile[];
     precomputedEnemyOverwatchers?: Unit[];
@@ -95,6 +106,7 @@ export const resolveMoveWithOverwatch = (params: {
         gridSize,
         fogOfWar,
         maxBudget,
+        mines = [],
         knownVisibleTiles = null,
         precomputedPath,
         precomputedEnemyOverwatchers,
@@ -104,7 +116,7 @@ export const resolveMoveWithOverwatch = (params: {
 
     const startTile = getTileByIdFast(mapData, movingUnit.tileId, gridSize);
     if (!startTile) {
-        return { path: [], trigger: null, finalTile: null, finalIndex: 0, actualCost: 0, haltedEarly: false };
+        return { path: [], trigger: null, mineTrigger: null, finalTile: null, finalIndex: 0, actualCost: 0, haltedEarly: false };
     }
 
     const path = precomputedPath ?? getMovePath(
@@ -121,7 +133,7 @@ export const resolveMoveWithOverwatch = (params: {
     );
 
     if (path.length === 0) {
-        return { path: [], trigger: null, finalTile: startTile, finalIndex: 0, actualCost: 0, haltedEarly: false };
+        return { path: [], trigger: null, mineTrigger: null, finalTile: startTile, finalIndex: 0, actualCost: 0, haltedEarly: false };
     }
 
     const cumulativeCosts: number[] = [0];
@@ -130,24 +142,20 @@ export const resolveMoveWithOverwatch = (params: {
         cumulativeCosts.push(cumulativeCosts[i - 1] + step);
     }
 
+    const mineByTile = new Map<string, LandMine>();
+    for (let i = 0; i < mines.length; i++) {
+        const m = mines[i];
+        if (m.owner !== movingUnit.owner && !mineByTile.has(m.tileId)) {
+            mineByTile.set(m.tileId, m);
+        }
+    }
+
     const enemyOverwatchers = precomputedEnemyOverwatchers ?? units.filter(u =>
         u.owner !== movingUnit.owner &&
         u.isOverwatching === true &&
         u.ammo > 0 &&
         (!knownVisibleTiles || knownVisibleTiles.has(u.tileId))
     );
-
-    if (enemyOverwatchers.length === 0) {
-        const lastIdx = path.length - 1;
-        return {
-            path,
-            trigger: null,
-            finalTile: path[lastIdx],
-            finalIndex: lastIdx,
-            actualCost: Math.min(maxBudget, cumulativeCosts[lastIdx]),
-            haltedEarly: false
-        };
-    }
 
     const visByPlayer = knownTeamVisByOwner ?? new Map<number, Set<string>>();
     const getTeamVis = (owner: number): Set<string> => {
@@ -159,67 +167,136 @@ export const resolveMoveWithOverwatch = (params: {
         return vis;
     };
 
-    const occupiedByOther = new Set(
-        units.filter(u => u.id !== movingUnit.id).map(u => u.tileId)
-    );
+    const preparedOverwatchers: { ow: Unit; owTile: Tile; range: number; preCoverage: Set<string> | undefined }[] = [];
+    for (const ow of enemyOverwatchers) {
+        const owTile = getTileByIdFast(mapData, ow.tileId, gridSize);
+        if (!owTile || !canUnitAttackFromTile(ow, owTile)) continue;
+        const preCoverage = knownCoverageByOverwatcher?.get(ow.id);
+        const range = preCoverage ? 0 : getUnitRange(ow, mapData, weather, owTile);
+        preparedOverwatchers.push({ ow, owTile, range, preCoverage });
+    }
+
+    if (preparedOverwatchers.length === 0 && mineByTile.size === 0) {
+        const lastIdx = path.length - 1;
+        return {
+            path,
+            trigger: null,
+            mineTrigger: null,
+            finalTile: path[lastIdx],
+            finalIndex: lastIdx,
+            actualCost: Math.min(maxBudget, cumulativeCosts[lastIdx]),
+            haltedEarly: false
+        };
+    }
+
+    const resolveSafeHaltIdx = (targetIdx: number): number => {
+        // Never pin onto a pass-through tile occupied by another friendly unit; step back to last free tile.
+        const occupiedByOther = new Set<string>();
+        for (let uIdx = 0; uIdx < units.length; uIdx++) {
+            if (units[uIdx].id !== movingUnit.id) occupiedByOther.add(units[uIdx].tileId);
+        }
+        let haltIdx = targetIdx;
+        while (haltIdx > 0 && occupiedByOther.has(path[haltIdx].id)) {
+            haltIdx--;
+        }
+        return haltIdx;
+    };
+
+    let firedOverwatch: OverwatchTriggerInfo | null = null;
+    let remainingHp = movingUnit.hp;
 
     for (let idx = 1; idx < path.length; idx++) {
         const stepTile = path[idx];
-        const eligible: { overwatcher: Unit; damage: number; dist: number }[] = [];
 
-        for (const ow of enemyOverwatchers) {
-            const preCoverage = knownCoverageByOverwatcher?.get(ow.id);
-            if (preCoverage && !preCoverage.has(stepTile.id)) continue;
+        if (!firedOverwatch && preparedOverwatchers.length > 0) {
+            let bestOw: Unit | null = null;
+            let bestDmg = -1;
+            let bestDist = Infinity;
 
-            const owTile = getTileByIdFast(mapData, ow.tileId, gridSize);
-            if (!owTile || !canUnitAttackFromTile(ow, owTile)) continue;
-            const dist = getManhattanDistance(owTile, stepTile);
-            if (!preCoverage) {
-                if (dist > getUnitRange(ow, mapData, weather)) continue;
-                if (!hasOverwatchLineOfSight(owTile, stepTile, mapData, ow.type, weather, gridSize)) continue;
-            }
-            if (fogOfWar && !getTeamVis(ow.owner).has(stepTile.id)) continue;
+            for (let j = 0; j < preparedOverwatchers.length; j++) {
+                const { ow, owTile, range, preCoverage } = preparedOverwatchers[j];
+                if (preCoverage && !preCoverage.has(stepTile.id)) continue;
 
-            const outcome = calculateOverwatchOutcome(ow, owTile, stepTile, movingUnit.owner, movingUnit);
-            eligible.push({ overwatcher: ow, damage: outcome.damage, dist });
-        }
+                const dist = getManhattanDistance(owTile, stepTile);
+                if (!preCoverage) {
+                    if (dist > range) continue;
+                    if (!hasOverwatchLineOfSight(owTile, stepTile, mapData, ow.type, weather, gridSize)) continue;
+                }
+                if (fogOfWar && !getTeamVis(ow.owner).has(stepTile.id)) continue;
 
-        if (eligible.length > 0) {
-            eligible.sort((a, b) => {
-                if (b.damage !== a.damage) return b.damage - a.damage;
-                if (a.dist !== b.dist) return a.dist - b.dist;
-                return a.overwatcher.id.localeCompare(b.overwatcher.id);
-            });
-
-            const chosen = eligible[0];
-            const victimDead = movingUnit.hp - chosen.damage <= 0;
-            const pinResisted = !victimDead && movingUnit.type === 'ASSAULTER' && (movingUnit.rank ?? 0) >= 2;
-
-            let haltIdx = idx;
-            if (pinResisted) {
-                haltIdx = path.length - 1;
-            } else if (!victimDead) {
-                // Never pin onto a pass-through tile occupied by another friendly unit; step back to last free tile.
-                while (haltIdx > 0 && occupiedByOther.has(path[haltIdx].id)) {
-                    haltIdx--;
+                const outcome = calculateOverwatchOutcome(ow, owTile, stepTile, movingUnit.owner, movingUnit);
+                if (
+                    !bestOw ||
+                    outcome.damage > bestDmg ||
+                    (outcome.damage === bestDmg && (dist < bestDist || (dist === bestDist && ow.id.localeCompare(bestOw.id) < 0)))
+                ) {
+                    bestOw = ow;
+                    bestDmg = outcome.damage;
+                    bestDist = dist;
                 }
             }
 
-            return {
-                path,
-                trigger: {
-                    overwatcherId: chosen.overwatcher.id,
-                    overwatcherTileId: chosen.overwatcher.tileId,
+            if (bestOw) {
+                remainingHp -= bestDmg;
+                const owDead = remainingHp <= 0;
+                const pinResisted = !owDead && movingUnit.type === 'ASSAULTER' && (movingUnit.rank ?? 0) >= 2;
+                firedOverwatch = {
+                    overwatcherId: bestOw.id,
+                    overwatcherTileId: bestOw.tileId,
                     interceptTile: stepTile,
                     interceptIndex: idx,
-                    damage: chosen.damage,
-                    victimDead,
+                    damage: bestDmg,
+                    victimDead: owDead,
                     pinResisted
+                };
+
+                if (owDead) {
+                    return {
+                        path,
+                        trigger: firedOverwatch,
+                        mineTrigger: null,
+                        finalTile: path[idx],
+                        finalIndex: idx,
+                        actualCost: Math.min(maxBudget, cumulativeCosts[idx]),
+                        haltedEarly: idx < path.length - 1
+                    };
+                }
+            }
+        }
+
+        const stepMine = mineByTile.get(stepTile.id);
+        if (stepMine) {
+            const mineDmg = LAND_MINE_STATS.DAMAGE;
+            remainingHp -= mineDmg;
+            const mineDead = remainingHp <= 0;
+            const haltIdx = mineDead ? idx : resolveSafeHaltIdx(idx);
+            return {
+                path,
+                trigger: firedOverwatch,
+                mineTrigger: {
+                    mineId: stepMine.id,
+                    mineOwner: stepMine.owner,
+                    interceptTile: stepTile,
+                    damage: mineDmg,
+                    victimDead: mineDead
                 },
                 finalTile: path[haltIdx],
                 finalIndex: haltIdx,
                 actualCost: Math.min(maxBudget, cumulativeCosts[haltIdx]),
-                haltedEarly: !pinResisted && haltIdx < path.length - 1
+                haltedEarly: haltIdx < path.length - 1
+            };
+        }
+
+        if (firedOverwatch && firedOverwatch.interceptIndex === idx && !firedOverwatch.pinResisted) {
+            const haltIdx = resolveSafeHaltIdx(idx);
+            return {
+                path,
+                trigger: firedOverwatch,
+                mineTrigger: null,
+                finalTile: path[haltIdx],
+                finalIndex: haltIdx,
+                actualCost: Math.min(maxBudget, cumulativeCosts[haltIdx]),
+                haltedEarly: haltIdx < path.length - 1
             };
         }
     }
@@ -227,7 +304,8 @@ export const resolveMoveWithOverwatch = (params: {
     const lastIdx = path.length - 1;
     return {
         path,
-        trigger: null,
+        trigger: firedOverwatch,
+        mineTrigger: null,
         finalTile: path[lastIdx],
         finalIndex: lastIdx,
         actualCost: Math.min(maxBudget, cumulativeCosts[lastIdx]),

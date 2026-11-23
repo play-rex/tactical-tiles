@@ -11,14 +11,30 @@ import { hasSavedTable, codeFromUrl, useOnline } from './src/net/useOnline';
 import { useGameStore } from './src/store/useGameStore';
 import { ViewportProvider } from './src/context/ViewportContext';
 import { MapControls, PhoneDock } from './src/components/game/ui/MapControls';
+import { MapHoverCard } from './src/components/game/ui/MapHoverCard';
 import { TurnBanner } from './src/components/game/ui/TurnBanner';
 import { CameraFollow } from './src/components/game/ui/CameraFollow';
 import { useNarrow } from './src/hooks/useNarrow';
-import { GeoButton, GeoCard, GeoChip } from './src/components/ui/GeoPrimitives';
+import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from './src/components/ui/GeoPrimitives';
+import { getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { canUnitAttackFromTile } from '@tactical/engine/rules/CombatRules';
 import { SoundFX } from './src/core/audio/SoundFX';
 import { useEffectStore } from './src/store/useEffectStore';
-import { PLAYER_UI_THEME } from './src/components/ui/GeoPrimitives';
+
+const OnlineErrorToast: React.FC = () => {
+  const mode = useGameStore(state => state.mode);
+  const error = useOnline(state => state.error);
+  const clearError = useOnline(state => state.clearError);
+  if (mode !== 'ONLINE' || !error) return null;
+  return (
+    <div style={{ position: 'fixed', top: '14px', left: '50%', transform: 'translateX(-50%)', zIndex: 250, maxWidth: 'min(480px, calc(100vw - 24px))' }}>
+      <GeoWell coreStyle={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: '10px', background: 'var(--acc-red-soft)' }}>
+        <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--acc-red-ink)' }}>{error}</span>
+        <GeoButton onClick={clearError} coreStyle={{ padding: '3px 9px' }}>OK</GeoButton>
+      </GeoWell>
+    </div>
+  );
+};
 
 /** `compact`: the phone version, with the guidance on its own line and fewer buttons. */
 const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ compact = false }) => {
@@ -34,6 +50,8 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
   const selectedInventoryItemIndex = useGameStore(state => state.selectedInventoryItemIndex);
   const selectedGraveyardUnitId = useGameStore(state => state.selectedGraveyardUnitId);
   const resetGame = useGameStore(state => state.resetGame);
+  const mapRotation = useGameStore(state => state.mapRotation);
+  const rotateMap = useGameStore(state => state.rotateMap);
   const fxMode = useEffectStore(state => state.fxMode);
   const toggleFxMode = useEffectStore(state => state.toggleFxMode);
   const [muted, setMuted] = useState(() => SoundFX.isMuted());
@@ -45,7 +63,7 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
   };
 
   const selectedUnit = units.find(u => u.id === selectedUnitId);
-  const selectedUnitTile = selectedUnit ? mapData.find(t => t.id === selectedUnit.tileId) : undefined;
+  const selectedUnitTile = selectedUnit ? getTileByIdFast(mapData, selectedUnit.tileId, gridSize) : undefined;
   const pTheme = PLAYER_UI_THEME[currentPlayer] || PLAYER_UI_THEME[0];
 
   const mode = useGameStore(state => state.mode);
@@ -66,9 +84,12 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
   } else if (isAiTurn) {
     guidance = `Enemy Commander (P${currentPlayer + 1}) is executing moves...`;
   } else if (bankRewardPending && bankRewardPending.playerId === currentPlayer) {
-    guidance = 'Vault Breached! Choose Gold or CP loot.';
+    guidance = 'Vault Breached! Choose Euros or CP loot.';
   } else if (placementMode && placementMode.active) {
-    guidance = 'Construction Mode: Click a cyan tile to deploy, or Cancel.';
+    guidance =
+      placementMode.kind === 'DROP'
+        ? 'Supply Airdrop: Click a highlighted amber tile, or Auto-Drop near HQ.'
+        : 'Construction Mode: Click a cyan tile to deploy, or Cancel.';
   } else if (selectedInventoryItemIndex !== null) {
     guidance = 'Supply Armed: Click a friendly unit to apply.';
   } else if (selectedGraveyardUnitId) {
@@ -76,10 +97,14 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
   } else if (selectedUnit && selectedUnit.owner === currentPlayer) {
     if (selectedUnit.isOverwatching) {
       guidance = 'Overwatch Armed: Traps first entering enemy next turn.';
+    } else if (selectedUnit.completed) {
+      guidance = 'Unit Done: Already acted this turn (cannot move or attack) • TAB Next';
+    } else if (selectedUnit.hasMoved) {
+      guidance = 'Moved: Click RED target to Attack • O Overwatch • TAB Next';
     } else if (selectedUnit.type === 'SNIPER' && !canUnitAttackFromTile(selectedUnit, selectedUnitTile)) {
-      guidance = 'Sniper: Move to Mountain, Dunes, or Building to fire.';
+      guidance = 'Sniper: Move to Mountain, Dunes, or Owned Building to fire.';
     } else {
-      guidance = 'BLUE Move • RED Attack • O Overwatch • TAB Next';
+      guidance = 'BLUE Move • RED Attack • O Overwatch • R Rotate • Z Undo • TAB Next';
     }
   }
 
@@ -120,6 +145,14 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             {turnChip}
             <span style={{ flex: 1 }} />
+            <GeoButton
+              onClick={() => rotateMap(90)}
+              variant={mapRotation === 0 ? 'default' : 'softAmber'}
+              title="Rotate map view 90°"
+              coreStyle={{ padding: '4px 9px' }}
+            >
+              ↻ {mapRotation}°
+            </GeoButton>
             <GeoButton onClick={toggleMute} variant={muted ? 'default' : 'softBlue'} coreStyle={{ padding: '4px 9px' }}>
               {muted ? 'MUTED' : 'SOUND'}
             </GeoButton>
@@ -167,6 +200,15 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
           <GeoButton
+            onClick={() => rotateMap(90)}
+            onContextMenu={(e) => { e.preventDefault(); rotateMap(-90); }}
+            variant={mapRotation === 0 ? 'default' : 'softAmber'}
+            title="Rotate map view 90° clockwise (R) • Right-click or Shift+R for counter-clockwise"
+            coreStyle={{ padding: '4px 10px' }}
+          >
+            ↻ {mapRotation}°
+          </GeoButton>
+          <GeoButton
             onClick={toggleFxMode}
             variant={fxMode === 'ECO' ? 'softMint' : 'softBlue'}
             title={fxMode === 'ECO' ? 'Eco Graphics: Zero-Idle GPU Mode (Switch to Live 24fps FX)' : 'Live FX: Continuous Water & Weather @ 24fps (Switch to Eco Mode)'}
@@ -196,7 +238,7 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
 });
 
 /** The board in its steel tray, with the turn banner over it. */
-const MapFrame: React.FC<{ children?: React.ReactNode }> = ({ children }) => (
+const MapFrame: React.FC = () => (
   <div className="geo-drop geo-fill" style={{ flex: 1, minHeight: 0 }}>
     <div className="geo-backplate" />
     <div className="geo-rim" style={{ flex: 1, minHeight: 0, display: 'flex' }}>
@@ -204,8 +246,8 @@ const MapFrame: React.FC<{ children?: React.ReactNode }> = ({ children }) => (
         <div className="geo-frame-rim" style={{ flex: 1, minHeight: 0, display: 'flex' }}>
           <div className="geo-frame-core" style={{ flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}>
             <GameRenderer />
+            <MapHoverCard />
             <TurnBanner />
-            {children}
           </div>
         </div>
       </div>
@@ -223,7 +265,6 @@ const PhoneBattle: React.FC = () => {
       className="opgeo-stage"
       style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100dvh', overflow: 'hidden', padding: '6px', gap: '6px' }}
     >
-      <WinnerOverlay />
       <CameraFollow />
       <TopBattleGuidanceBar compact />
       <div style={{ flex: 1, minHeight: 0, display: 'flex', position: 'relative' }}>
@@ -261,7 +302,9 @@ const App = () => {
 
   return (
     <ViewportProvider>
+      <OnlineErrorToast />
       <BankRewardModal />
+      <WinnerOverlay />
       {narrow ? <PhoneBattle /> : <DesktopBattle />}
     </ViewportProvider>
   );
@@ -283,7 +326,6 @@ const DesktopBattle: React.FC = () => {
           gap: '10px',
         }}
       >
-        <WinnerOverlay />
 
         {/* Left Column: Faction Roster Stack + Pinned Field Shop */}
         <div

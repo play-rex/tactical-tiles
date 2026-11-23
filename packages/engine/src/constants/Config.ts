@@ -20,7 +20,13 @@ export const BANK_STATS = {
 };
 
 export const BARRIER_STATS = {
-  HP: 10
+  HP: 10,
+  BUILD_COUNT: 3,
+};
+
+export const LAND_MINE_STATS = {
+  DAMAGE: 8,
+  ENEMY_HQ_EXCLUSION_RADIUS: 5,
 };
 
 export const MAX_RESPAWNS = 2;
@@ -42,8 +48,13 @@ export const CP_SYSTEM = {
 export const GOLD_SETTINGS = {
   INITIAL_GOLD: 150,
   INCOME_PER_TURN: 10,
+  BUILDING_INCOME: 5,
   HEIST_REWARD_GOLD: 200,
   HEIST_REWARD_CP: 10,
+};
+
+export const COMBAT_BONUSES = {
+  CROSSFIRE_DAMAGE: 2,
 };
 
 export const RESPAWN_TIMERS = {
@@ -60,8 +71,10 @@ export const UNIT_COSTS = {
 
 export const SHOP_ITEMS = {
   AMMO_REFILL: { cost: 50, name: 'Ammo Drop', type: 'CONSUMABLE' },
-  MEDKIT: { cost: 100, name: 'Medkit (Full Heal)', type: 'CONSUMABLE' },
-  BARRIER: { cost: 100, name: 'Deploy Barrier', type: 'CONSTRUCT' },
+  FIRST_AID: { cost: 100, name: 'First Aid Kit (50% Heal)', type: 'CONSUMABLE' },
+  MEDKIT: { cost: 200, name: 'Medkit (Full Heal)', type: 'CONSUMABLE' },
+  LAND_MINE: { cost: 75, name: 'Land Mine', type: 'CONSTRUCT' },
+  BARRIER: { cost: 150, name: 'Deploy Barrier (x3)', type: 'CONSTRUCT' },
   BRIDGE: { cost: 100, name: 'Deploy Bridge', type: 'CONSTRUCT' }, // Consolidated
 };
 

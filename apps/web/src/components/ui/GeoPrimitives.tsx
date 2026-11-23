@@ -27,6 +27,9 @@ const VARIANT_STYLES: Record<GeoVariant, { bg: string; color: string; rim?: stri
   softViolet: { bg: 'var(--acc-violet-soft)', color: 'var(--acc-violet-ink)' },
 };
 
+/** Converts a CSS `#RRGGBB` hex string into a numeric 0xRRGGBB PixiJS color. */
+export const hexToPixiColor = (hex: string): number => parseInt(hex.replace('#', ''), 16);
+
 /** High-contrast light-mode theme mapping for all 6 faction colors. */
 export const PLAYER_UI_THEME: Record<number, { badgeBg: string; badgeText: string; ink: string; border: string }> = {
   0: { badgeBg: '#E53935', badgeText: '#FFFFFF', ink: '#C62828', border: '#E53935' },

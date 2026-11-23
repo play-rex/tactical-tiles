@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import { matchMaker, Server } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
-import { ClientMsg, CloseCode, ROOM_NAME, ServerMsg, type TableView } from '@tactical/engine';
+import { ClientMsg, CloseCode, moveCostsFor, ROOM_NAME, ServerMsg, type TableView } from '@tactical/engine';
 import { Client, type Room } from 'colyseus.js';
 import { limits, restoreTables, TableRoom, timings } from '../src/TableRoom';
 import { fileTableStore } from '../src/store';
@@ -255,6 +255,54 @@ test('a restart (a deploy) brings the table back, and players carry on where the
   } finally {
     TableRoom.store = null;
     TableRoom.shuttingDown = false;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sync and reconnect never replay stale action events, and restoreTables skips bot-only tables', async () => {
+  const id = pid();
+  const a = await host('Alice', id);
+  const code = (await a.view(() => true)).code;
+  a.room.send(ClientMsg.addBot);
+  await a.view(v => v.seats.length === 2);
+  a.room.send(ClientMsg.start);
+  const started = await a.view(v => v.status === 'playing');
+  const mover = started.game!.game.units.find(u => u.owner === 0 && moveCostsFor(started.game!.game, u).size > 0)!;
+  const [targetTileId] = moveCostsFor(started.game!.game, mover).keys();
+
+  a.room.send(ClientMsg.action, { type: 'MOVE', unitId: mover.id, targetTileId, cost: 1 });
+  const moved = await a.view(v => v.seq > started.seq && v.events.length > 0, 'move with events');
+  assert.ok(moved.events.length > 0);
+
+  // Requesting sync at the same seq receives no stale events
+  a.room.send(ClientMsg.sync);
+  const synced = await a.view(v => v.seq === moved.seq && v.events.length === 0, 'sync without stale events');
+  assert.deepEqual(synced.events, []);
+
+  // Opening a new tab for the same player also receives no stale events
+  const tab2 = await join(code, 'Alice', id);
+  const resumed = await tab2.view(v => v.status === 'playing', 'resumed view');
+  assert.equal(resumed.seq, moved.seq);
+  assert.deepEqual(resumed.events, []);
+  await tab2.room.leave();
+
+  // Bot-only saved table is skipped and pruned during restoreTables
+  const dir = mkdtempSync(joinPath(tmpdir(), 'tt-zombie-'));
+  const store = fileTableStore(dir);
+  try {
+    store.save('ZOMB', JSON.stringify({
+      v: 1,
+      code: 'ZOMB',
+      seats: [{ playerId: null, name: 'Rook (bot)', isBot: true }],
+      hostPlayerId: null,
+      settings: moved.settings,
+      status: 'playing',
+      game: null,
+      seq: 1,
+    }));
+    assert.equal(await restoreTables(store), 0);
+    assert.equal(store.all().length, 0);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

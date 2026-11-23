@@ -7,14 +7,17 @@ import {
   BANK_STATS,
   BARRIER_STATS,
   BASE_STATS,
+  COMBAT_BONUSES,
   GOLD_SETTINGS,
+  LAND_MINE_STATS,
   OVERWATCH_STATS,
   RESPAWN_TIMERS,
   SHOP_ITEMS,
   UNIT_STATS,
   VETERANCY_CONFIG,
 } from '../constants/Config';
-import type { LogEntry, MatchPlayerStats, PendingDrop, TerrainType, Tile, Unit, UnitType } from '../types';
+import type { DeadUnit, LandMine, LogEntry, MatchPlayerStats, PendingDrop, SupplyLootType, TerrainType, Tile, Unit, UnitType } from '../types';
+import { getManhattanDistance, getTileByIdFast } from '../grid/Pathfinding';
 import { updateDoomsdayState } from '../grid/DoomsdayManager';
 import {
   applyUnitXp,
@@ -28,17 +31,17 @@ import {
   getEffectiveBankRewards,
   getEffectiveCpRules,
   getEffectiveMaxRespawns,
-  getEffectiveUnitAmmo,
   getUnitMaxHp,
   resolveBridgeVariant,
 } from '../rules/CombatRules';
 import { resolveMoveWithOverwatch } from '../rules/OverwatchRules';
 import { calculateMatchScorecard } from '../storage/CareerStatsManager';
 import { createSeededRng } from '../utils/SeededRandom';
-import { isConstruct, isConsumable } from './options';
+import { getCrossfireSupporters, getSupplyDropTargets, isConstruct, isConsumable, visibleSet } from './options';
 import { rollWeather } from './setup';
 import {
   createLog,
+  createUnit,
   cloneMatchStats,
   MAX_LOG_ENTRIES,
   nextActivePlayer,
@@ -47,6 +50,9 @@ import {
   type GameState,
   type SoundName,
 } from './state';
+
+const itemKeyToLoot = (itemKey: string): SupplyLootType =>
+  itemKey === 'AMMO_REFILL' ? 'AMMO' : itemKey === 'FIRST_AID' ? 'FIRST_AID' : 'MEDKIT';
 
 export interface ApplyOptions {
   /**
@@ -85,6 +91,7 @@ const grantUnitXp = (
   unitId: string,
   gainedXp: number,
   map: Tile[],
+  gridSize: number,
   playerId: number,
   round: number,
   matchStats: Record<number, MatchPlayerStats>,
@@ -96,7 +103,7 @@ const grantUnitXp = (
     if (u.id !== unitId) return u;
     const { unit: promotedUnit, promotedTo } = applyUnitXp(u, gainedXp);
     if (promotedTo !== null) {
-      const uTile = map.find(t => t.id === promotedUnit.tileId);
+      const uTile = getTileByIdFast(map, promotedUnit.tileId, gridSize);
       if (uTile) fx.popup(uTile, VETERANCY_CONFIG.RANK_LABELS[promotedTo], '#FFD700', 24);
       fx.sound('capture');
       const rankName = VETERANCY_CONFIG.RANK_NAMES[promotedTo];
@@ -109,6 +116,111 @@ const grantUnitXp = (
   });
 };
 
+const pushGraveyard = (graveyard: GameState['graveyard'], unit: Pick<Unit, 'id' | 'type' | 'owner'>) => {
+  graveyard.push({ id: unit.id, type: unit.type, owner: unit.owner, turnsUntilRespawn: RESPAWN_TIMERS[unit.type] });
+};
+
+const applyUnitHit = (params: {
+  unitsList: Unit[];
+  target: Unit;
+  targetTile: Tile | undefined;
+  dmg: number;
+  suppressLogPlayerId: number;
+  suppressMessage: string;
+  graveyard: GameState['graveyard'];
+  round: number;
+  extraLogs: LogEntry[];
+  fx: Fx;
+}): { unitsList: Unit[]; killed: boolean } => {
+  const { unitsList, target, targetTile, dmg, suppressLogPlayerId, suppressMessage, graveyard, round, extraLogs, fx } = params;
+  const remainingHp = target.hp - dmg;
+  if (remainingHp <= 0) {
+    pushGraveyard(graveyard, target);
+    return { unitsList: unitsList.filter(u => u.id !== target.id), killed: true };
+  }
+  if (target.isOverwatching && dmg > 0) {
+    if (targetTile) fx.popup(targetTile, 'SUPPRESSED!', '#FF9800', 28);
+    extraLogs.push(createLog(round, suppressLogPlayerId, suppressMessage, 'COMBAT'));
+  }
+  return {
+    killed: false,
+    unitsList: unitsList.map(u =>
+      u.id === target.id ? { ...u, hp: remainingHp, isOverwatching: dmg > 0 ? false : u.isOverwatching } : u,
+    ),
+  };
+};
+
+const grantAceBounty = (params: {
+  victim: Unit;
+  rewardPlayer: number;
+  popupTile: Tile | undefined;
+  round: number;
+  nextPlayerGold: Record<number, number>;
+  extraLogs: LogEntry[];
+  fx: Fx;
+}) => {
+  const { victim, rewardPlayer, popupTile, round, nextPlayerGold, extraLogs, fx } = params;
+  if ((victim.rank ?? 0) < 3) return;
+  nextPlayerGold[rewardPlayer] = (nextPlayerGold[rewardPlayer] ?? 0) + VETERANCY_CONFIG.ACE_BOUNTY_GOLD;
+  if (popupTile) fx.popup(popupTile, `+€${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} BOUNTY`, '#FFD700', 36);
+  extraLogs.push(createLog(round, rewardPlayer, `Ace Bounty claimed! +€${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} Euros`, 'ECONOMY'));
+};
+
+const detonateMineOnUnit = (params: {
+  victim: Unit;
+  mineOwner: number;
+  tile: Tile;
+  damage: number;
+  destTileId?: string;
+  markMoved?: boolean;
+  isRooted?: boolean;
+  unitsList: Unit[];
+  graveyardList: DeadUnit[];
+  round: number;
+  nextPlayerGold: Record<number, number>;
+  nextMatchStats: Record<number, MatchPlayerStats>;
+  extraLogs: LogEntry[];
+  fx: Fx;
+}): { units: Unit[]; victimDead: boolean; mineLog: LogEntry } => {
+  const {
+    victim, mineOwner, tile, damage, destTileId, markMoved, isRooted,
+    unitsList, graveyardList, round, nextPlayerGold, nextMatchStats, extraLogs, fx,
+  } = params;
+  const victimDead = victim.hp - damage <= 0;
+  fx.sound('explosion');
+  fx.popup(tile, 'LAND MINE!', '#EF4444', 34);
+  fx.popup(tile, `-${damage}`, '#FF6D00', 14);
+  fx.shake(8);
+  if (nextMatchStats[mineOwner]) {
+    nextMatchStats[mineOwner].damageDealt += damage;
+    if (victimDead) nextMatchStats[mineOwner].kills += 1;
+  }
+  let nextUnits = unitsList;
+  if (victimDead) {
+    nextUnits = nextUnits.filter(u => u.id !== victim.id);
+    pushGraveyard(graveyardList, victim);
+    if (nextMatchStats[victim.owner]) {
+      nextMatchStats[victim.owner].unitsLost += 1;
+    }
+    grantAceBounty({ victim, rewardPlayer: mineOwner, popupTile: tile, round, nextPlayerGold, extraLogs, fx });
+  } else {
+    nextUnits = nextUnits.map(u => u.id === victim.id ? {
+      ...u,
+      hp: victim.hp - damage,
+      ...(destTileId !== undefined ? { tileId: destTileId } : {}),
+      ...(markMoved !== undefined ? { hasMoved: markMoved } : {}),
+      ...(isRooted !== undefined ? { isRooted } : {}),
+    } : u);
+  }
+  const mineLog = createLog(
+    round,
+    mineOwner,
+    `LAND MINE! ${UNIT_STATS[victim.type].name} triggered a mine (-${damage} HP${victimDead ? ', ELIMINATED' : ''})`,
+    'COMBAT',
+  );
+  return { units: nextUnits, victimDead, mineLog };
+};
+
 const applyCombatOutcomeToStatsAndXp = (params: {
   attackerId: string;
   attackerOwner: number;
@@ -118,13 +230,14 @@ const applyCombatOutcomeToStatsAndXp = (params: {
   isKill: boolean;
   unitsList: Unit[];
   map: Tile[];
+  gridSize: number;
   round: number;
   nextPlayerGold: Record<number, number>;
   nextMatchStats: Record<number, MatchPlayerStats>;
   extraLogs: LogEntry[];
   fx: Fx;
 }): Unit[] => {
-  const { attackerId, attackerOwner, attTile, victim, dmg, isKill, map, round, nextPlayerGold, nextMatchStats, extraLogs, fx } = params;
+  const { attackerId, attackerOwner, attTile, victim, dmg, isKill, map, gridSize, round, nextPlayerGold, nextMatchStats, extraLogs, fx } = params;
   let updatedUnits = params.unitsList;
 
   if (nextMatchStats[attackerOwner]) {
@@ -136,15 +249,19 @@ const applyCombatOutcomeToStatsAndXp = (params: {
     if (nextMatchStats[victim.owner]) {
       nextMatchStats[victim.owner].unitsLost += 1;
     }
-    if ((victim.rank ?? 0) >= 3) {
-      nextPlayerGold[attackerOwner] = (nextPlayerGold[attackerOwner] ?? 0) + VETERANCY_CONFIG.ACE_BOUNTY_GOLD;
-      if (attTile) fx.popup(attTile, `+$${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} BOUNTY`, '#FFD700', 36);
-      extraLogs.push(createLog(round, attackerOwner, `Ace Bounty claimed! +$${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} Gold`, 'ECONOMY'));
-    }
+    grantAceBounty({
+      victim,
+      rewardPlayer: attackerOwner,
+      popupTile: attTile,
+      round,
+      nextPlayerGold,
+      extraLogs,
+      fx,
+    });
     const xpGain = (victim.rank ?? 0) >= 2 ? 3 : 2;
-    updatedUnits = grantUnitXp(updatedUnits, attackerId, xpGain, map, attackerOwner, round, nextMatchStats, extraLogs, fx);
+    updatedUnits = grantUnitXp(updatedUnits, attackerId, xpGain, map, gridSize, attackerOwner, round, nextMatchStats, extraLogs, fx);
   } else if (dmg > 0) {
-    updatedUnits = grantUnitXp(updatedUnits, attackerId, 1, map, attackerOwner, round, nextMatchStats, extraLogs, fx);
+    updatedUnits = grantUnitXp(updatedUnits, attackerId, 1, map, gridSize, attackerOwner, round, nextMatchStats, extraLogs, fx);
   }
 
   return updatedUnits;
@@ -156,9 +273,12 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   const {
     mapData, units, currentPlayer, playerCp, playerGold, graveyard, settings, weather, playerRespawns,
     totalTurns, turnCounter, playerStatus, gridSize, bankRewardPending, pendingDrops, playerInventory,
+    mines = [],
   } = state;
   const reject = (reason: string): ApplyResult => ({ state, events: [], rejected: reason });
   const fx = new Fx();
+
+  if (state.winner !== null) return reject('Match is already over');
 
   // Not enough CP for the action (ending the turn is always free)
   if (action.type !== 'END_TURN' && playerCp[currentPlayer] < actionCost(action)) {
@@ -167,8 +287,6 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
 
   let newMap = [...mapData];
   let newUnits = [...units];
-  let newCp = playerCp[currentPlayer];
-  let newGold = playerGold[currentPlayer];
   let newGraveyard = [...graveyard];
   let newWinner = state.winner;
   let newTotalTurns = totalTurns;
@@ -176,6 +294,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   const newWeather = { ...weather, playerZones: { ...weather.playerZones } };
   let newBankReward = bankRewardPending;
   let newPendingDrops: PendingDrop[] = pendingDrops;
+  let newMines: LandMine[] = [...mines];
 
   const nextPlayerCp = { ...playerCp };
   const nextPlayerGold = { ...playerGold };
@@ -188,141 +307,176 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   const extraLogs: LogEntry[] = [];
   const currentRound = totalTurns + 1;
 
-  if (action.type !== 'END_TURN') {
-    newCp -= actionCost(action);
-    nextPlayerCp[currentPlayer] = newCp;
-  }
+  const spendCp = (cost: number) => {
+    nextPlayerCp[currentPlayer] -= cost;
+  };
+  const spendGold = (cost: number) => {
+    nextPlayerGold[currentPlayer] -= cost;
+  };
 
   switch (action.type) {
     case 'MOVE': {
       const mUnit = newUnits.find(u => u.id === action.unitId);
-      if (mUnit) {
-        const moveResolution = resolveMoveWithOverwatch({
-          movingUnit: mUnit,
-          targetTileId: action.targetTileId,
-          mapData: newMap,
-          units: newUnits,
-          weather,
-          gridSize,
-          fogOfWar: settings.fogOfWar,
-          maxBudget: playerCp[currentPlayer],
-        });
+      if (!mUnit) return reject('Unit not found');
+      const moveResolution = resolveMoveWithOverwatch({
+        movingUnit: mUnit,
+        targetTileId: action.targetTileId,
+        mapData: newMap,
+        units: newUnits,
+        weather,
+        gridSize,
+        fogOfWar: settings.fogOfWar,
+        maxBudget: playerCp[currentPlayer],
+        mines: newMines,
+      });
 
-        // Only the CP actually walked is spent (it matters when Overwatch pins the unit early)
-        newCp = playerCp[currentPlayer] - moveResolution.actualCost;
-        nextPlayerCp[currentPlayer] = newCp;
+      // Only the CP actually walked is spent (it matters when Overwatch or a Land Mine halts the unit early)
+      spendCp(moveResolution.actualCost);
 
-        const destTile = moveResolution.finalTile ?? newMap.find(t => t.id === action.targetTileId);
-        const trig = moveResolution.trigger;
+      const destTile = moveResolution.finalTile ?? getTileByIdFast(newMap, action.targetTileId, gridSize);
+      const trig = moveResolution.trigger;
+      const mineTrig = moveResolution.mineTrigger;
 
-        if (trig) {
-          const shooter = newUnits.find(u => u.id === trig.overwatcherId);
-          const shooterTile = shooter ? newMap.find(t => t.id === shooter.tileId) : undefined;
-          const interceptTile = trig.interceptTile;
+      if (trig) {
+        const shooter = newUnits.find(u => u.id === trig.overwatcherId);
+        const shooterTile = shooter ? getTileByIdFast(newMap, shooter.tileId, gridSize) : undefined;
+        const interceptTile = trig.interceptTile;
 
-          if (shooter) {
-            fx.sound(shooter.type === 'SNIPER' ? 'sniper' : 'attack');
-            fx.sound('hit');
-            if (shooterTile) {
-              fx.projectile(shooterTile, interceptTile, shooter.type === 'SNIPER' ? 'LASER' : 'BULLET');
-              fx.popup(interceptTile, `-${trig.damage}`, '#FF6D00', 12);
-              fx.shake(trig.damage > 5 ? 10 : 5);
-            }
-
-            newUnits = newUnits.map(u => {
-              if (u.id !== shooter.id) return u;
-              return {
-                ...u,
-                isOverwatching: false,
-                ammo: Math.max(0, u.ammo - 1),
-                damageDealt: (u.damageDealt ?? 0) + trig.damage,
-                kills: (u.kills ?? 0) + (trig.victimDead ? 1 : 0),
-              };
-            });
-
-            if (trig.victimDead) {
-              newUnits = newUnits.filter(u => u.id !== mUnit.id);
-              newGraveyard.push({ id: mUnit.id, type: mUnit.type, owner: mUnit.owner, turnsUntilRespawn: RESPAWN_TIMERS[mUnit.type] });
-              logEntry = createLog(
-                currentRound,
-                shooter.owner,
-                `OVERWATCH KILL! ${UNIT_STATS[shooter.type].name} eliminated ${UNIT_STATS[mUnit.type].name} (-${trig.damage} HP)`,
-                'COMBAT',
-              );
-            } else {
-              const isQuicksand = destTile?.type === 'QUICKSAND';
-              const finalTileId = destTile ? destTile.id : mUnit.tileId;
-              newUnits = newUnits.map(u => u.id === mUnit.id ? {
-                ...u,
-                tileId: finalTileId,
-                hp: mUnit.hp - trig.damage,
-                hasMoved: true,
-                isRooted: isQuicksand,
-              } : u);
-
-              if (destTile) {
-                if (trig.pinResisted) {
-                  fx.popup(destTile, 'PIN RESISTED!', '#4CAF50', 26);
-                  extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} resisted Overwatch pin!`, 'COMBAT'));
-                } else if (moveResolution.haltedEarly) {
-                  fx.popup(destTile, 'PINNED!', '#FF9800', 26);
-                }
-              }
-
-              logEntry = createLog(
-                currentRound,
-                shooter.owner,
-                `OVERWATCH! ${UNIT_STATS[shooter.type].name} hit ${UNIT_STATS[mUnit.type].name} (-${trig.damage} HP)`,
-                'COMBAT',
-              );
-              if (isQuicksand) {
-                extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} stuck in Quicksand!`, 'INFO'));
-              }
-            }
-
-            newUnits = applyCombatOutcomeToStatsAndXp({
-              attackerId: shooter.id,
-              attackerOwner: shooter.owner,
-              attTile: shooterTile,
-              victim: mUnit,
-              dmg: trig.damage,
-              isKill: trig.victimDead,
-              unitsList: newUnits,
-              map: newMap,
-              round: currentRound,
-              nextPlayerGold,
-              nextMatchStats,
-              extraLogs,
-              fx,
-            });
+        if (shooter) {
+          fx.sound(shooter.type === 'SNIPER' ? 'sniper' : 'attack');
+          fx.sound('hit');
+          if (shooterTile) {
+            fx.projectile(shooterTile, interceptTile, shooter.type === 'SNIPER' ? 'LASER' : 'BULLET');
+            fx.popup(interceptTile, `-${trig.damage}`, '#FF6D00', 12);
+            fx.shake(trig.damage > 5 ? 10 : 5);
           }
-        } else {
+
+          newUnits = newUnits.map(u => {
+            if (u.id !== shooter.id) return u;
+            return {
+              ...u,
+              isOverwatching: false,
+              ammo: Math.max(0, u.ammo - 1),
+              damageDealt: (u.damageDealt ?? 0) + trig.damage,
+              kills: (u.kills ?? 0) + (trig.victimDead ? 1 : 0),
+            };
+          });
+
+          if (trig.victimDead) {
+            newUnits = newUnits.filter(u => u.id !== mUnit.id);
+            pushGraveyard(newGraveyard, mUnit);
+            logEntry = createLog(
+              currentRound,
+              shooter.owner,
+              `OVERWATCH KILL! ${UNIT_STATS[shooter.type].name} eliminated ${UNIT_STATS[mUnit.type].name} (-${trig.damage} HP)`,
+              'COMBAT',
+            );
+          } else {
+            const isQuicksand = destTile?.type === 'QUICKSAND';
+            const finalTileId = destTile ? destTile.id : mUnit.tileId;
+            newUnits = newUnits.map(u => u.id === mUnit.id ? {
+              ...u,
+              tileId: finalTileId,
+              hp: mUnit.hp - trig.damage,
+              hasMoved: true,
+              isRooted: isQuicksand,
+            } : u);
+
+            if (destTile && !mineTrig) {
+              if (trig.pinResisted) {
+                fx.popup(destTile, 'PIN RESISTED!', '#4CAF50', 26);
+                extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} resisted Overwatch pin!`, 'COMBAT'));
+              } else if (moveResolution.haltedEarly) {
+                fx.popup(destTile, 'PINNED!', '#FF9800', 26);
+              }
+            }
+
+            logEntry = createLog(
+              currentRound,
+              shooter.owner,
+              `OVERWATCH! ${UNIT_STATS[shooter.type].name} hit ${UNIT_STATS[mUnit.type].name} (-${trig.damage} HP)`,
+              'COMBAT',
+            );
+            if (isQuicksand && !mineTrig) {
+              extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} stuck in Quicksand!`, 'INFO'));
+            }
+          }
+
+          newUnits = applyCombatOutcomeToStatsAndXp({
+            attackerId: shooter.id,
+            attackerOwner: shooter.owner,
+            attTile: shooterTile,
+            victim: mUnit,
+            dmg: trig.damage,
+            isKill: trig.victimDead,
+            unitsList: newUnits,
+            map: newMap,
+            gridSize,
+            round: currentRound,
+            nextPlayerGold,
+            nextMatchStats,
+            extraLogs,
+            fx,
+          });
+        }
+      }
+
+      if (mineTrig) {
+        newMines = newMines.filter(m => m.id !== mineTrig.mineId);
+        const curMover = newUnits.find(u => u.id === mUnit.id);
+        if (curMover) {
           const isQuicksand = destTile?.type === 'QUICKSAND';
-          newUnits = newUnits.map(u => u.id === action.unitId ? {
-            ...u,
-            tileId: destTile ? destTile.id : action.targetTileId,
-            hasMoved: true,
+          const finalTileId = destTile ? destTile.id : curMover.tileId;
+          const mineRes = detonateMineOnUnit({
+            victim: curMover,
+            mineOwner: mineTrig.mineOwner,
+            tile: mineTrig.interceptTile,
+            damage: mineTrig.damage,
+            destTileId: finalTileId,
+            markMoved: true,
             isRooted: isQuicksand,
-          } : u);
-          fx.sound('move');
-
-          logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} moved to (${destTile?.x},${destTile?.y})`, 'MOVE');
-          if (isQuicksand) {
-            extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} stuck in Quicksand!`, 'INFO'));
+            unitsList: newUnits,
+            graveyardList: newGraveyard,
+            round: currentRound,
+            nextPlayerGold,
+            nextMatchStats,
+            extraLogs,
+            fx,
+          });
+          newUnits = mineRes.units;
+          if (logEntry) {
+            extraLogs.push(mineRes.mineLog);
+          } else {
+            logEntry = mineRes.mineLog;
           }
+          if (!mineRes.victimDead && isQuicksand && !trig) {
+            extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[curMover.type].name} stuck in Quicksand!`, 'INFO'));
+          }
+        }
+      } else if (!trig) {
+        const isQuicksand = destTile?.type === 'QUICKSAND';
+        newUnits = newUnits.map(u => u.id === action.unitId ? {
+          ...u,
+          tileId: destTile ? destTile.id : action.targetTileId,
+          hasMoved: true,
+          isRooted: isQuicksand,
+        } : u);
+        fx.sound('move');
+
+        logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} moved to (${destTile?.x},${destTile?.y})`, 'MOVE');
+        if (isQuicksand) {
+          extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} stuck in Quicksand!`, 'INFO'));
         }
       }
       break;
     }
     case 'OVERWATCH': {
       const unit = newUnits.find(u => u.id === action.unitId);
-      const uTile = unit ? newMap.find(t => t.id === unit.tileId) : undefined;
+      const uTile = unit ? getTileByIdFast(newMap, unit.tileId, gridSize) : undefined;
       if (!unit || !canUnitEnterOverwatch(unit, uTile, playerCp[currentPlayer])) {
-        // Illegal Overwatch: give back the CP taken up front
-        newCp = playerCp[currentPlayer];
-        nextPlayerCp[currentPlayer] = newCp;
-        break;
+        return reject('Cannot enter Overwatch');
       }
+      spendCp(actionCost(action));
       newUnits = newUnits.map(u => u.id === unit.id ? { ...u, isOverwatching: true, completed: true } : u);
       if (uTile) fx.popup(uTile, 'OVERWATCH', '#FFB300', 20);
       fx.sound('click');
@@ -331,104 +485,108 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     }
     case 'RELOAD': {
       const unit = newUnits.find(u => u.id === action.unitId);
-      if (unit) {
-        const added = Math.max(1, Math.ceil(unit.maxAmmo / 2));
-        const nextAmmo = Math.min(unit.maxAmmo, unit.ammo + added);
-        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, ammo: nextAmmo, completed: true } : u);
-        fx.sound('click');
-        logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[unit.type].name} Field Reloaded (${nextAmmo}/${unit.maxAmmo} Ammo)`, 'ECONOMY');
-      }
+      if (!unit) return reject('Unit not found');
+      spendCp(actionCost(action));
+      const added = Math.max(1, Math.ceil(unit.maxAmmo / 2));
+      const nextAmmo = Math.min(unit.maxAmmo, unit.ammo + added);
+      newUnits = newUnits.map(u => u.id === unit.id ? { ...u, ammo: nextAmmo, completed: true } : u);
+      fx.sound('click');
+      logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[unit.type].name} Field Reloaded (${nextAmmo}/${unit.maxAmmo} Ammo)`, 'ECONOMY');
       break;
     }
     case 'LOOT': {
       const unit = newUnits.find(u => u.id === action.unitId);
-      const tile = newMap.find(t => t.id === action.tileId);
-      if (unit && tile && tile.loot) {
-        // Loot goes to the player's inventory, to use later
-        const lootItem = tile.loot;
-        const currentInv = nextPlayerInventory[currentPlayer] || [];
-        nextPlayerInventory[currentPlayer] = [...currentInv, lootItem];
-        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, completed: true } : u);
-        newMap = newMap.map(t => t.id === tile.id ? { ...t, loot: null } : t);
-        logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[unit.type].name} retrieved ${lootItem} to Inventory`, 'ECONOMY');
-      }
+      const tile = getTileByIdFast(newMap, action.tileId, gridSize);
+      if (!unit || !tile || !tile.loot) return reject('No loot to pick up');
+      spendCp(actionCost(action));
+      // Loot goes to the player's inventory, to use later
+      const lootItem = tile.loot;
+      const currentInv = nextPlayerInventory[currentPlayer] || [];
+      nextPlayerInventory[currentPlayer] = [...currentInv, lootItem];
+      newUnits = newUnits.map(u => u.id === unit.id ? { ...u, completed: true } : u);
+      newMap = newMap.map(t => t.id === tile.id ? { ...t, loot: null } : t);
+      logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[unit.type].name} retrieved ${lootItem} to Inventory`, 'ECONOMY');
       break;
     }
     case 'USE_ITEM': {
       const itemIndex = action.itemIndex;
       const inv = nextPlayerInventory[currentPlayer];
-      if (inv && inv[itemIndex]) {
-        const item = inv[itemIndex];
-        const unit = newUnits.find(u => u.id === action.unitId);
-        if (unit) {
-          if (item === 'MEDKIT') {
-            newUnits = newUnits.map(u => u.id === unit.id ? { ...u, hp: getUnitMaxHp(u) } : u);
-          } else if (item === 'AMMO') {
-            newUnits = newUnits.map(u => u.id === unit.id ? { ...u, ammo: u.maxAmmo } : u);
-          }
-          const newInvList = [...inv];
-          newInvList.splice(itemIndex, 1);
-          nextPlayerInventory[currentPlayer] = newInvList;
-          logEntry = createLog(currentRound, currentPlayer, `Used ${item} on ${UNIT_STATS[unit.type].name}`, 'ECONOMY');
-        }
+      const item = inv?.[itemIndex];
+      const unit = item ? newUnits.find(u => u.id === action.unitId) : undefined;
+      if (!item || !unit) return reject('Cannot use item');
+      spendCp(actionCost(action));
+      if (item === 'MEDKIT') {
+        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, hp: getUnitMaxHp(u) } : u);
+      } else if (item === 'FIRST_AID') {
+        const maxHp = getUnitMaxHp(unit);
+        const healAmt = Math.ceil(maxHp * 0.5);
+        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, hp: Math.min(maxHp, u.hp + healAmt) } : u);
+      } else if (item === 'AMMO') {
+        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, ammo: u.maxAmmo } : u);
       }
+      const newInvList = [...inv];
+      newInvList.splice(itemIndex, 1);
+      nextPlayerInventory[currentPlayer] = newInvList;
+      const itemLabel = item === 'FIRST_AID' ? 'First Aid Kit' : item;
+      logEntry = createLog(currentRound, currentPlayer, `Used ${itemLabel} on ${UNIT_STATS[unit.type].name}`, 'ECONOMY');
       break;
     }
     case 'SECURE': {
       const unit = newUnits.find(u => u.id === action.unitId);
-      const targetTile = newMap.find(t => t.id === action.tileId);
-      if (unit && targetTile) {
-        const alreadyCapturedByPlayer = targetTile.capturedByOwners?.includes(currentPlayer) ?? false;
-        newMap = newMap.map(t => {
-          if (t.id !== action.tileId) return t;
-          return {
-            ...t,
-            owner: currentPlayer,
-            capturedByOwners: alreadyCapturedByPlayer ? t.capturedByOwners : [...(t.capturedByOwners ?? []), currentPlayer],
-          };
-        });
-        newUnits = newUnits.map(u => u.id === action.unitId ? { ...u, completed: true } : u);
-        if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].buildingsSecured += 1;
-        if (!alreadyCapturedByPlayer) {
-          newUnits = grantUnitXp(newUnits, unit.id, 1, newMap, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
-        }
-        fx.sound('capture');
-        logEntry = createLog(currentRound, currentPlayer, `Secured a Building`, 'ECONOMY');
+      const targetTile = getTileByIdFast(newMap, action.tileId, gridSize);
+      if (!unit || !targetTile) return reject('Cannot secure building');
+      spendCp(actionCost(action));
+      const alreadyCapturedByPlayer = targetTile.capturedByOwners?.includes(currentPlayer) ?? false;
+      newMap = newMap.map(t => {
+        if (t.id !== action.tileId) return t;
+        return {
+          ...t,
+          owner: currentPlayer,
+          capturedByOwners: alreadyCapturedByPlayer ? t.capturedByOwners : [...(t.capturedByOwners ?? []), currentPlayer],
+        };
+      });
+      newUnits = newUnits.map(u => u.id === action.unitId ? { ...u, completed: true } : u);
+      if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].buildingsSecured += 1;
+      if (!alreadyCapturedByPlayer) {
+        newUnits = grantUnitXp(newUnits, unit.id, 1, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
       }
+      fx.sound('capture');
+      logEntry = createLog(currentRound, currentPlayer, `Secured a Building`, 'ECONOMY');
       break;
     }
     case 'HEIST': {
       const unit = newUnits.find(u => u.id === action.unitId);
-      if (unit) {
-        const bankTile = newMap.find(t => t.id === action.tileId);
-        newUnits = newUnits.map(u => u.id === action.unitId ? { ...u, completed: true } : u);
-        newMap = newMap.map(t => t.id === action.tileId ? { ...t, hackProgress: 100 } : t);
-        if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].heists += 1;
-        newUnits = grantUnitXp(newUnits, unit.id, 2, newMap, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
-        fx.sound('heist');
+      if (!unit) return reject('Unit not found');
+      spendCp(actionCost(action));
+      const bankTile = getTileByIdFast(newMap, action.tileId, gridSize);
+      newUnits = newUnits.map(u => u.id === action.unitId ? { ...u, completed: true } : u);
+      newMap = newMap.map(t => t.id === action.tileId ? { ...t, hackProgress: 100 } : t);
+      if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].heists += 1;
+      newUnits = grantUnitXp(newUnits, unit.id, 2, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
+      fx.sound('heist');
 
-        if (options.autoBankReward) {
-          const { gold: goldReward, cp: cpReward } = getEffectiveBankRewards(bankTile, settings.mutators);
-          const hasOtherActiveUnits = newUnits.some(u => u.owner === currentPlayer && !u.completed);
-          const chooseCp = newCp < 8 && hasOtherActiveUnits;
-          if (chooseCp) {
-            nextPlayerCp[currentPlayer] += cpReward;
-            logEntry = createLog(currentRound, currentPlayer, `Heist Successful! AI claimed +${cpReward} CP`, 'ECONOMY');
-          } else {
-            nextPlayerGold[currentPlayer] += goldReward;
-            logEntry = createLog(currentRound, currentPlayer, `Heist Successful! AI claimed +${goldReward} Gold`, 'ECONOMY');
-          }
-          newBankReward = null;
+      if (options.autoBankReward) {
+        const { gold: goldReward, cp: cpReward } = getEffectiveBankRewards(bankTile, settings.mutators);
+        const hasOtherActiveUnits = newUnits.some(u => u.owner === currentPlayer && !u.completed);
+        const chooseCp = nextPlayerCp[currentPlayer] < 8 && hasOtherActiveUnits;
+        if (chooseCp) {
+          nextPlayerCp[currentPlayer] += cpReward;
+          logEntry = createLog(currentRound, currentPlayer, `Heist Successful! AI claimed +${cpReward} CP`, 'ECONOMY');
         } else {
-          newBankReward = { tileId: action.tileId, playerId: currentPlayer };
-          logEntry = createLog(currentRound, currentPlayer, `Heist Successful! Bank Vault Breached`, 'ECONOMY');
+          nextPlayerGold[currentPlayer] += goldReward;
+          logEntry = createLog(currentRound, currentPlayer, `Heist Successful! AI claimed +€${goldReward} Euros`, 'ECONOMY');
         }
+        newBankReward = null;
+      } else {
+        newBankReward = { tileId: action.tileId, playerId: currentPlayer };
+        logEntry = createLog(currentRound, currentPlayer, `Heist Successful! Bank Vault Breached`, 'ECONOMY');
       }
       break;
     }
     case 'BANK_REWARD': {
       if (!bankRewardPending) return reject('No vault to claim');
-      const tile = newMap.find(t => t.id === bankRewardPending.tileId);
+      spendCp(actionCost(action));
+      const tile = getTileByIdFast(newMap, bankRewardPending.tileId, gridSize);
       const { gold: goldReward, cp: cpReward } = getEffectiveBankRewards(tile, settings.mutators);
       const pid = bankRewardPending.playerId;
       if (action.choice === 'GOLD') nextPlayerGold[pid] = nextPlayerGold[pid] + goldReward;
@@ -439,166 +597,168 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     case 'ATTACK': {
       const att = newUnits.find(u => u.id === action.attackerId);
       const tar = newUnits.find(u => u.id === action.targetUnitId);
-      if (att && tar) {
-        const attTile = mapData.find(t => t.id === att.tileId);
-        const tarTile = mapData.find(t => t.id === tar.tileId);
-        const { damage: finalDmg } = calculateAttackOutcome(att, attTile, tarTile, tar.owner, tar);
-        const remainingHp = tar.hp - finalDmg;
-        const isKill = remainingHp <= 0;
+      if (!att || !tar) return reject('Invalid attack target');
+      spendCp(actionCost(action));
+      const attTile = getTileByIdFast(mapData, att.tileId, gridSize);
+      const tarTile = getTileByIdFast(mapData, tar.tileId, gridSize);
+      const crossfireSupporters = tarTile ? getCrossfireSupporters(att, tarTile, newUnits, mapData, weather, gridSize) : [];
+      const crossfireBonus = crossfireSupporters.length > 0 ? COMBAT_BONUSES.CROSSFIRE_DAMAGE : 0;
+      const { damage: finalDmg } = calculateAttackOutcome(att, attTile, tarTile, tar.owner, tar, crossfireBonus);
+      const remainingHp = tar.hp - finalDmg;
+      const isKill = remainingHp <= 0;
 
-        fx.sound(att.type === 'SNIPER' ? 'sniper' : 'attack');
-        fx.sound('hit');
-        if (attTile && tarTile) {
-          fx.projectile(attTile, tarTile, att.type === 'SNIPER' ? 'LASER' : 'BULLET');
-          fx.popup(tarTile, `-${finalDmg}`, '#FF0000', 10);
-          fx.shake(finalDmg > 5 ? 12 : 4);
-        }
-
-        const wasOverwatching = Boolean(tar.isOverwatching);
-        newUnits = newUnits.map(u => {
-          if (u.id === tar.id) {
-            return { ...u, hp: remainingHp, isOverwatching: (finalDmg > 0 ? false : u.isOverwatching) };
-          }
-          if (u.id === att.id) {
-            return {
-              ...u,
-              completed: true,
-              ammo: u.ammo - 1,
-              damageDealt: (u.damageDealt ?? 0) + finalDmg,
-              kills: (u.kills ?? 0) + (isKill ? 1 : 0),
-            };
-          }
-          return u;
-        });
-
-        let msg = `${UNIT_STATS[att.type].name} hit ${UNIT_STATS[tar.type].name} for ${finalDmg} dmg`;
-        if (isKill) {
-          newUnits = newUnits.filter(u => u.id !== tar.id);
-          newGraveyard.push({ id: tar.id, type: tar.type, owner: tar.owner, turnsUntilRespawn: RESPAWN_TIMERS[tar.type] });
-          msg += ' (KILL)';
-        } else if (wasOverwatching && finalDmg > 0) {
-          if (tarTile) fx.popup(tarTile, 'SUPPRESSED!', '#FF9800', 28);
-          extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[tar.type].name} Overwatch SUPPRESSED!`, 'COMBAT'));
-        }
-
-        newUnits = applyCombatOutcomeToStatsAndXp({
-          attackerId: att.id,
-          attackerOwner: currentPlayer,
-          attTile,
-          victim: tar,
-          dmg: finalDmg,
-          isKill,
-          unitsList: newUnits,
-          map: newMap,
-          round: currentRound,
-          nextPlayerGold,
-          nextMatchStats,
-          extraLogs,
-          fx,
-        });
-        logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
+      fx.sound(att.type === 'SNIPER' ? 'sniper' : 'attack');
+      fx.sound('hit');
+      if (attTile && tarTile) {
+        fx.projectile(attTile, tarTile, att.type === 'SNIPER' ? 'LASER' : 'BULLET');
+        fx.popup(tarTile, `-${finalDmg}`, '#FF0000', 10);
+        if (crossfireBonus > 0) fx.popup(tarTile, `CROSSFIRE +${crossfireBonus}`, '#F59E0B', 26);
+        fx.shake(finalDmg > 5 ? 12 : 4);
       }
+
+      newUnits = newUnits.map(u => {
+        if (u.id === att.id) {
+          return {
+            ...u,
+            completed: true,
+            ammo: u.ammo - 1,
+            damageDealt: (u.damageDealt ?? 0) + finalDmg,
+            kills: (u.kills ?? 0) + (isKill ? 1 : 0),
+          };
+        }
+        return u;
+      });
+
+      const hitResult = applyUnitHit({
+        unitsList: newUnits,
+        target: tar,
+        targetTile: tarTile,
+        dmg: finalDmg,
+        suppressLogPlayerId: currentPlayer,
+        suppressMessage: `${UNIT_STATS[tar.type].name} Overwatch SUPPRESSED!`,
+        graveyard: newGraveyard,
+        round: currentRound,
+        extraLogs,
+        fx,
+      });
+      newUnits = applyCombatOutcomeToStatsAndXp({
+        attackerId: att.id,
+        attackerOwner: currentPlayer,
+        attTile,
+        victim: tar,
+        dmg: finalDmg,
+        isKill: hitResult.killed,
+        unitsList: hitResult.unitsList,
+        map: newMap,
+        gridSize,
+        round: currentRound,
+        nextPlayerGold,
+        nextMatchStats,
+        extraLogs,
+        fx,
+      });
+      const msg = `${UNIT_STATS[att.type].name} hit ${UNIT_STATS[tar.type].name} for ${finalDmg} dmg${crossfireBonus > 0 ? ' (Crossfire)' : ''}${hitResult.killed ? ' (KILL)' : ''}`;
+      logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
       break;
     }
     case 'SIEGE': {
       const att = newUnits.find(u => u.id === action.unitId);
-      const baseTile = newMap.find(t => t.id === action.tileId);
-      if (att && baseTile && baseTile.hp !== undefined) {
-        const attTile = mapData.find(t => t.id === att.tileId);
-        const siegeDmg = calculateSiegeDamage(att, attTile);
-        const newHp = Math.max(0, baseTile.hp - siegeDmg);
-        newMap = newMap.map(t => t.id === action.tileId ? { ...t, hp: newHp } : t);
-        if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].damageDealt += siegeDmg;
-        newUnits = newUnits.map(u => u.id === att.id ? {
-          ...u,
-          completed: true,
-          ammo: u.ammo - 1,
-          damageDealt: (u.damageDealt ?? 0) + siegeDmg,
-        } : u);
+      const baseTile = getTileByIdFast(newMap, action.tileId, gridSize);
+      if (!att || !baseTile || baseTile.hp === undefined) return reject('Invalid siege target');
+      spendCp(actionCost(action));
+      const attTile = getTileByIdFast(mapData, att.tileId, gridSize);
+      const siegeDmg = calculateSiegeDamage(att, attTile);
+      const newHp = Math.max(0, baseTile.hp - siegeDmg);
+      newMap = newMap.map(t => t.id === action.tileId ? { ...t, hp: newHp } : t);
+      if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].damageDealt += siegeDmg;
+      newUnits = newUnits.map(u => u.id === att.id ? {
+        ...u,
+        completed: true,
+        ammo: u.ammo - 1,
+        damageDealt: (u.damageDealt ?? 0) + siegeDmg,
+      } : u);
 
-        if (attTile) {
-          fx.projectile(attTile, baseTile, 'MISSILE');
-          fx.popup(baseTile, `-${siegeDmg}`, '#FF4500', 20);
-          fx.shake(newHp === 0 ? 18 : 8);
-        }
-        fx.sound(newHp === 0 ? 'explosion' : 'attack');
-        if (newHp > 0) fx.sound('hit');
-
-        let msg = `${UNIT_STATS[att.type].name} sieged Base (-${siegeDmg} HP)`;
-        if (newHp === 0) {
-          const eliminatedId = baseTile.owner!;
-          nextPlayerStatus[eliminatedId] = 'ELIMINATED';
-          const wipedCount = newUnits.filter(u => u.owner === eliminatedId).length;
-          if (nextMatchStats[eliminatedId]) nextMatchStats[eliminatedId].unitsLost += wipedCount;
-          newUnits = newUnits.filter(u => u.owner !== eliminatedId);
-          newUnits = grantUnitXp(newUnits, att.id, 2, newMap, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
-          msg += ' - BASE DESTROYED';
-        }
-        logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
+      if (attTile) {
+        fx.projectile(attTile, baseTile, 'MISSILE');
+        fx.popup(baseTile, `-${siegeDmg}`, '#FF4500', 20);
+        fx.shake(newHp === 0 ? 18 : 8);
       }
+      fx.sound(newHp === 0 ? 'explosion' : 'attack');
+      if (newHp > 0) fx.sound('hit');
+
+      let msg = `${UNIT_STATS[att.type].name} sieged Base (-${siegeDmg} HP)`;
+      if (newHp === 0) {
+        const eliminatedId = baseTile.owner!;
+        nextPlayerStatus[eliminatedId] = 'ELIMINATED';
+        const wipedCount = newUnits.filter(u => u.owner === eliminatedId).length;
+        if (nextMatchStats[eliminatedId]) nextMatchStats[eliminatedId].unitsLost += wipedCount;
+        newUnits = newUnits.filter(u => u.owner !== eliminatedId);
+        newUnits = grantUnitXp(newUnits, att.id, 2, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
+        msg += ' - BASE DESTROYED';
+      }
+      logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
       break;
     }
     case 'DEMOLISH': {
       const att = newUnits.find(u => u.id === action.unitId);
-      const barrierTile = newMap.find(t => t.id === action.tileId);
-      if (att && barrierTile && barrierTile.hp !== undefined) {
-        const attTile = mapData.find(t => t.id === att.tileId);
-        const dmg = calculateDemolishDamage(att, attTile);
-        const newHp = Math.max(0, barrierTile.hp - dmg);
+      const barrierTile = getTileByIdFast(newMap, action.tileId, gridSize);
+      if (!att || !barrierTile || barrierTile.hp === undefined) return reject('Invalid demolish target');
+      spendCp(actionCost(action));
+      const attTile = getTileByIdFast(mapData, att.tileId, gridSize);
+      const dmg = calculateDemolishDamage(att, attTile);
+      const newHp = Math.max(0, barrierTile.hp - dmg);
 
-        if (attTile) {
-          fx.projectile(attTile, barrierTile, 'MISSILE');
-          fx.popup(barrierTile, `-${dmg}`, '#FFA500', 20);
-          fx.shake(5);
-        }
-        fx.sound(newHp === 0 ? 'explosion' : 'attack');
-
-        newMap = newMap.map(t => t.id === action.tileId ? { ...t, hp: newHp } : t);
-        newUnits = newUnits.map(u => u.id === att.id ? { ...u, completed: true, ammo: u.ammo - 1 } : u);
-
-        let msg = `${UNIT_STATS[att.type].name} attacked Barrier (-${dmg} HP)`;
-        if (newHp === 0) {
-          // A destroyed barrier leaves plains
-          newMap = newMap.map(t => t.id === action.tileId ? { ...t, type: 'PLAINS', hp: undefined, maxHp: undefined, height: 1 } : t);
-          msg = `${UNIT_STATS[att.type].name} destroyed a Barrier!`;
-        }
-        logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
+      if (attTile) {
+        fx.projectile(attTile, barrierTile, 'MISSILE');
+        fx.popup(barrierTile, `-${dmg}`, '#FFA500', 20);
+        fx.shake(5);
       }
+      fx.sound(newHp === 0 ? 'explosion' : 'attack');
+
+      newMap = newMap.map(t => t.id === action.tileId ? { ...t, hp: newHp } : t);
+      newUnits = newUnits.map(u => u.id === att.id ? { ...u, completed: true, ammo: u.ammo - 1 } : u);
+
+      let msg = `${UNIT_STATS[att.type].name} attacked Barrier (-${dmg} HP)`;
+      if (newHp === 0) {
+        // A destroyed barrier leaves plains
+        newMap = newMap.map(t => t.id === action.tileId ? { ...t, type: 'PLAINS', hp: undefined, maxHp: undefined, height: 1 } : t);
+        msg = `${UNIT_STATS[att.type].name} destroyed a Barrier!`;
+      }
+      logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
       break;
     }
     case 'SPAWN': {
-      if ((nextPlayerRespawns[currentPlayer] || 0) >= getEffectiveMaxRespawns(settings.mutators)) break;
-      const goldCost = action.goldCost || 0;
-      if (newGold < goldCost) break;
-      newGold -= goldCost;
-      nextPlayerGold[currentPlayer] = newGold;
-
-      if (action.deadUnitId) {
-        const unitType = action.unitType as UnitType;
-        const baseHp = UNIT_STATS[unitType].hp;
-        const maxAmmoCap = getEffectiveUnitAmmo(unitType, settings.mutators);
-        newGraveyard = newGraveyard.filter(u => u.id !== action.deadUnitId);
-        nextPlayerRespawns[currentPlayer] = (nextPlayerRespawns[currentPlayer] || 0) + 1;
-        newUnits.push({
-          id: action.deadUnitId, type: unitType, owner: currentPlayer,
-          tileId: action.tileId, hp: baseHp,
-          maxHp: baseHp,
-          ammo: maxAmmoCap,
-          maxAmmo: maxAmmoCap,
-          xp: 0, rank: 0, kills: 0, damageDealt: 0,
-          hasMoved: true, completed: true, isOverwatching: false,
-        });
-        logEntry = createLog(currentRound, currentPlayer, `Redeployed ${UNIT_STATS[unitType].name}`, 'ECONOMY');
+      if ((nextPlayerRespawns[currentPlayer] || 0) >= getEffectiveMaxRespawns(settings.mutators)) {
+        return reject('No respawns left');
       }
+      const goldCost = action.goldCost || 0;
+      if (nextPlayerGold[currentPlayer] < goldCost) return reject('Not enough Euros');
+      if (!action.deadUnitId) return reject('Missing unit to redeploy');
+      spendCp(actionCost(action));
+      spendGold(goldCost);
+      const unitType = action.unitType as UnitType;
+      newGraveyard = newGraveyard.filter(u => u.id !== action.deadUnitId);
+      nextPlayerRespawns[currentPlayer] = (nextPlayerRespawns[currentPlayer] || 0) + 1;
+      newUnits.push(createUnit({
+        id: action.deadUnitId,
+        type: unitType,
+        owner: currentPlayer,
+        tileId: action.tileId,
+        mutators: settings.mutators,
+        hasMoved: true,
+        completed: true,
+      }));
+      logEntry = createLog(currentRound, currentPlayer, `Redeployed ${UNIT_STATS[unitType].name}`, 'ECONOMY');
       break;
     }
     case 'BUY_DROP': {
       const goldCost = action.goldCost || 0;
+      if (nextPlayerGold[currentPlayer] < goldCost) return reject('Not enough Euros');
+      spendCp(actionCost(action));
+      spendGold(goldCost);
       const itemKey = action.itemKey;
-      newGold -= goldCost;
-      nextPlayerGold[currentPlayer] = newGold;
       // The AI's drop lands at once, on the tile it picked
-      const lootItem = itemKey === 'AMMO_REFILL' ? 'AMMO' : 'MEDKIT';
+      const lootItem = itemKeyToLoot(itemKey);
       newMap = newMap.map(t => t.id === action.tileId ? { ...t, loot: lootItem } : t);
       logEntry = createLog(currentRound, currentPlayer, `Purchased ${SHOP_ITEMS[itemKey as keyof typeof SHOP_ITEMS].name}`, 'ECONOMY');
       break;
@@ -606,29 +766,40 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     case 'BUY_ITEM': {
       if (!isConsumable(action.itemKey)) return reject('Not a supply item');
       const item = SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS];
-      if (newGold < item.cost) return reject('Not enough gold');
-      const lootType: 'AMMO' | 'MEDKIT' = action.itemKey === 'AMMO_REFILL' ? 'AMMO' : 'MEDKIT';
-      // The drop lands 3–9 tiles from your base, on the first suitable spot found
-      const base = newMap.find(t => t.type === 'BASE' && t.owner === currentPlayer);
-      let targetTileId = base?.id;
-      if (base) {
-        for (let i = 0; i < 20; i++) {
-          const dist = 3 + Math.floor(Math.random() * 7);
-          const angle = Math.random() * Math.PI * 2;
-          const rx = Math.round(base.x + Math.cos(angle) * dist);
-          const ry = Math.round(base.y + Math.sin(angle) * dist);
-          if (rx >= 0 && rx < gridSize && ry >= 0 && ry < gridSize) {
-            const t = newMap[ry * gridSize + rx];
-            if (canHoldDrop(t)) {
-              targetTileId = t.id;
-              break;
+      if (nextPlayerGold[currentPlayer] < item.cost) return reject('Not enough Euros');
+      const lootType = itemKeyToLoot(action.itemKey);
+      let targetTileId: string | undefined;
+      if (action.tileId !== undefined && settings.gameMode === 'PVE') {
+        if (!getSupplyDropTargets(state, currentPlayer).has(action.tileId)) return reject('Invalid drop zone');
+        targetTileId = action.tileId;
+      } else {
+        // Random drop: lands 3–9 tiles from HQ, or a random valid zone near friendly units on base-less maps
+        const base = newMap.find(t => t.type === 'BASE' && t.owner === currentPlayer);
+        targetTileId = base?.id;
+        if (base) {
+          for (let i = 0; i < 20; i++) {
+            const dist = 3 + Math.floor(Math.random() * 7);
+            const angle = Math.random() * Math.PI * 2;
+            const rx = Math.round(base.x + Math.cos(angle) * dist);
+            const ry = Math.round(base.y + Math.sin(angle) * dist);
+            if (rx >= 0 && rx < gridSize && ry >= 0 && ry < gridSize) {
+              const t = newMap[ry * gridSize + rx];
+              if (canHoldDrop(t)) {
+                targetTileId = t.id;
+                break;
+              }
             }
+          }
+        } else {
+          const candidates = Array.from(getSupplyDropTargets(state, currentPlayer));
+          if (candidates.length > 0) {
+            targetTileId = candidates[Math.floor(Math.random() * candidates.length)];
           }
         }
       }
       if (!targetTileId) return reject('Nowhere to drop supplies');
-      newGold -= item.cost;
-      nextPlayerGold[currentPlayer] = newGold;
+      spendCp(actionCost(action));
+      spendGold(item.cost);
       newPendingDrops = [...pendingDrops, { playerId: currentPlayer, tileId: targetTileId, item: lootType }];
       logEntry = createLog(currentRound, currentPlayer, `Purchased ${item.name}`, 'ECONOMY');
       break;
@@ -636,25 +807,80 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     case 'BUILD': {
       if (!isConstruct(action.itemKey)) return reject('Not something you can build');
       const item = SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS];
-      const tile = newMap.find(t => t.id === action.tileId);
-      if (!tile || !canConstructOnTile(action.itemKey, tile, newUnits)) return reject("Can't build there");
-      if (newGold < item.cost) return reject('Not enough gold');
-      let newType: TerrainType = tile.type;
-      let newHeight = tile.height;
-      let newHp: number | undefined;
-      let newMaxHp: number | undefined;
+      if (nextPlayerGold[currentPlayer] < item.cost) return reject('Not enough Euros');
+      const ctx = { playerId: currentPlayer, mapData: newMap, mines: newMines };
+
       if (action.itemKey === 'BARRIER') {
-        newType = 'BARRIER';
-        newHeight = 1;
-        newHp = BARRIER_STATS.HP;
-        newMaxHp = BARRIER_STATS.HP;
-      } else if (action.itemKey === 'BRIDGE') {
-        newType = action.variant === 'V' ? 'BRIDGE_V' : resolveBridgeVariant(tile, newMap, gridSize);
-        newHeight = 1;
+        const targetIds = action.tileIds && action.tileIds.length > 0
+          ? Array.from(new Set(action.tileIds))
+          : [action.tileId];
+        if (targetIds.length < 1 || targetIds.length > BARRIER_STATS.BUILD_COUNT) {
+          return reject(`Choose 1 to ${BARRIER_STATS.BUILD_COUNT} tiles for Barrier`);
+        }
+        const targetTiles: Tile[] = [];
+        for (const tid of targetIds) {
+          const t = getTileByIdFast(newMap, tid, gridSize);
+          if (!t || !canConstructOnTile('BARRIER', t, newUnits, ctx)) return reject("Can't build there");
+          targetTiles.push(t);
+        }
+        spendCp(actionCost(action));
+        spendGold(item.cost);
+        const targetSet = new Set(targetIds);
+        newMap = newMap.map(t =>
+          targetSet.has(t.id)
+            ? { ...t, type: 'BARRIER' as const, height: 1, hp: BARRIER_STATS.HP, maxHp: BARRIER_STATS.HP }
+            : t
+        );
+        fx.sound('capture');
+        const coords = targetTiles.map(t => `(${t.x},${t.y})`).join(', ');
+        logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at ${coords}`, 'ECONOMY');
+        break;
       }
-      newMap = newMap.map(t => t.id === tile.id ? { ...t, type: newType, height: newHeight, hp: newHp, maxHp: newMaxHp } : t);
-      newGold -= item.cost;
-      nextPlayerGold[currentPlayer] = newGold;
+
+      if (action.itemKey === 'LAND_MINE') {
+        const tile = getTileByIdFast(newMap, action.tileId, gridSize);
+        if (!tile) return reject("Can't build there");
+        const unitsForBuild = settings.fogOfWar
+          ? newUnits.filter(u => u.owner === currentPlayer || visibleSet(state, currentPlayer).has(u.tileId))
+          : newUnits;
+        if (!canConstructOnTile('LAND_MINE', tile, unitsForBuild, ctx)) return reject("Can't build there");
+        spendCp(actionCost(action));
+        spendGold(item.cost);
+        const hiddenEnemy = newUnits.find(u => u.tileId === tile.id && u.owner !== currentPlayer);
+        if (hiddenEnemy) {
+          const mineRes = detonateMineOnUnit({
+            victim: hiddenEnemy,
+            mineOwner: currentPlayer,
+            tile,
+            damage: LAND_MINE_STATS.DAMAGE,
+            unitsList: newUnits,
+            graveyardList: newGraveyard,
+            round: currentRound,
+            nextPlayerGold,
+            nextMatchStats,
+            extraLogs,
+            fx,
+          });
+          newUnits = mineRes.units;
+          extraLogs.push(mineRes.mineLog);
+        } else {
+          newMines = [...newMines, { id: `mine_${turnCounter}_${newMines.length}_${tile.id}`, tileId: tile.id, owner: currentPlayer }];
+          fx.sound('click');
+        }
+        logEntry = createLog(currentRound, currentPlayer, `Planted Land Mine at (${tile.x},${tile.y})`, 'ECONOMY');
+        break;
+      }
+
+      const tile = getTileByIdFast(newMap, action.tileId, gridSize);
+      if (!tile || !canConstructOnTile(action.itemKey, tile, newUnits, ctx)) return reject("Can't build there");
+      const newType: TerrainType = action.variant === 'V'
+        ? 'BRIDGE_V'
+        : action.variant === 'H'
+          ? 'BRIDGE'
+          : resolveBridgeVariant(tile, newMap, gridSize);
+      spendCp(actionCost(action));
+      spendGold(item.cost);
+      newMap = newMap.map(t => t.id === tile.id ? { ...t, type: newType, height: 1, hp: undefined, maxHp: undefined } : t);
       fx.sound('capture');
       logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at (${tile.x},${tile.y})`, 'ECONOMY');
       break;
@@ -664,9 +890,13 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       logEntry = createLog(currentRound, currentPlayer, `Ended Turn`, 'INFO');
 
       // Supplies bought this turn land now
-      pendingDrops.forEach(drop => {
-        newMap = newMap.map(t => (t.id === drop.tileId ? { ...t, loot: drop.item } : t));
-      });
+      for (const drop of pendingDrops) {
+        const dropTile = getTileByIdFast(newMap, drop.tileId, gridSize);
+        if (dropTile) {
+          const idx = dropTile.y * gridSize + dropTile.x;
+          newMap[idx] = { ...newMap[idx], loot: drop.item };
+        }
+      }
       newPendingDrops = [];
 
       const nextId = nextActivePlayer(currentPlayer, settings.playerCount, nextPlayerStatus);
@@ -696,7 +926,15 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       if (overwatchRefund > 0) {
         extraLogs.push(createLog(currentRound, nextId, `Unfired Overwatch refunded +${overwatchRefund} CP`, 'INFO'));
       }
-      nextPlayerGold[nextId] += GOLD_SETTINGS.INCOME_PER_TURN;
+      let ownedBuildings = 0;
+      for (let i = 0; i < newMap.length; i++) {
+        if (newMap[i].type === 'BUILDING' && newMap[i].owner === nextId) ownedBuildings++;
+      }
+      const buildingGold = ownedBuildings * GOLD_SETTINGS.BUILDING_INCOME;
+      nextPlayerGold[nextId] += GOLD_SETTINGS.INCOME_PER_TURN + buildingGold;
+      if (buildingGold > 0) {
+        extraLogs.push(createLog(currentRound, nextId, `Territory income: +€${buildingGold} from ${ownedBuildings} Building${ownedBuildings > 1 ? 's' : ''}`, 'ECONOMY'));
+      }
 
       newGraveyard = newGraveyard.map(u => {
         if (u.owner === nextId && u.turnsUntilRespawn > 0) return { ...u, turnsUntilRespawn: u.turnsUntilRespawn - 1 };
@@ -707,7 +945,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       // this turn (it can still act).
       newUnits = newUnits.map(u => {
         if (u.owner !== nextId) return u;
-        const tile = newMap.find(t => t.id === u.tileId);
+        const tile = getTileByIdFast(newMap, u.tileId, gridSize);
         const onQuicksand = tile?.type === 'QUICKSAND';
         return { ...u, hasMoved: onQuicksand, completed: false, isRooted: false, isOverwatching: false };
       });
@@ -717,12 +955,13 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       if (settings.victoryMode === 'DEATHMATCH' && settings.doomsdayEnabled) {
         newMap = updateDoomsdayState(newMap, newTotalTurns, gridSize);
         const lavaTiles = new Set(newMap.filter(t => t.hazardState === 'LAVA').map(t => t.id));
+        newMines = newMines.filter(m => !lavaTiles.has(m.tileId));
         const meltingUnits = newUnits.filter(u => lavaTiles.has(u.tileId));
         if (meltingUnits.length > 0) {
           newUnits = newUnits.filter(u => !lavaTiles.has(u.tileId));
           meltingUnits.forEach(u => {
             if (nextMatchStats[u.owner]) nextMatchStats[u.owner].unitsLost += 1;
-            newGraveyard.push({ id: u.id, type: u.type, owner: u.owner, turnsUntilRespawn: RESPAWN_TIMERS[u.type] });
+            pushGraveyard(newGraveyard, u);
             extraLogs.push(createLog(currentRound, -1, `${UNIT_STATS[u.type].name} melted in Lava!`, 'COMBAT'));
           });
         }
@@ -738,37 +977,38 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         projType: 'LASER' | 'MISSILE',
         colorHex: string,
       ) => {
-        const inRange = candidates.filter(u => {
-          const ut = newMap.find(t => t.id === u.tileId);
-          return ut ? Math.abs(ut.x - origin.x) + Math.abs(ut.y - origin.y) <= range : false;
-        });
-        if (inRange.length === 0) return;
+        let target: Unit | null = null;
+        for (const u of candidates) {
+          const ut = getTileByIdFast(newMap, u.tileId, gridSize);
+          if (!ut || getManhattanDistance(ut, origin) > range) continue;
+          if (!target || u.hp < target.hp) target = u;
+        }
+        if (!target) return;
 
-        inRange.sort((a, b) => a.hp - b.hp);
-        const target = inRange[0];
-        const newHp = target.hp - dmg;
-        const tarTile = newMap.find(t => t.id === target.tileId);
+        const tarTile = getTileByIdFast(newMap, target.tileId, gridSize);
         if (tarTile) {
           fx.projectile(origin, tarTile, projType);
           fx.popup(tarTile, `-${dmg}`, colorHex, 14);
-          fx.shake(newHp <= 0 ? 10 : 4);
+          fx.shake(target.hp - dmg <= 0 ? 10 : 4);
         }
 
-        const targetWasOverwatching = Boolean(target.isOverwatching);
         extraLogs.push(createLog(currentRound, -1, `${sourceLabel} hit P${target.owner + 1} ${UNIT_STATS[target.type].name} (-${dmg} HP)`, 'COMBAT'));
-        newUnits = newUnits.map(u => u.id === target.id ? {
-          ...u,
-          hp: newHp,
-          isOverwatching: (dmg > 0 ? false : u.isOverwatching),
-        } : u);
-        if (newHp <= 0) {
-          newUnits = newUnits.filter(u => u.id !== target.id);
+        const hit = applyUnitHit({
+          unitsList: newUnits,
+          target,
+          targetTile: tarTile,
+          dmg,
+          suppressLogPlayerId: target.owner,
+          suppressMessage: `${sourceLabel} suppressed ${UNIT_STATS[target.type].name}'s Overwatch!`,
+          graveyard: newGraveyard,
+          round: currentRound,
+          extraLogs,
+          fx,
+        });
+        newUnits = hit.unitsList;
+        if (hit.killed) {
           if (nextMatchStats[target.owner]) nextMatchStats[target.owner].unitsLost += 1;
-          newGraveyard.push({ id: target.id, type: target.type, owner: target.owner, turnsUntilRespawn: RESPAWN_TIMERS[target.type] });
           extraLogs.push(createLog(currentRound, -1, `${sourceLabel} killed P${target.owner + 1} ${UNIT_STATS[target.type].name}`, 'COMBAT'));
-        } else if (targetWasOverwatching && dmg > 0) {
-          if (tarTile) fx.popup(tarTile, 'SUPPRESSED!', '#FF9800', 28);
-          extraLogs.push(createLog(currentRound, target.owner, `${sourceLabel} suppressed ${UNIT_STATS[target.type].name}'s Overwatch!`, 'COMBAT'));
         }
       };
 
@@ -892,6 +1132,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       currentPlayer: actualNextPlayer,
       bankRewardPending: newBankReward,
       pendingDrops: newPendingDrops,
+      mines: newMines,
       gameLog: [...allNewLogs, ...state.gameLog].slice(0, MAX_LOG_ENTRIES),
     },
   };

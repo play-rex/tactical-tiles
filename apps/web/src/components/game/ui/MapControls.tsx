@@ -12,20 +12,36 @@ const Swatch: React.FC<{ color: string; label: string }> = ({ color, label }) =>
   </span>
 );
 
+const fitViewport = (viewport: ReturnType<typeof useViewportContext>['viewport']) => {
+  if (!viewport) return;
+  wakeBattleRenderer(450);
+  viewport.plugins.remove('animate');
+  frameMap(viewport);
+};
+
 /** What the turn buttons need: whether you can act and how many of your units still can. */
 const useTurnControls = () => {
-  const currentPlayer = useGameStore(state => state.currentPlayer);
-  const isAiTurn = useGameStore(state => state.isAiTurn);
-  const readyUnitCount = useGameStore(state => state.units.filter(u => u.owner === currentPlayer && !u.completed).length);
+  const readyUnitCount = useGameStore(state => {
+    let count = 0;
+    for (const u of state.units) {
+      if (u.owner === state.currentPlayer && !u.completed) count++;
+    }
+    return count;
+  });
+  const isMyTurn = useGameStore(state => !state.isAiTurn && state.winner === null);
+  const canUndoMove = useGameStore(
+    state => state.mode === 'LOCAL' && state.lastMoveSnapshot !== null && !state.isAiTurn && state.winner === null && !state.settings.fogOfWar
+  );
   const endTurn = useGameStore(state => state.endTurn);
   const selectNextReadyUnit = useGameStore(state => state.selectNextReadyUnit);
-  return { isMyTurn: !isAiTurn, readyUnitCount, endTurn, selectNextReadyUnit };
+  const undoLastMove = useGameStore(state => state.undoLastMove);
+  return { isMyTurn, readyUnitCount, canUndoMove, endTurn, selectNextReadyUnit, undoLastMove };
 };
 
 /** Under-map Cursor-Zone Dock pairing Legend + Camera Keys with Turn Controls. */
 export const MapControls: React.FC = () => {
   const { viewport } = useViewportContext();
-  const { isMyTurn, readyUnitCount, endTurn, selectNextReadyUnit } = useTurnControls();
+  const { isMyTurn, readyUnitCount, canUndoMove, endTurn, selectNextReadyUnit, undoLastMove } = useTurnControls();
 
   const handleZoomIn = () => {
     if (!viewport) return;
@@ -47,12 +63,7 @@ export const MapControls: React.FC = () => {
     });
   };
 
-  const handleReset = () => {
-    if (!viewport) return;
-    wakeBattleRenderer(450);
-    viewport.plugins.remove('animate');
-    frameMap(viewport);
-  };
+  const handleReset = () => fitViewport(viewport);
 
   return (
     <GeoCard style={{ width: '100%', flexShrink: 0 }}>
@@ -70,14 +81,14 @@ export const MapControls: React.FC = () => {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-            <Swatch color="#1D5EFF" label="Move" />
-            <Swatch color="#D93829" label="Attack" />
+            <Swatch color="#0284C7" label="Move Zone" />
+            <Swatch color="#EF4444" label="Attack Reticle" />
             <Swatch color="#FF9500" label="Overwatch / Action" />
             <Swatch color="#009153" label="Spawn" />
           </div>
 
           <div style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)', fontFamily: 'monospace' }}>
-            WASD / Drag • Scroll
+            WASD / Drag • Scroll{canUndoMove ? ' • Z Undo' : ''}
           </div>
         </div>
 
@@ -106,6 +117,16 @@ export const MapControls: React.FC = () => {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: 'auto' }}>
             <div style={{ width: '1px', height: '24px', background: 'var(--op-line)', marginRight: '4px' }} />
+            {canUndoMove && (
+              <GeoButton
+                variant="softAmber"
+                onClick={undoLastMove}
+                title="Undo Last Move (Shortcut: Z)"
+                coreStyle={{ padding: '6px 10px', whiteSpace: 'nowrap' }}
+              >
+                ↶ UNDO • Z
+              </GeoButton>
+            )}
             <GeoButton
               variant={isMyTurn && readyUnitCount > 0 ? 'softBlue' : 'default'}
               disabled={!isMyTurn || readyUnitCount === 0}
@@ -113,11 +134,11 @@ export const MapControls: React.FC = () => {
               title="Select Next Ready Unit (Shortcut: Tab)"
               coreStyle={{ padding: '6px 12px', whiteSpace: 'nowrap' }}
             >
-              NEXT UNIT ({readyUnitCount}) • TAB
+              NEXT ({readyUnitCount}) • TAB
             </GeoButton>
 
             <GeoButton
-              variant={isMyTurn ? 'mint' : 'default'}
+              variant={isMyTurn ? (readyUnitCount === 0 ? 'amber' : 'mint') : 'default'}
               disabled={!isMyTurn}
               onClick={endTurn}
               coreStyle={{
@@ -128,7 +149,7 @@ export const MapControls: React.FC = () => {
                 whiteSpace: 'nowrap',
               }}
             >
-              {isMyTurn ? 'END TURN →' : 'ENEMY TURN...'}
+              {isMyTurn ? (readyUnitCount === 0 ? 'DONE • END TURN →' : 'END TURN →') : 'ENEMY TURN...'}
             </GeoButton>
           </div>
         </div>
@@ -145,15 +166,10 @@ type Sheet = 'SQUADS' | 'INTEL' | null;
  */
 export const PhoneDock: React.FC<{ sheet: Sheet; onSheet: (s: Exclude<Sheet, null>) => void }> = ({ sheet, onSheet }) => {
   const { viewport } = useViewportContext();
-  const { isMyTurn, readyUnitCount, endTurn, selectNextReadyUnit } = useTurnControls();
+  const { isMyTurn, readyUnitCount, canUndoMove, endTurn, selectNextReadyUnit, undoLastMove } = useTurnControls();
   const unitSelected = useGameStore(state => state.selectedUnitId !== null || state.selectedTileId !== null);
 
-  const fit = () => {
-    if (!viewport) return;
-    wakeBattleRenderer(450);
-    viewport.plugins.remove('animate');
-    frameMap(viewport);
-  };
+  const fit = () => fitViewport(viewport);
   const tab = (id: Exclude<Sheet, null>, label: string, dot = false) => (
     <GeoButton
       variant={sheet === id ? 'blue' : 'default'}
@@ -180,6 +196,16 @@ export const PhoneDock: React.FC<{ sheet: Sheet; onSheet: (s: Exclude<Sheet, nul
           FIT
         </GeoButton>
         <span style={{ flex: 1 }} />
+        {canUndoMove && (
+          <GeoButton
+            variant="softAmber"
+            onClick={undoLastMove}
+            title="Undo last non-combat move"
+            coreStyle={{ padding: '8px 10px', fontWeight: 900 }}
+          >
+            ↶
+          </GeoButton>
+        )}
         <GeoButton
           variant={isMyTurn && readyUnitCount > 0 ? 'softBlue' : 'default'}
           disabled={!isMyTurn || readyUnitCount === 0}
@@ -190,12 +216,12 @@ export const PhoneDock: React.FC<{ sheet: Sheet; onSheet: (s: Exclude<Sheet, nul
           NEXT ({readyUnitCount})
         </GeoButton>
         <GeoButton
-          variant={isMyTurn ? 'mint' : 'default'}
+          variant={isMyTurn ? (readyUnitCount === 0 ? 'amber' : 'mint') : 'default'}
           disabled={!isMyTurn}
           onClick={endTurn}
           coreStyle={{ padding: '8px 12px', fontWeight: 900, whiteSpace: 'nowrap' }}
         >
-          {isMyTurn ? 'END TURN' : 'WAITING'}
+          {isMyTurn ? (readyUnitCount === 0 ? 'DONE • END TURN' : 'END TURN') : 'WAITING'}
         </GeoButton>
       </div>
     </GeoCard>

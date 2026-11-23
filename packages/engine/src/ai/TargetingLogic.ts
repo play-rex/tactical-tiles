@@ -11,12 +11,7 @@ interface CombatSimulationResult {
     hitChance: number;
 }
 
-const simulateCombat = (attacker: Unit, target: Unit, mapData: Tile[], gridSize: number): CombatSimulationResult => {
-    const attTile = getTileByIdFast(mapData, attacker.tileId, gridSize);
-    const tarTile = getTileByIdFast(mapData, target.tileId, gridSize);
-
-    if (!attTile || !tarTile) return { damageDealt: 0, potentialDamage: 0, isKill: false, hitChance: 0 };
-
+const simulateCombat = (attacker: Unit, attTile: Tile, target: Unit, tarTile: Tile): CombatSimulationResult => {
     const { damage: finalDmg } = calculateAttackOutcome(attacker, attTile, tarTile, target.owner, target);
 
     return {
@@ -33,44 +28,49 @@ export const findBestTarget = (
     mapData: Tile[],
     difficulty: AIDifficulty,
     weather: WeatherState,
-    gridSize: number
+    gridSize: number,
+    knownEnemies?: Unit[]
 ): { unit: Unit, score: number } | null => {
-    const enemies = allUnits.filter(u => u.owner !== attacker.owner);
+    const enemies = knownEnemies ?? allUnits.filter(u => u.owner !== attacker.owner);
     const attTile = getTileByIdFast(mapData, attacker.tileId, gridSize);
     if (!attTile || !canUnitAttackFromTile(attacker, attTile)) return null;
 
-    const effectiveRange = getUnitRange(attacker, mapData, weather);
+    const effectiveRange = getUnitRange(attacker, mapData, weather, attTile);
 
-    // Filter valid targets (Range & LOS)
-    const validTargets = enemies.filter(enemy => {
+    // Filter valid targets (Range & LOS) while keeping resolved tiles
+    const validTargets: { unit: Unit; tile: Tile; dist: number }[] = [];
+    for (const enemy of enemies) {
         const enemyTile = getTileByIdFast(mapData, enemy.tileId, gridSize);
-        if (!enemyTile) return false;
-        
-        const dist = getManhattanDistance(attTile, enemyTile);
-        if (dist > effectiveRange) return false;
+        if (!enemyTile) continue;
 
-        return hasLineOfSight(attTile, enemyTile, mapData, attacker.type, weather, gridSize);
-    });
+        const dist = getManhattanDistance(attTile, enemyTile);
+        if (dist > effectiveRange) continue;
+
+        if (hasLineOfSight(attTile, enemyTile, mapData, attacker.type, weather, gridSize)) {
+            validTargets.push({ unit: enemy, tile: enemyTile, dist });
+        }
+    }
 
     if (validTargets.length === 0) return null;
 
     // --- EASY MODE: Just Closest ---
     if (difficulty === 'EASY') {
-        const closest = validTargets.sort((a, b) => {
-            const ta = getTileByIdFast(mapData, a.tileId, gridSize)!;
-            const tb = getTileByIdFast(mapData, b.tileId, gridSize)!;
-            return getManhattanDistance(attTile, ta) - getManhattanDistance(attTile, tb);
-        })[0];
-        return { unit: closest, score: 50 };
+        let closest = validTargets[0];
+        for (let i = 1; i < validTargets.length; i++) {
+            if (validTargets[i].dist < closest.dist) {
+                closest = validTargets[i];
+            }
+        }
+        return { unit: closest.unit, score: 50 };
     }
 
     // --- MEDIUM & HARD: KILL MATRIX ---
     let bestTarget: Unit | null = null;
     let highestScore = -Infinity;
 
-    validTargets.forEach(target => {
+    for (const { unit: target, tile: tarTile } of validTargets) {
         let score = 0;
-        const sim = simulateCombat(attacker, target, mapData, gridSize);
+        const sim = simulateCombat(attacker, attTile, target, tarTile);
 
         // 1. DAMAGE & KILLS
         if (sim.isKill) {
@@ -104,7 +104,7 @@ export const findBestTarget = (
             highestScore = score;
             bestTarget = target;
         }
-    });
+    }
 
     return bestTarget ? { unit: bestTarget, score: highestScore } : null;
 };

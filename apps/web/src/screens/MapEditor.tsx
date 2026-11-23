@@ -1,7 +1,8 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { Stage, Container, Graphics, Text, useApp } from '@pixi/react';
+import { Stage, Container, Graphics, Text } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 import { SafeSprite } from '../components/game/SafeSprite';
+import { useCoalescedStageRender, useLowPowerStageOptions } from '../components/game/renderer/pixiStageUtils';
 import { useGameStore } from '../store/useGameStore';
 import { Tile, TerrainType, BuildingSubType } from '@tactical/engine/types';
 import {
@@ -17,22 +18,14 @@ import {
 import { preloadTextures } from '../core/graphics/TextureManager';
 import { bakeTacticalReconBoard, computeTerrainSignature } from '../core/graphics/TacticalReconRenderer';
 import { MapStorage } from '../core/storage/MapStorageManager';
-import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from '../components/ui/GeoPrimitives';
+import { GeoButton, GeoCard, GeoChip, GeoWell, hexToPixiColor, PLAYER_UI_THEME } from '../components/ui/GeoPrimitives';
 
 const EDITOR_ZONE_STYLE = new PIXI.TextStyle({ fill: '#FFFFFF', stroke: '#0F172A', strokeThickness: 3, fontSize: 13, fontWeight: 'bold' });
 const EDITOR_BANK_STYLE = new PIXI.TextStyle({ fill: '#FDE047', stroke: '#0F172A', strokeThickness: 3, fontSize: 11, fontWeight: 'bold' });
 
 /** Triggers a single coalesced WebGL render only when editor state changes (0% idle GPU). */
 const StaticEditorRenderer: React.FC<{ deps: unknown[] }> = ({ deps }) => {
-  const app = useApp();
-  useEffect(() => {
-    const rafId = requestAnimationFrame(() => {
-      if (!(app.renderer as any)?.destroyed) {
-        app.renderer.render(app.stage);
-      }
-    });
-    return () => cancelAnimationFrame(rafId);
-  }, [app, ...deps]);
+  useCoalescedStageRender(deps);
   return null;
 };
 
@@ -115,11 +108,11 @@ const RightIntelPanel: React.FC<{
 
           <Section title="Weather Possibilities">
             <ul style={{ paddingLeft: '18px', margin: 0, fontSize: '12px', color: 'var(--op-ink)', lineHeight: 1.7 }}>
-              <li><strong style={{ color: '#C2410C' }}>SCORCHED:</strong> Heat increases move cost (+1).</li>
-              <li><strong style={{ color: '#1344C4' }}>MONSOON:</strong> Rain slows heavy units on Plains.</li>
+              <li><strong style={{ color: '#C2410C' }}>SCORCHED:</strong> Heat doubles Plains &amp; Sand move cost.</li>
+              <li><strong style={{ color: '#1344C4' }}>MONSOON:</strong> Rain muddies Plains (2x move cost).</li>
               <li><strong style={{ color: '#475569' }}>FOG:</strong> Caps vision range at 2 tiles.</li>
-              <li><strong style={{ color: '#046C3E' }}>TAILWIND:</strong> +1 attack range &amp; faster Plains.</li>
-              <li><strong style={{ color: '#8D5B1C' }}>SANDSTORM:</strong> Blinds units (Vision 3).</li>
+              <li><strong style={{ color: '#046C3E' }}>TAILWIND:</strong> +1 attack range &amp; 0.5x Plains move cost.</li>
+              <li><strong style={{ color: '#8D5B1C' }}>SANDSTORM:</strong> Vision 3 &amp; 2x Sand move cost.</li>
             </ul>
           </Section>
         </div>
@@ -157,7 +150,7 @@ const RightIntelPanel: React.FC<{
     case 'SAND':
       description = 'Loose, shifting sand.';
       tactical = 'Exposed footing (+10% more damage taken).';
-      weatherNotes = 'SCORCHED increases move cost to 2.';
+      weatherNotes = 'SCORCHED and SANDSTORM double move cost (2x).';
       break;
     case 'DUNES':
       description = 'Large sand dunes obstructing view.';
@@ -177,7 +170,7 @@ const RightIntelPanel: React.FC<{
       break;
     case 'BANK':
       description = 'Financial storage vault.';
-      tactical = `Can be HEISTED for Gold/CP. Protected by Turrets (${BANK_STATS.DAMAGE} DMG).`;
+      tactical = `Can be HEISTED for Euros/CP. Protected by Turrets (${BANK_STATS.DAMAGE} DMG).`;
       break;
     case 'BUILDING':
       if (brushSettings.buildingType === 'WATCHTOWER') {
@@ -231,7 +224,7 @@ const RightIntelPanel: React.FC<{
           <Stat label="Defense Bonus" value={def < 0 ? `${def}%` : `+${def}%`} color={def < 0 ? 'var(--acc-red-ink)' : def > 0 ? 'var(--acc-mint-ink)' : 'var(--op-ink-muted)'} />
           {brush === 'BANK' && (
             <>
-              <Stat label="Gold Reward" value={brushSettings.bankGold} color="var(--acc-amber-ink)" />
+              <Stat label="Euros Reward" value={`€${brushSettings.bankGold}`} color="var(--acc-amber-ink)" />
               <Stat label="CP Reward" value={brushSettings.bankCp} color="var(--acc-blue-ink)" />
             </>
           )}
@@ -314,16 +307,19 @@ export const MapEditor: React.FC = () => {
     g.drawRect(-1.5, -1.5, totalPx + 3, totalPx + 3);
   }, [mapSize]);
 
-  const drawZonesAndGrid = useCallback((g: PIXI.Graphics) => {
+  const drawZones = useCallback((g: PIXI.Graphics) => {
     g.clear();
     mapData.forEach(tile => {
       if (tile.zone === undefined) return;
-      const colorStr = PLAYER_COLORS[tile.zone % 6] || '#ffffff';
-      const color = parseInt(colorStr.replace('#', '0x'), 16);
+      const color = hexToPixiColor(PLAYER_COLORS[tile.zone % 6] || '#ffffff');
       g.beginFill(color, 0.25);
       g.drawRect(tile.x * TILE_SIZE, tile.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
       g.endFill();
     });
+  }, [mapData]);
+
+  const drawGrid = useCallback((g: PIXI.Graphics) => {
+    g.clear();
     g.lineStyle(1, 0xffffff, 0.08);
     const totalPx = mapSize * TILE_SIZE;
     for (let i = 0; i <= mapSize; i++) {
@@ -333,7 +329,20 @@ export const MapEditor: React.FC = () => {
       g.lineTo(totalPx, i * TILE_SIZE);
     }
     g.lineStyle(0);
-  }, [mapData, mapSize]);
+  }, [mapSize]);
+
+  const stageOptions = useLowPowerStageOptions(0xCFD7E4);
+  const { baseCount, zonedTiles, bankTiles } = useMemo(() => {
+    let bases = 0;
+    const zoned: Tile[] = [];
+    const banks: Tile[] = [];
+    for (const tile of mapData) {
+      if (tile.type === 'BASE') bases++;
+      if (tile.zone !== undefined) zoned.push(tile);
+      if (tile.type === 'BANK') banks.push(tile);
+    }
+    return { baseCount: bases, zonedTiles: zoned, bankTiles: banks };
+  }, [mapData]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -495,8 +504,6 @@ export const MapEditor: React.FC = () => {
     );
   }
 
-  const baseCount = mapData.filter(t => t.type === 'BASE').length;
-
   return (
     <div
       className="opgeo-stage"
@@ -577,7 +584,7 @@ export const MapEditor: React.FC = () => {
                   {activeBrush === 'BANK' && (
                     <>
                       <div>
-                        <div style={{ fontSize: '12px', fontWeight: 700, marginBottom: '3px' }}>Max Gold: {brushSettings.bankGold}</div>
+                        <div style={{ fontSize: '12px', fontWeight: 700, marginBottom: '3px' }}>Max Euros: €{brushSettings.bankGold}</div>
                         <input className="opgeo-range" type="range" min="50" max="400" step="50" value={brushSettings.bankGold} onChange={e => setBrushSettings({ ...brushSettings, bankGold: parseInt(e.target.value, 10) })} style={{ width: '100%' }} />
                       </div>
                       <div>
@@ -670,14 +677,7 @@ export const MapEditor: React.FC = () => {
                     height={layout.height}
                     raf={false}
                     renderOnComponentChange={false}
-                    options={{
-                      background: 0xCFD7E4,
-                      backgroundAlpha: 1,
-                      antialias: false,
-                      autoDensity: true,
-                      powerPreference: 'low-power',
-                      resolution: Math.min(window.devicePixelRatio || 1, 1.25),
-                    }}
+                    options={stageOptions}
                   >
                   <StaticEditorRenderer deps={[layout, bakedEditorBoard, mapData, mode]} />
                   <Container x={layout.offsetX} y={layout.offsetY} scale={layout.scale}>
@@ -691,32 +691,29 @@ export const MapEditor: React.FC = () => {
                       height={mapSize * TILE_SIZE}
                     />
 
-                    <Graphics eventMode="none" draw={drawZonesAndGrid} />
+                    <Graphics eventMode="none" draw={drawZones} />
+                    <Graphics eventMode="none" draw={drawGrid} />
 
-                    {mode === 'ZONE' && mapData.map(tile =>
-                      tile.zone !== undefined ? (
-                        <Text
-                          key={`z_${tile.id}`}
-                          text={`Z${tile.zone + 1}`}
-                          x={tile.x * TILE_SIZE + 5}
-                          y={tile.y * TILE_SIZE + 6}
-                          style={EDITOR_ZONE_STYLE}
-                        />
-                      ) : null
-                    )}
+                    {mode === 'ZONE' && zonedTiles.map(tile => (
+                      <Text
+                        key={`z_${tile.id}`}
+                        text={`Z${tile.zone! + 1}`}
+                        x={tile.x * TILE_SIZE + 5}
+                        y={tile.y * TILE_SIZE + 6}
+                        style={EDITOR_ZONE_STYLE}
+                      />
+                    ))}
 
-                    {mapData.map(tile =>
-                      tile.type === 'BANK' ? (
-                        <Text
-                          key={`b_${tile.id}`}
-                          text={`$${tile.bankGoldReward || 200}`}
-                          x={tile.x * TILE_SIZE + 32}
-                          y={tile.y * TILE_SIZE + 54}
-                          anchor={0.5}
-                          style={EDITOR_BANK_STYLE}
-                        />
-                      ) : null
-                    )}
+                    {bankTiles.map(tile => (
+                      <Text
+                        key={`b_${tile.id}`}
+                        text={`€${tile.bankGoldReward || 200}`}
+                        x={tile.x * TILE_SIZE + 32}
+                        y={tile.y * TILE_SIZE + 54}
+                        anchor={0.5}
+                        style={EDITOR_BANK_STYLE}
+                      />
+                    ))}
                   </Container>
                 </Stage>
                 </div>

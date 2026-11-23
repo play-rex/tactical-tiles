@@ -14,6 +14,7 @@ export function botAction(state: GameState, difficulty: AIDifficulty = state.set
     playerRespawns: state.playerRespawns[p] || 0,
     playerInventory: state.playerInventory[p],
     weather: state.weather,
+    mines: state.mines,
     difficulty,
     graveyard: state.graveyard,
     victoryMode: state.settings.victoryMode,

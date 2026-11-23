@@ -27,6 +27,8 @@ import {
   viewFor,
   visibleSet,
 } from '@tactical/engine';
+
+const EMPTY_SIGHT = new Set<string>();
 import type { z } from 'zod';
 import { actionMsg, joinOptions, removeSeatMsg, settingsMsg } from './messages';
 import type { TableStore } from './store';
@@ -110,14 +112,18 @@ export async function restoreTables(store: TableStore, maxAgeMs = 24 * 60 * 60 *
     try {
       snap = JSON.parse(row.data) as TableSnapshot;
     } catch {}
-    if (snap?.v !== 1 || snap.code !== row.code || Date.now() - row.updatedAt > maxAgeMs) {
+    if (snap?.v !== 1 || snap.code !== row.code || !snap.seats?.some(s => !s.isBot) || Date.now() - row.updatedAt > maxAgeMs) {
       store.delete(row.code);
       continue;
     }
     if (matchMaker.getLocalRoomById(snap.code)) continue; // already open
     restoring.set(snap.code, snap);
-    await matchMaker.createRoom(ROOM_NAME, { restoreCode: snap.code });
-    count++;
+    try {
+      await matchMaker.createRoom(ROOM_NAME, { restoreCode: snap.code });
+      count++;
+    } finally {
+      restoring.delete(snap.code);
+    }
   }
   return count;
 }
@@ -135,10 +141,13 @@ export class TableRoom extends Room {
   private game: GameState | null = null;
   /** Goes up with every change to the game; views carry it so clients play effects once. */
   private seq = 0;
-  /** The latest change's effects, as each seat may see them. */
-  private seatEvents: GameEvent[][] = [];
-  /** What each seat can see in the current game (empty without fog), worked out once per change. */
+  /** What each human seat can see in the current game (empty without fog or for bots), worked out once per change. */
   private sight: Set<string>[] = [];
+  /** Cached per-seat GameView instances for the current `seq`. */
+  private cachedViewsSeq = -1;
+  private cachedGameViews: TableView['game'][] = [];
+  /** True only when durable TableSnapshot fields changed and need persisting. */
+  private snapshotDirty = false;
   /** Bot actions taken this turn (a runaway guard). */
   private botActions = { turn: -1, count: 0 };
   /** When a bot plays the current turn for a disconnected player, fixed once per turn. */
@@ -147,6 +156,7 @@ export class TableRoom extends Room {
   private holds = new Map<string, Deferred<Client>>();
   private messageAllowed = windowLimiter(1000);
   private pending: { clear(): void } | null = null;
+  private restoreHold: { clear(): void } | null = null;
   private counted = false;
   /** After a restore: bots hold off for players finding their way back until then. */
   private graceUntil = 0;
@@ -188,6 +198,7 @@ export class TableRoom extends Room {
       const used = new Set(this.seats.map(s => s.name));
       const name = BOT_NAMES.find(n => !used.has(n)) ?? `Bot ${this.seats.length + 1}`;
       this.seats.push({ sessionId: null, playerId: null, name, isBot: true, connected: true });
+      this.snapshotDirty = true;
       this.broadcastViews();
     });
 
@@ -198,10 +209,10 @@ export class TableRoom extends Room {
       if (!seat || seat.sessionId === client.sessionId) return;
       if (seat.sessionId) {
         // Also drop a seat being held for them, so they can't reconnect into nothing.
-        this.holds.get(seat.sessionId)?.reject(false);
-        this.clients.getById(seat.sessionId)?.leave(CloseCode.removed, 'Removed by host');
+        this.evictSession(seat.sessionId, CloseCode.removed, 'Removed by host');
       }
       this.seats.splice(msg.seat, 1);
+      this.snapshotDirty = true;
       this.broadcastViews();
     });
 
@@ -209,6 +220,7 @@ export class TableRoom extends Room {
       const msg = this.parse(client, settingsMsg, raw);
       if (!msg || !this.requireHost(client) || !this.requireLobby(client)) return;
       this.settings = msg;
+      this.snapshotDirty = true;
       this.broadcastViews();
     });
 
@@ -243,13 +255,15 @@ export class TableRoom extends Room {
     this.status = snap.status;
     this.game = snap.game;
     this.seq = snap.seq;
-    if (this.game) this.sight = this.seats.map((_, i) => visibleSet(this.game!, i));
+    this.snapshotDirty = false;
+    this.refreshSight();
     this.graceUntil = Date.now() + timings.restoreGraceMs;
     // Nobody is connected yet: keep the room open while they find their way back, and hand
     // the seats of anyone who never does to bots (as if their reconnection hold ran out).
-    const holdS = this.status === 'lobby' ? timings.lobbyReconnectS : timings.gameReconnectS;
+    const holdS = this.reconnectHoldS();
     this.resetAutoDisposeTimeout(holdS);
-    this.clock.setTimeout(() => {
+    this.restoreHold = this.clock.setTimeout(() => {
+      this.restoreHold = null;
       for (const seat of [...this.seats]) if (!seat.isBot && !seat.connected && !seat.sessionId) this.retire(seat);
     }, holdS * 1000);
     this.afterChange();
@@ -283,10 +297,16 @@ export class TableRoom extends Room {
       const previous = mine.sessionId;
       mine.sessionId = client.sessionId;
       mine.connected = true;
-      this.hostPlayerId ??= playerId;
+      if (!this.hostPlayerId) {
+        this.hostPlayerId = playerId;
+        this.snapshotDirty = true;
+      }
+      if (this.restoreHold && this.seats.every(s => s.isBot || s.connected)) {
+        this.restoreHold.clear();
+        this.restoreHold = null;
+      }
       if (previous && previous !== client.sessionId) {
-        this.holds.get(previous)?.reject(false);
-        this.clients.getById(previous)?.leave(CloseCode.openedElsewhere, 'Opened somewhere else');
+        this.evictSession(previous, CloseCode.openedElsewhere, 'Opened somewhere else');
       }
       this.afterChange();
       return;
@@ -301,6 +321,7 @@ export class TableRoom extends Room {
 
     this.seats.push({ sessionId: client.sessionId, playerId, name, isBot: false, connected: true });
     this.hostPlayerId ??= playerId;
+    this.snapshotDirty = true;
     this.broadcastViews();
   }
 
@@ -309,13 +330,16 @@ export class TableRoom extends Room {
     if (TableRoom.shuttingDown) return;
     const seat = this.seats[this.seatOf(client)];
     if (!seat) return;
+    if (consented) {
+      this.retire(seat);
+      return;
+    }
     seat.connected = false;
     // If it was their turn, a bot steps in after a moment.
     this.afterChange();
 
     try {
-      if (consented) throw new Error('left');
-      const hold = this.allowReconnection(client, this.status === 'lobby' ? timings.lobbyReconnectS : timings.gameReconnectS);
+      const hold = this.allowReconnection(client, this.reconnectHoldS());
       this.holds.set(client.sessionId, hold);
       const back = await hold;
       // The seat went away while they were gone (removed, or reopened elsewhere).
@@ -338,6 +362,9 @@ export class TableRoom extends Room {
 
   override async onDispose() {
     this.pending?.clear();
+    this.pending = null;
+    this.restoreHold?.clear();
+    this.restoreHold = null;
     if (this.counted) TableRoom.openTables--;
     // Everyone has gone for good: forget the table. (On shutdown, keep it to restore.)
     if (!TableRoom.shuttingDown) TableRoom.store?.delete(this.roomId);
@@ -351,10 +378,10 @@ export class TableRoom extends Room {
       return this.err(client, `Need at least ${MIN_PLAYERS} seats — add a bot?`);
     }
     this.game = createGeneratedGame(gameSettingsFor(this.settings, this.seats.length));
-    this.sight = this.seats.map((_, i) => visibleSet(this.game!, i));
     this.status = 'playing';
-    this.seatEvents = [];
     this.seq++;
+    this.snapshotDirty = true;
+    this.refreshSight();
     this.afterChange();
   }
 
@@ -379,23 +406,30 @@ export class TableRoom extends Room {
     if (result.rejected) return false;
     const after = result.state;
     this.game = after;
-    // Each player sees the effects that happened where they could see (fog of war): what they
+    // Each human sees the effects that happened where they could see (fog of war): what they
     // saw before the action (kept from the last change) or can see now.
     const fog = after.settings.fogOfWar;
     const sightBefore = this.sight;
-    this.sight = this.seats.map((_, i) => visibleSet(after, i));
-    this.seatEvents = this.seats.map((_, i) => eventsFor(result.events, fog, sightBefore[i] ?? new Set(), this.sight[i]));
+    this.refreshSight();
+    const seatEvents = this.seats.map((s, i) =>
+      s.isBot ? [] : eventsFor(result.events, fog, sightBefore[i] ?? EMPTY_SIGHT, this.sight[i] ?? EMPTY_SIGHT),
+    );
     this.seq++;
     if (after.winner !== null) this.status = 'finished';
-    this.afterChange();
+    this.snapshotDirty = true;
+    this.afterChange(seatEvents);
     return true;
   }
 
   /** Broadcast, then schedule whatever happens next without a human. */
-  private afterChange() {
+  private afterChange(seatEvents?: GameEvent[][]) {
     this.pending?.clear();
     this.pending = null;
-    this.broadcastViews();
+    this.broadcastViews(seatEvents);
+    this.scheduleAutoTurn();
+  }
+
+  private scheduleAutoTurn() {
     const game = this.game;
     if (!game || this.status !== 'playing' || game.winner !== null) return;
 
@@ -405,16 +439,18 @@ export class TableRoom extends Room {
     if (seat.isBot || seat.connected) this.coverAt = null;
     if (seat.connected && !seat.isBot) return; // a person is playing: wait for them
 
-    // A bot's turn, or a player who's away: a bot plays it. For someone who's away it waits a
-    // little first (fixed once per turn) in case they come straight back.
+    // A bot's turn, or a player who's away: a bot plays it. For someone who's away (or right
+    // after restore before anyone connects) it waits in case players reconnect first.
     let delay = between(timings.botThinkMs);
+    const graceRemaining = this.clients.length === 0 ? Math.max(0, this.graceUntil - Date.now()) : 0;
     if (!seat.isBot) {
       if (this.coverAt?.turn !== game.turnCounter) {
-        // Longer right after a restart, while everyone is still reconnecting.
-        const wait = Math.max(timings.autopilotMs, this.graceUntil - Date.now());
+        const wait = Math.max(timings.autopilotMs, graceRemaining);
         this.coverAt = { turn: game.turnCounter, at: Date.now() + wait };
       }
       delay = Math.max(delay, this.coverAt.at - Date.now());
+    } else if (graceRemaining > 0) {
+      delay = Math.max(delay, graceRemaining);
     }
     this.pending = this.clock.setTimeout(() => this.playBotStep(turn), Math.max(0, delay));
   }
@@ -462,10 +498,27 @@ export class TableRoom extends Room {
       const humans = this.seats.filter(s => !s.isBot && s.playerId);
       this.hostPlayerId = (humans.find(s => s.connected) ?? humans[0])?.playerId ?? null;
     }
+    this.snapshotDirty = true;
     this.afterChange();
   }
 
   // ── helpers ────────────────────────────────────────────────────
+
+  private reconnectHoldS() {
+    return this.status === 'lobby' ? timings.lobbyReconnectS : timings.gameReconnectS;
+  }
+
+  private evictSession(sessionId: string, code: number, reason: string) {
+    this.holds.get(sessionId)?.reject(false);
+    this.clients.getById(sessionId)?.leave(code, reason);
+  }
+
+  private refreshSight() {
+    const game = this.game;
+    this.sight = game
+      ? this.seats.map((s, i) => (s.isBot ? EMPTY_SIGHT : visibleSet(game, i)))
+      : [];
+  }
 
   private seatOf(client: Client) {
     return this.seats.findIndex(s => s.sessionId === client.sessionId);
@@ -498,14 +551,17 @@ export class TableRoom extends Room {
   }
 
   /** Every change ends here: send each player their view, and save the table. */
-  private broadcastViews() {
+  private broadcastViews(seatEvents?: GameEvent[][]) {
     const seats = this.seatInfo();
-    for (const client of this.clients) this.sendView(client, seats);
+    for (const client of this.clients) {
+      const mySeat = this.seatOf(client);
+      this.sendView(client, seats, seatEvents?.[mySeat] ?? []);
+    }
     this.persist();
   }
 
   private persist() {
-    if (TableRoom.shuttingDown || !TableRoom.store) return;
+    if (TableRoom.shuttingDown || !TableRoom.store || !this.snapshotDirty) return;
     const snap: TableSnapshot = {
       v: 1,
       code: this.roomId,
@@ -518,6 +574,7 @@ export class TableRoom extends Room {
     };
     try {
       TableRoom.store.save(this.roomId, JSON.stringify(snap));
+      this.snapshotDirty = false;
     } catch (e) {
       console.error('failed to save table', e);
     }
@@ -535,18 +592,26 @@ export class TableRoom extends Room {
 
   /**
    * `seats` is shared by every client in a broadcast, so it is built once by the caller.
-   * The latest change's effects always go along; clients play them once per `seq`.
+   * Effects are only attached on the broadcast for the action that created them (never on `sync` or reconnect).
    */
-  private sendView(client: Client, seats = this.seatInfo()) {
+  private sendView(client: Client, seats = this.seatInfo(), events: GameEvent[] = []) {
     const mySeat = this.seatOf(client);
+    let gameView: TableView['game'] = null;
+    if (this.game && mySeat >= 0) {
+      if (this.cachedViewsSeq !== this.seq) {
+        this.cachedViewsSeq = this.seq;
+        this.cachedGameViews = [];
+      }
+      gameView = this.cachedGameViews[mySeat] ?? (this.cachedGameViews[mySeat] = viewFor(this.game, mySeat, this.sight[mySeat]));
+    }
     const view: TableView = {
       code: this.roomId,
       status: this.status,
       seats,
       mySeat,
       settings: this.settings,
-      game: this.game && mySeat >= 0 ? viewFor(this.game, mySeat, this.sight[mySeat]) : null,
-      events: this.seatEvents[mySeat] ?? [],
+      game: gameView,
+      events,
       seq: this.seq,
     };
     client.send(ServerMsg.view, view);

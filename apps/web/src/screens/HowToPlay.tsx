@@ -120,7 +120,7 @@ export const HowToPlay: React.FC = () => {
                 </p>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '12px', marginTop: '14px' }}>
                   {[
-                    ['🚀 DEPLOY', 'var(--acc-mint-ink)', 'Spawn units from your HQ using Gold.'],
+                    ['🚀 DEPLOY', 'var(--acc-mint-ink)', 'Spawn units from your HQ using Euros.'],
                     ['🏃 MANEUVER', 'var(--acc-blue-ink)', 'Spend CP to move. Terrain affects cost.'],
                     ['🎯 ENGAGE', 'var(--acc-red-ink)', 'Attack enemies or siege bases with LOS.'],
                     ['💰 ECONOMY', 'var(--acc-amber-ink)', 'Heist Banks and secure Buildings.'],
@@ -157,7 +157,7 @@ export const HowToPlay: React.FC = () => {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '12px' }}>
                   <GeoWell coreStyle={{ padding: '14px' }}>
                     <div style={{ fontWeight: 900, fontSize: '14px', color: 'var(--acc-amber-ink)', marginBottom: '6px' }}>BANK VAULT</div>
-                    <div style={{ fontSize: '13px', marginBottom: '6px' }}>Contains Gold/CP loot. Action: <strong>HEIST (4 CP)</strong>.</div>
+                    <div style={{ fontSize: '13px', marginBottom: '6px' }}>Contains Euros/CP loot. Action: <strong>HEIST (4 CP)</strong>.</div>
                     <div style={{ fontSize: '12px', color: 'var(--acc-red-ink)', fontWeight: 700 }}>
                       Proximity Turret: {BANK_STATS.RANGE} Tile Range • {BANK_STATS.DAMAGE} DMG/turn until looted.
                     </div>
@@ -178,11 +178,11 @@ export const HowToPlay: React.FC = () => {
                 </p>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '10px' }}>
                   {[
-                    ['🔥 SCORCHED', '#C2410C', 'Plains & Sand cost +1 CP to move.'],
-                    ['🌧️ MONSOON', '#1344C4', 'Heavy Units (Breachers) pay 2x Move Cost on Plains.'],
+                    ['🔥 SCORCHED', '#C2410C', 'Plains & Sand cost 2x CP to move (Rank 2+ Scouts immune).'],
+                    ['🌧️ MONSOON', '#1344C4', 'Plains turn to mud (2x Move Cost; Rank 2+ Scouts immune).'],
                     ['🌫️ FOG', '#475569', 'Vision capped at 2 Tiles; Snipers limited to 3 range.'],
-                    ['🍃 TAILWIND', '#046C3E', '+1 Attack Range for all units; Plains cost 0.5 CP.'],
-                    ['🌪️ SANDSTORM', '#8D5B1C', 'Vision Range capped at 3 Tiles.'],
+                    ['🍃 TAILWIND', '#046C3E', '+1 Attack Range for all units; Plains cost 0.5x Move Cost.'],
+                    ['🌪️ SANDSTORM', '#8D5B1C', 'Vision Range capped at 3 Tiles; Sand costs 2x Move Cost.'],
                     ['☀️ CLEAR', 'var(--op-ink)', 'No modifiers. Standard engagement rules apply.'],
                   ].map(([name, col, effect]) => (
                     <GeoWell key={name} coreStyle={{ padding: '10px 12px' }}>
@@ -195,8 +195,9 @@ export const HowToPlay: React.FC = () => {
 
               <Section title="5. LOGISTICS (FIELD SHOP)">
                 <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
-                  <li><strong>Ammo Drop (50 Gold) / Medkit (100 Gold):</strong> Delivered via Drop Pod 3–9 tiles from HQ.</li>
-                  <li><strong>Barrier / Bridge (100 Gold):</strong> Construct 80% cover walls or water/canyon crossings.</li>
+                  <li><strong>Ammo Drop (50€) / First Aid Kit (100€) / Medkit (200€):</strong> First Aid restores 50% max HP; Medkit heals to full. Delivered via Drop Pod.</li>
+                  <li><strong>Land Mine (75€):</strong> Hidden trap (visible only to you) dealing 8 DMG and halting enemy movement. Cannot be placed within 5 tiles of an enemy HQ.</li>
+                  <li><strong>Barrier x3 (150€) / Bridge (100€):</strong> Click up to 3 tiles to build 10 HP waist-high cover walls, or place water/canyon bridges.</li>
                   <li><strong>Field Reload (5 CP):</strong> Emergency unit action restoring 50% max ammo immediately (ends unit turn).</li>
                   <li><strong>Retrieval Protocol:</strong> Move adjacent to or onto a supply pod and spend <strong>4 CP</strong> (RETRIEVE SUPPLY).</li>
                 </ul>
@@ -209,7 +210,7 @@ export const HowToPlay: React.FC = () => {
                 <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
                   <li><strong>★ Veteran ({VETERANCY_CONFIG.XP_THRESHOLDS[1]} XP):</strong> +20% Max HP (heals gained HP) and +2 Max Ammo (Scout/Breacher) or +1 Max Ammo (Sniper).</li>
                   <li><strong>★★ Elite ({VETERANCY_CONFIG.XP_THRESHOLDS[2]} XP):</strong> Scout +1 Vision &amp; clears Scorched/Monsoon Plains penalty; Breacher -{VETERANCY_CONFIG.ELITE_BREACHER_COVER_DR} DMG in Cover &amp; resists Overwatch pins; Sniper +{VETERANCY_CONFIG.ELITE_SNIPER_DMG_BONUS} DMG &amp; 7 CP shot.</li>
-                  <li><strong>★★★ Ace ({VETERANCY_CONFIG.XP_THRESHOLDS[3]} XP):</strong> +20% more Max HP; Scout +{VETERANCY_CONFIG.ACE_SCOUT_DMG_BONUS} DMG &amp; 2 CP shot; Breacher +{VETERANCY_CONFIG.ACE_BREACHER_DMG_BONUS} DMG &amp; pierces Base Armor; Sniper 1 CP Mountain/Dunes move. Killing an Ace pays <strong>+${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} Bounty Gold</strong>.</li>
+                  <li><strong>★★★ Ace ({VETERANCY_CONFIG.XP_THRESHOLDS[3]} XP):</strong> +20% more Max HP; Scout +{VETERANCY_CONFIG.ACE_SCOUT_DMG_BONUS} DMG &amp; 2 CP shot; Breacher +{VETERANCY_CONFIG.ACE_BREACHER_DMG_BONUS} DMG &amp; pierces Base Armor; Sniper 1 CP Mountain/Dunes move. Killing an Ace pays <strong>+€{VETERANCY_CONFIG.ACE_BOUNTY_GOLD} Bounty Euros</strong>.</li>
                 </ul>
               </Section>
 
@@ -247,7 +248,7 @@ export const HowToPlay: React.FC = () => {
                         }}
                       >
                         <strong style={{ fontSize: '15px' }}>{stats.name.toUpperCase()}</strong>
-                        <GeoChip variant="softAmber">${UNIT_COSTS[key as UnitType]}</GeoChip>
+                        <GeoChip variant="softAmber">€{UNIT_COSTS[key as UnitType]}</GeoChip>
                       </div>
                       <StatRow label="HP" value={stats.hp} />
                       <StatRow label="Attack" value={stats.damage} />
@@ -289,13 +290,13 @@ export const HowToPlay: React.FC = () => {
                             </td>
                             <td style={{ padding: '10px 12px', fontWeight: 700 }}>{TERRAIN_COSTS[key] >= 99 ? 'Impassable' : TERRAIN_COSTS[key]}</td>
                             <td style={{ padding: '10px 12px', color: 'var(--op-ink-muted)' }}>
-                              {key === 'MOUNTAIN' && 'High Ground. Essential for Snipers.'}
+                              {key === 'MOUNTAIN' && 'Sniper Only. High ground perch; blocks Scout/Breacher movement & ground LOS.'}
                               {key === 'FOREST' && 'Provides 40% Cover.'}
                               {key === 'SAND' && 'Exposed Terrain (-10% Defense).'}
                               {key === 'DUNES' && 'High Ground. Blocks Line of Sight.'}
                               {key === 'QUICKSAND' && 'Traps units (Rooted) for 1 Turn.'}
                               {key === 'CANYON' && 'Impassable. Allows shooting over.'}
-                              {key === 'BUILDING' && 'Securable. Watchtowers boost Range.'}
+                              {key === 'BUILDING' && 'Blocks neutral/enemy passage. Capture adjacent (+5€/t); Bunkers house infantry, Watchtowers seat Snipers.'}
                               {key === 'WATER' && 'Impassable without Bridge.'}
                               {key === 'BARRIER' && 'Blocks movement; 80% defensive cover.'}
                               {key === 'BASE' && 'Headquarters (+20% Defense).'}

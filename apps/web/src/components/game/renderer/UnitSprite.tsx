@@ -1,14 +1,22 @@
 import React, { useRef, useEffect, useCallback } from 'react';
-import { useTick, Container, Graphics } from '@pixi/react';
+import { useTick, Container, Graphics, Text } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 import { SafeSprite } from '../SafeSprite';
 import { TILE_SIZE } from '@tactical/engine/constants/Config';
 import { getUnitMaxHp } from '@tactical/engine/rules/CombatRules';
-import { PLAYER_UI_THEME } from '../../ui/GeoPrimitives';
-
-const hexToNum = (hex: string) => parseInt(hex.slice(1), 16);
+import { PLAYER_UI_THEME, hexToPixiColor } from '../../ui/GeoPrimitives';
+import type { BoardRotation } from '../../../core/boardRotation';
 
 const lerp = (start: number, end: number, alpha: number) => start + (end - start) * alpha;
+
+const UNIT_HP_LABEL_STYLE = new PIXI.TextStyle({
+    fill: '#FFFFFF',
+    stroke: '#0F172A',
+    strokeThickness: 3,
+    fontSize: 10,
+    fontWeight: 'bold',
+    fontFamily: 'system-ui, -apple-system, sans-serif',
+});
 
 interface UnitSpriteProps {
     texture: PIXI.Texture;
@@ -18,7 +26,9 @@ interface UnitSpriteProps {
     tileY?: number;
     gridSize?: number;
     isSelected?: boolean;
+    isReadyTurn?: boolean;
     unit: any;
+    mapRotation?: BoardRotation;
     onSelectTile?: (tx: number, ty: number) => void;
     onPointerDown?: () => void;
 }
@@ -31,7 +41,9 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     tileY,
     gridSize = 20,
     isSelected,
+    isReadyTurn = false,
     unit,
+    mapRotation = 0,
     onSelectTile,
     onPointerDown,
 }) => {
@@ -120,7 +132,7 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
 
     // A plate in the team's colour under every unit: whose it is reads at any zoom, and it
     // fades once the unit has acted this turn.
-    const teamColor = hexToNum((PLAYER_UI_THEME[unit.owner] ?? PLAYER_UI_THEME[0]).badgeBg);
+    const teamColor = hexToPixiColor((PLAYER_UI_THEME[unit.owner] ?? PLAYER_UI_THEME[0]).badgeBg);
     const drawTeamPlate = useCallback((g: PIXI.Graphics) => {
         g.clear();
         const c = TILE_SIZE / 2;
@@ -145,12 +157,22 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
         g.drawRect(9, TILE_SIZE - 9, (TILE_SIZE - 18) * pct, 4);
         g.endFill();
 
-        if (unit.maxAmmo < 99) {
-            g.beginFill(0xFFD700);
-            for (let i = 0; i < unit.ammo; i++) {
-                g.drawRect(8 + i * 5, TILE_SIZE - 16, 4, 4);
+        if (unit.maxAmmo < 99 && unit.maxAmmo > 0) {
+            const availW = TILE_SIZE - 16;
+            if (unit.ammo === 0) {
+                g.beginFill(0xDC2626, 0.92);
+                g.drawRect(8, TILE_SIZE - 16, availW, 4);
+                g.endFill();
+            } else {
+                const gap = 1;
+                const slotW = Math.max(2, Math.min(4, Math.floor((availW - (unit.maxAmmo - 1) * gap) / unit.maxAmmo)));
+                const step = slotW + gap;
+                g.beginFill(0xFFD700, 0.95);
+                for (let i = 0; i < Math.min(unit.ammo, unit.maxAmmo); i++) {
+                    g.drawRect(8 + i * step, TILE_SIZE - 16, slotW, 4);
+                }
+                g.endFill();
             }
-            g.endFill();
         }
 
         const rank = unit.rank ?? 0;
@@ -182,24 +204,20 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
             g.lineTo(bx + 3, by);
             g.moveTo(bx, by - 3);
             g.lineTo(bx, by + 3);
+        } else if (isReadyTurn) {
+            g.lineStyle(1.5, 0x0F172A, 0.9);
+            g.beginFill(0x22C55E, 1);
+            g.drawCircle(TILE_SIZE - 9, 9, 4);
+            g.endFill();
         }
-    }, [unit.hp, maxHp, unit.ammo, unit.maxAmmo, unit.rank, unit.isOverwatching]);
+    }, [unit.hp, maxHp, unit.ammo, unit.maxAmmo, unit.rank, unit.isOverwatching, isReadyTurn]);
 
     return (
         <Container
             ref={containerRef}
             x={x}
             y={y}
-            eventMode="static"
-            cursor="pointer"
-            pointerdown={(e) => {
-                e.stopPropagation();
-                if (onSelectTile && tileX !== undefined && tileY !== undefined) {
-                    onSelectTile(tileX, tileY);
-                } else {
-                    onPointerDown?.();
-                }
-            }}
+            eventMode="none"
         >
             <Graphics draw={drawTeamPlate} alpha={unit.completed ? 0.45 : 1} />
             {unit.isOverwatching && <Graphics draw={drawOverwatchRing} />}
@@ -218,7 +236,22 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
                 />
             </Container>
 
-            <Graphics draw={drawHudBars} />
+            {/* Counter-rotate HUD overlay so HP bars, text, badges, and rank stars stay upright */}
+            <Container
+                x={TILE_SIZE / 2}
+                y={TILE_SIZE / 2}
+                pivot={{ x: TILE_SIZE / 2, y: TILE_SIZE / 2 }}
+                angle={-mapRotation}
+            >
+                <Graphics draw={drawHudBars} />
+                <Text
+                    text={`${unit.hp}`}
+                    x={8}
+                    y={TILE_SIZE - 17}
+                    anchor={[0, 1]}
+                    style={UNIT_HP_LABEL_STYLE}
+                />
+            </Container>
         </Container>
     );
 };

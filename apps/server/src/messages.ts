@@ -52,7 +52,7 @@ export const actionMsg = z.discriminatedUnion('type', [
     goldCost: cost,
     deadUnitId: id,
   }),
-  z.object({ type: z.literal('BUY_ITEM'), itemKey }),
-  z.object({ type: z.literal('BUILD'), itemKey, tileId: id, variant: z.enum(['H', 'V']).optional() }),
+  z.object({ type: z.literal('BUY_ITEM'), itemKey, tileId: id.optional() }),
+  z.object({ type: z.literal('BUILD'), itemKey, tileId: id, tileIds: z.array(id).min(1).max(3).optional(), variant: z.enum(['H', 'V']).optional() }),
   z.object({ type: z.literal('BANK_REWARD'), choice: z.enum(['GOLD', 'CP']) }),
 ]);

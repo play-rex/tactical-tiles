@@ -58,6 +58,9 @@ const playerId = (() => {
   return id;
 })();
 
+/** URL path for an online table room. */
+export const tablePath = (code: string) => `/t/${code}`;
+
 /** A table code in the address (/t/ABCD), from a shared link. */
 export const codeFromUrl = () => location.pathname.match(/^\/t\/([A-Za-z]{4})$/)?.[1]?.toUpperCase() ?? null;
 
@@ -114,11 +117,17 @@ function describe(e: unknown) {
   return msg;
 }
 
+const sameSeats = (a: TableView['seats'], b: TableView['seats']) =>
+  a.length === b.length && a.every((s, i) => {
+    const o = b[i];
+    return s.name === o.name && s.isBot === o.isBot && s.connected === o.connected && s.isHost === o.isHost && s.autopilot === o.autopilot;
+  });
+
 const forget = () => {
   storage.set(TOKEN_KEY, null);
   storage.set(TABLE_KEY, null);
 };
-const goHome = () => {
+export const goHome = () => {
   if (location.pathname !== '/') history.replaceState(null, '', '/');
 };
 
@@ -135,17 +144,23 @@ export const useOnline = create<OnlineState>((set, get) => {
     room = r;
     storage.set(TOKEN_KEY, r.reconnectionToken);
     storage.set(TABLE_KEY, r.roomId);
-    history.replaceState(null, '', `/t/${r.roomId}`);
+    const nextPath = tablePath(r.roomId);
+    if (location.pathname !== nextPath) history.replaceState(null, '', nextPath);
     useGameStore.getState().enterOnline({
       send: action => r.send(ClientMsg.action, action),
       leave: () => void get().leave(),
     });
     r.onMessage(ServerMsg.view, (view: TableView) => {
-      set({ view, reconnecting: false });
+      set(state => {
+        const prev = state.view;
+        const nextView = prev && prev.code === view.code && sameSeats(prev.seats, view.seats)
+          ? { ...view, seats: prev.seats }
+          : view;
+        return { view: nextView, reconnecting: false };
+      });
       useGameStore.getState().applyServerView(view);
     });
     r.onMessage(ServerMsg.error, ({ message }: { message: string }) => set({ error: message }));
-    r.send(ClientMsg.sync);
     r.onLeave(async code => {
       if (room !== r) return;
       room = null;
@@ -188,6 +203,7 @@ export const useOnline = create<OnlineState>((set, get) => {
   const send = (type: string, payload?: unknown) => room?.send(type, payload);
 
   async function enter(fn: () => Promise<Room>) {
+    if (get().busy) return;
     set({ busy: true, error: null });
     try {
       attach(await fn());
@@ -211,14 +227,20 @@ export const useOnline = create<OnlineState>((set, get) => {
     createTable: () => enter(() => client.create(ROOM_NAME, { name: get().name.trim(), playerId })),
     joinTable: code => enter(() => client.joinById(code.trim().toUpperCase(), { name: get().name.trim(), playerId })),
     async resume() {
-      if (!hasSavedTable() || room) return;
-      const token = storage.get(TOKEN_KEY);
-      const code = storage.get(TABLE_KEY) ?? codeFromUrl();
+      if (!hasSavedTable() || room || get().busy) return;
+      const urlCode = codeFromUrl();
+      const savedCode = storage.get(TABLE_KEY);
+      const code = urlCode ?? savedCode;
+      const mismatched = Boolean(urlCode && savedCode && urlCode !== savedCode);
+      const token = mismatched ? null : storage.get(TOKEN_KEY);
       set({ busy: true });
       try {
         attach(await rejoin(token, code, get().name));
-      } catch {
-        if (!room) forget();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!room && /not found|locked|already started|Table is full|No table/i.test(msg)) {
+          forget();
+        }
       } finally {
         set({ busy: false });
       }
@@ -226,7 +248,11 @@ export const useOnline = create<OnlineState>((set, get) => {
     async leave() {
       const r = room;
       if (r) {
-        await r.leave(true);
+        room = null;
+        closeTable(null);
+        try {
+          await r.leave(true);
+        } catch {}
         return;
       }
       // Not connected (still trying to get back in): stop trying and go home.

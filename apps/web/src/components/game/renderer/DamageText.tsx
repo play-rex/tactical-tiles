@@ -1,6 +1,7 @@
 import React, { useRef, useMemo } from 'react';
-import { Text, useTick } from '@pixi/react';
+import { Container, Text, useTick } from '@pixi/react';
 import * as PIXI from 'pixi.js';
+import type { BoardRotation } from '../../../core/boardRotation';
 
 interface DamageTextProps {
     data: {
@@ -10,9 +11,10 @@ interface DamageTextProps {
         value: string;
         color: string;
     };
+    mapRotation?: BoardRotation;
 }
 
-export const DamageText: React.FC<DamageTextProps> = ({ data }) => {
+export const DamageText: React.FC<DamageTextProps> = ({ data, mapRotation = 0 }) => {
     const textRef = useRef<PIXI.Text>(null);
     const ageRef = useRef(0);
     const yOffsetRef = useRef(0);
@@ -31,7 +33,7 @@ export const DamageText: React.FC<DamageTextProps> = ({ data }) => {
 
         ageRef.current += delta;
         yOffsetRef.current -= delta;
-        textRef.current.y = data.y + yOffsetRef.current;
+        textRef.current.y = yOffsetRef.current;
 
         const age = ageRef.current;
         if (age < 10) {
@@ -48,14 +50,16 @@ export const DamageText: React.FC<DamageTextProps> = ({ data }) => {
     });
 
     return (
-        <Text
-            ref={textRef}
-            text={data.value}
-            x={data.x}
-            y={data.y}
-            anchor={0.5}
-            scale={0.5}
-            style={style}
-        />
+        <Container x={data.x} y={data.y} angle={-mapRotation}>
+            <Text
+                ref={textRef}
+                text={data.value}
+                x={0}
+                y={0}
+                anchor={0.5}
+                scale={0.5}
+                style={style}
+            />
+        </Container>
     );
 };

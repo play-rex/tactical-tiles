@@ -4,16 +4,15 @@ import {
   BASE_STATS,
   GOLD_SETTINGS,
   TERRAIN_COSTS,
-  UNIT_STATS,
   VETERANCY_CONFIG,
 } from '../constants/Config';
 import type { GameMutators, GameSettings, Tile, Unit, UnitType, WeatherState, WeatherType } from '../types';
-import { getManhattanDistance } from '../grid/Pathfinding';
+import { getManhattanDistance, getTileByIdFast } from '../grid/Pathfinding';
 import { assignVoronoiZones } from '../grid/ZoneGeneration';
-import { applyUnitXp, getEffectiveCpRules, getEffectiveUnitAmmo, getUnitMaxHp } from '../rules/CombatRules';
+import { applyUnitXp, getEffectiveCpRules, getUnitMaxHp } from '../rules/CombatRules';
 import { createSeededRng, generateSectorSeed, normalizeSeed } from '../utils/SeededRandom';
 import { getChallengeById } from '../assets/ChallengeOps';
-import { cloneMatchStats, createLog, type GameState, type InventoryItem, type PlayerStatus } from './state';
+import { cloneMatchStats, createEmptyGameState, createLog, createUnit, type GameState, type InventoryItem, type PlayerStatus } from './state';
 
 export const WEATHER_TYPES: WeatherType[] = ['CLEAR', 'SCORCHED', 'MONSOON', 'FOG', 'TAILWIND', 'SANDSTORM'];
 
@@ -187,7 +186,7 @@ export const generateDynamicMap = (
         }
     }
 
-    const dist = (t1: Tile, t2: Tile | {x:number, y:number}) => Math.abs(t1.x - t2.x) + Math.abs(t1.y - t2.y);
+    const dist = getManhattanDistance;
     const zoneTiles: Tile[][] = Array.from({ length: numPlayers }, () => []);
     
     tiles.forEach(t => {
@@ -300,6 +299,9 @@ export const generateDynamicMap = (
                 const targetBase = getTile(baseLocations[bIdx].x, baseLocations[bIdx].y);
                 if (!targetBase) continue;
 
+                const isGroundBlocked = (t: Tile) =>
+                    TERRAIN_COSTS[t.type] >= 90 || t.type === 'MOUNTAIN' || t.type === 'BUILDING';
+
                 const visited = new Set<string>([origin.id]);
                 const queue: Tile[] = [origin];
                 let reached = false;
@@ -312,22 +314,24 @@ export const generateDynamicMap = (
                     const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0]];
                     for (const [dx, dy] of dirs) {
                         const nt = getTile(cur.x + dx, cur.y + dy);
-                        if (!nt || visited.has(nt.id) || TERRAIN_COSTS[nt.type] >= 90) continue;
+                        if (!nt || visited.has(nt.id) || isGroundBlocked(nt)) continue;
                         visited.add(nt.id);
                         queue.push(nt);
                     }
                 }
 
                 if (!reached) {
-                    // Carve a bridge/corridor along Manhattan path so no match starts unwinnable
+                    // Carve a bridge/corridor along Manhattan path so no match starts unwinnable for ground squads
                     let cx = origin.x;
                     let cy = origin.y;
                     while (cx !== targetBase.x || cy !== targetBase.y) {
                         if (cx !== targetBase.x) cx += cx < targetBase.x ? 1 : -1;
                         else if (cy !== targetBase.y) cy += cy < targetBase.y ? 1 : -1;
                         const stepTile = getTile(cx, cy);
-                        if (stepTile && TERRAIN_COSTS[stepTile.type] >= 90) {
+                        if (stepTile && isGroundBlocked(stepTile)) {
                             stepTile.type = stepTile.type === 'WATER' ? 'BRIDGE' : 'PLAINS';
+                            stepTile.subType = undefined;
+                            stepTile.owner = undefined;
                             stepTile.height = 1;
                         }
                     }
@@ -349,35 +353,10 @@ export const spawnUnitsForPlayers = (
     const units: Unit[] = [];
     let idCounter = 0;
 
-    const createUnit = (type: UnitType, tileId: string, owner: number) => {
-        const ammoCap = getEffectiveUnitAmmo(type, mutators);
-        units.push({
-            id: `unit_${idCounter++}`,
-            type,
-            tileId,
-            hp: UNIT_STATS[type].hp,
-            maxHp: UNIT_STATS[type].hp,
-            ammo: ammoCap,
-            maxAmmo: ammoCap,
-            owner,
-            xp: 0,
-            rank: 0,
-            kills: 0,
-            damageDealt: 0,
-            hasMoved: false,
-            completed: false,
-            isOverwatching: false
-        });
-    };
-
     baseLocations.forEach(base => {
         const candidates = mapTiles
-            .filter(t => t.type !== 'WATER' && t.type !== 'MOUNTAIN' && t.type !== 'BASE' && t.type !== 'CANYON' && t.type !== 'BARRIER' && t.type !== 'QUICKSAND')
-            .sort((a, b) => {
-                const d1 = getManhattanDistance(a, {x: base.x, y: base.y} as Tile);
-                const d2 = getManhattanDistance(b, {x: base.x, y: base.y} as Tile);
-                return d1 - d2;
-            });
+            .filter(t => t.type !== 'WATER' && t.type !== 'MOUNTAIN' && t.type !== 'BUILDING' && t.type !== 'BASE' && t.type !== 'CANYON' && t.type !== 'BARRIER' && t.type !== 'QUICKSAND')
+            .sort((a, b) => getManhattanDistance(a, base) - getManhattanDistance(b, base));
         
         let idx = 0;
         const spawnList = [
@@ -387,7 +366,13 @@ export const spawnUnitsForPlayers = (
         ];
         spawnList.forEach(type => {
             if (idx < candidates.length) {
-                createUnit(type as UnitType, candidates[idx].id, base.owner);
+                units.push(createUnit({
+                    id: `unit_${idCounter++}`,
+                    type: type as UnitType,
+                    tileId: candidates[idx].id,
+                    owner: base.owner,
+                    mutators,
+                }));
                 idx++;
             }
         });
@@ -456,23 +441,12 @@ const freshGame = (
     activeSeed: string,
     players: StartingPlayers
 ): GameState => ({
-    settings,
+    ...createEmptyGameState(settings, gridSize),
     mapData,
-    gridSize,
     units,
-    graveyard: [],
-    currentPlayer: 0,
-    totalTurns: 0,
-    turnCounter: 0,
     ...players,
-    winner: null,
     activeSeed,
-    activeMission: null,
     matchStats: cloneMatchStats(undefined, settings.playerCount),
-    matchSummary: null,
-    bankRewardPending: null,
-    pendingDrops: [],
-    gameLog: [],
 });
 
 /** A generated map from the settings' seed (or a new random seed). */
@@ -530,8 +504,8 @@ export const createCustomMapGame = (settings: GameSettings, customMap: Tile[]): 
         });
     } else {
         // No bases on the map: opposite corners
-        const p1 = zonedMap.find(t => t.x === 1 && t.y === 1);
-        const p2 = zonedMap.find(t => t.x === gridSize - 2 && t.y === gridSize - 2);
+        const p1 = getTileByIdFast(zonedMap, '1,1', gridSize);
+        const p2 = getTileByIdFast(zonedMap, `${gridSize - 2},${gridSize - 2}`, gridSize);
         if (p1) { p1.type = 'BASE'; p1.owner = 0; baseLocations.push({ x: 1, y: 1, owner: 0 }); }
         if (p2) { p2.type = 'BASE'; p2.owner = 1; baseLocations.push({ x: gridSize - 2, y: gridSize - 2, owner: 1 }); }
     }
@@ -546,53 +520,45 @@ export const createCustomMapGame = (settings: GameSettings, customMap: Tile[]): 
     return freshGame(settings, finalMap, gridSize, units, seedUsed, players);
 };
 
+const settingsForMission = (
+    current: GameSettings,
+    mission: NonNullable<ReturnType<typeof getChallengeById>>,
+): GameSettings => ({
+    ...current,
+    ...mission.settings,
+    playerCount: mission.settings.playerCount ?? 2,
+    gameMode: mission.settings.gameMode ?? 'PVE',
+    victoryMode: mission.settings.victoryMode ?? 'DEATHMATCH',
+    aiDifficulty: mission.settings.aiDifficulty ?? 'HARD',
+    fogOfWar: mission.settings.fogOfWar ?? false,
+    dynamicWeather: mission.settings.dynamicWeather ?? false,
+    doomsdayEnabled: mission.settings.doomsdayEnabled ?? false,
+    mutators: mission.settings.mutators ?? { blitzCp: false, scarcity: false, ironman: false },
+    mapSeed: mission.seed,
+    challengeId: mission.id,
+});
+
 /** The settings a challenge op plays with: its own, over the player's current ones. */
 export const challengeSettings = (current: GameSettings, challengeId: string): GameSettings | null => {
     const mission = getChallengeById(challengeId);
-    if (!mission) return null;
-    return {
-        ...current,
-        ...mission.settings,
-        playerCount: mission.settings.playerCount ?? 2,
-        gameMode: mission.settings.gameMode ?? 'PVE',
-        victoryMode: mission.settings.victoryMode ?? 'DEATHMATCH',
-        aiDifficulty: mission.settings.aiDifficulty ?? 'HARD',
-        fogOfWar: mission.settings.fogOfWar ?? false,
-        dynamicWeather: mission.settings.dynamicWeather ?? false,
-        doomsdayEnabled: mission.settings.doomsdayEnabled ?? false,
-        mutators: mission.settings.mutators ?? { blitzCp: false, scarcity: false, ironman: false },
-        mapSeed: mission.seed,
-        challengeId: mission.id,
-    };
+    return mission ? settingsForMission(current, mission) : null;
 };
 
 /** A challenge op: its own map, pre-placed squads and objectives. */
 export const createChallengeGame = (current: GameSettings, challengeId: string): GameState | null => {
     const mission = getChallengeById(challengeId);
-    const settings = challengeSettings(current, challengeId);
-    if (!mission || !settings) return null;
+    if (!mission) return null;
+    const settings = settingsForMission(current, mission);
 
     const finalMap = mission.buildMap();
     const units: Unit[] = mission.placements.map((p, idx) => {
-        const baseHp = UNIT_STATS[p.type].hp;
-        const baseAmmo = getEffectiveUnitAmmo(p.type, settings.mutators);
-        let unit: Unit = {
+        let unit = createUnit({
             id: `chal_${idx}`,
             type: p.type,
             tileId: `${p.x},${p.y}`,
-            hp: baseHp,
-            maxHp: baseHp,
-            ammo: baseAmmo,
-            maxAmmo: baseAmmo,
             owner: p.owner,
-            xp: 0,
-            rank: 0,
-            kills: 0,
-            damageDealt: 0,
-            hasMoved: false,
-            completed: false,
-            isOverwatching: false,
-        };
+            mutators: settings.mutators,
+        });
         if (p.rank && p.rank > 0) {
             unit = applyUnitXp(unit, VETERANCY_CONFIG.XP_THRESHOLDS[p.rank]).unit;
         }

@@ -173,7 +173,7 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
         title: 'Red Dunes Duel',
         subtitle: 'Conquer in 14 Rounds • Scarcity 50% Ammo',
         briefing:
-            'Every bullet counts across shifting desert Dunes and Quicksand traps. With Scarcity cutting ammo in half, seize the high ground and central Vault (+300 Gold) to crack the 35 HP enemy HQ.',
+            'Every bullet counts across shifting desert Dunes and Quicksand traps. With Scarcity cutting ammo in half, seize the high ground and central Vault (+300 Euros) to crack the 35 HP enemy HQ.',
         difficultyLabel: 'STANDARD',
         gridSize: 16,
         seed: 'CHALDUNES',

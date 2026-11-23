@@ -18,12 +18,21 @@ export function viewFor(state: GameState, seat: number, visible = visibleSet(sta
   const game: GameState = {
     ...state,
     pendingDrops: state.pendingDrops.filter(d => d.playerId === seat),
+    mines: (state.mines ?? []).filter(m => m.owner === seat),
     bankRewardPending: state.bankRewardPending?.playerId === seat ? state.bankRewardPending : null,
+    // Hidden traps are visible only to the player who placed them even when Fog of War is off.
+    gameLog: state.gameLog.filter(l => l.playerId === seat || !l.message.startsWith('Planted Land Mine')),
   };
   if (fog) {
     game.units = state.units.filter(u => u.owner === seat || visible.has(u.tileId));
-    // Move logs name the destination tile: only your own are kept.
-    game.gameLog = state.gameLog.filter(l => l.type !== 'MOVE' || l.playerId === seat);
+    // Move logs name the destination tile and build logs name construction coordinates: hide/redact under fog.
+    game.gameLog = game.gameLog
+      .filter(l => l.type !== 'MOVE' || l.playerId === seat)
+      .map(l =>
+        l.playerId !== seat && l.type === 'ECONOMY' && l.message.startsWith('Built ')
+          ? { ...l, message: l.message.replace(/ at .+$/, '') }
+          : l
+      );
   }
   return { game, visibleTiles: [...visible] };
 }

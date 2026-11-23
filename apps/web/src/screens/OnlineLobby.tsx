@@ -1,8 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { MAX_PLAYERS, MIN_PLAYERS, UNIT_LIMITS, type TableSettings, type TableView } from '@tactical/engine';
-import type { AIDifficulty, UnitType } from '@tactical/engine/types';
-import { GeoButton, GeoCard, GeoChip, GeoToggle, GeoWell, PLAYER_UI_THEME } from '../components/ui/GeoPrimitives';
-import { codeFromUrl, useOnline } from '../net/useOnline';
+import { MAX_PLAYERS, MIN_PLAYERS, type TableSettings, type TableView } from '@tactical/engine';
+import { normalizeSeed } from '@tactical/engine/utils/SeededRandom';
+import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from '../components/ui/GeoPrimitives';
+import {
+  BrandHeader,
+  DifficultyButtons,
+  EnvironmentToggles,
+  MutatorToggles,
+  SECTION_LABEL,
+  SquadLoadoutControls,
+  StageShell,
+  VictoryModeControl,
+} from '../components/ui/MatchRulesControls';
+import { useCopyState } from '../hooks/useCopyState';
+import { codeFromUrl, goHome, tablePath, useOnline } from '../net/useOnline';
 import { useGameStore } from '../store/useGameStore';
 
 const inputStyle: React.CSSProperties = {
@@ -18,48 +29,8 @@ const inputStyle: React.CSSProperties = {
   color: 'var(--op-ink)',
 };
 
-const label: React.CSSProperties = { fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)', letterSpacing: '0.6px' };
-
-const UNIT_META: { type: UnitType; label: string }[] = [
-  { type: 'SOLDIER', label: 'SCOUT' },
-  { type: 'ASSAULTER', label: 'BREACHER' },
-  { type: 'SNIPER', label: 'SNIPER' },
-];
-
-const Stage: React.FC<{ children: React.ReactNode; width?: number }> = ({ children, width = 760 }) => (
-  <div
-    className="opgeo-stage opgeo-scroll"
-    style={{
-      width: '100vw',
-      height: '100dvh',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      padding: 'clamp(8px, 2vw, 16px)',
-      boxSizing: 'border-box',
-      overflowY: 'auto',
-    }}
-  >
-    {/* margin: auto centres it when it fits, and lets it scroll from the top when it doesn't */}
-    <div style={{ width: `min(${width}px, 100%)`, margin: 'auto 0', display: 'flex', flexDirection: 'column', gap: '14px' }}>{children}</div>
-  </div>
-);
-
 const Header: React.FC<{ right?: React.ReactNode }> = ({ right }) => (
-  <GeoCard>
-    <div style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-        <span
-          className="geo-chip"
-          style={{ background: 'var(--acc-violet)', color: '#FFFFFF', padding: '6px 14px', fontSize: '15px', fontWeight: 900, letterSpacing: '0.8px' }}
-        >
-          TACTICAL TILES
-        </span>
-        <GeoChip variant="softBlue" style={{ padding: '5px 10px' }}>ONLINE</GeoChip>
-      </div>
-      {right}
-    </div>
-  </GeoCard>
+  <BrandHeader badge={<GeoChip variant="softBlue" style={{ padding: '5px 10px' }}>ONLINE</GeoChip>} right={right} />
 );
 
 const ErrorBar: React.FC = () => {
@@ -76,21 +47,25 @@ const ErrorBar: React.FC = () => {
 
 /** Not at a table yet: pick a name, then start one or join one by code. */
 const Landing: React.FC = () => {
-  const { name, setName, createTable, joinTable, busy } = useOnline();
+  const name = useOnline(s => s.name);
+  const setName = useOnline(s => s.setName);
+  const createTable = useOnline(s => s.createTable);
+  const joinTable = useOnline(s => s.joinTable);
+  const busy = useOnline(s => s.busy);
   const [code, setCode] = useState(() => codeFromUrl() ?? '');
   const back = () => {
-    history.replaceState(null, '', '/');
+    goHome();
     useGameStore.setState({ currentScreen: 'SETUP' });
   };
   const named = name.trim().length > 0;
 
   return (
-    <Stage width={560}>
+    <StageShell width={560}>
       <Header right={<GeoButton onClick={back} coreStyle={{ padding: '7px 14px' }}>← LOCAL GAME</GeoButton>} />
       <ErrorBar />
       <GeoCard>
         <div style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-          <div style={label}>1. YOUR CALLSIGN</div>
+          <div style={SECTION_LABEL}>1. YOUR CALLSIGN</div>
           <input
             style={inputStyle}
             placeholder="Name other players will see"
@@ -100,7 +75,7 @@ const Landing: React.FC = () => {
             autoFocus
           />
 
-          <div style={label}>2. START A TABLE</div>
+          <div style={SECTION_LABEL}>2. START A TABLE</div>
           <GeoButton variant="blue" fullWidth disabled={!named || busy} onClick={() => void createTable()} coreStyle={{ padding: '11px' }}>
             CREATE TABLE
           </GeoButton>
@@ -108,7 +83,7 @@ const Landing: React.FC = () => {
             You'll get a 4-letter code to share. Fill empty seats with bots.
           </div>
 
-          <div style={label}>…OR JOIN ONE</div>
+          <div style={SECTION_LABEL}>…OR JOIN ONE</div>
           <div style={{ display: 'flex', gap: '8px' }}>
             <input
               style={{ ...inputStyle, textTransform: 'uppercase', letterSpacing: '4px', textAlign: 'center' }}
@@ -117,7 +92,7 @@ const Landing: React.FC = () => {
               value={code}
               onChange={e => setCode(e.target.value.replace(/[^a-z]/gi, '').toUpperCase())}
               onKeyDown={e => {
-                if (e.key === 'Enter' && named && code.length === 4) void joinTable(code);
+                if (e.key === 'Enter' && named && code.length === 4 && !busy) void joinTable(code);
               }}
             />
             <GeoButton variant="mint" disabled={!named || code.length !== 4 || busy} onClick={() => void joinTable(code)} coreStyle={{ padding: '10px 18px' }}>
@@ -126,83 +101,51 @@ const Landing: React.FC = () => {
           </div>
         </div>
       </GeoCard>
-    </Stage>
+    </StageShell>
   );
 };
-
-const MUTATORS: Array<[keyof TableSettings['mutators'], string]> = [
-  ['blitzCp', 'Blitz CP (30 Max / +15 CP/turn)'],
-  ['scarcity', 'Scarcity (50% Ammo / +50% Bank)'],
-  ['ironman', 'Ironman (0 Respawns)'],
-];
 
 /** The host's rules. Everyone sees them; only the host can change them. */
 const RulesPanel: React.FC<{ settings: TableSettings; isHost: boolean; hasBots: boolean }> = ({ settings, isHost, hasBots }) => {
   const updateSettings = useOnline(s => s.updateSettings);
   const set = (patch: Partial<TableSettings>) => updateSettings({ ...settings, ...patch });
   const total = settings.unitCounts.SOLDIER + settings.unitCounts.ASSAULTER + settings.unitCounts.SNIPER;
-  const count = (type: UnitType, delta: number) => {
-    const next = Math.max(0, Math.min(UNIT_LIMITS[type], settings.unitCounts[type] + delta));
-    const counts = { ...settings.unitCounts, [type]: next };
-    if (counts.SOLDIER + counts.ASSAULTER + counts.SNIPER === 0) return;
-    set({ unitCounts: counts });
-  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', opacity: isHost ? 1 : 0.85 }}>
-      <div style={label}>RULES {isHost ? '' : '(SET BY THE HOST)'}</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-        <GeoButton variant={settings.victoryMode === 'CONQUER' ? 'amber' : 'default'} fullWidth disabled={!isHost} onClick={() => set({ victoryMode: 'CONQUER' })}>
-          CONQUER (HQ)
-        </GeoButton>
-        <GeoButton variant={settings.victoryMode === 'DEATHMATCH' ? 'red' : 'default'} fullWidth disabled={!isHost} onClick={() => set({ victoryMode: 'DEATHMATCH' })}>
-          DEATHMATCH
-        </GeoButton>
-      </div>
-      {settings.victoryMode === 'DEATHMATCH' && (
-        <GeoToggle label="Doomsday Protocol (Shrinking Map)" value={settings.doomsdayEnabled} disabled={!isHost} onChange={v => set({ doomsdayEnabled: v })} variant="amber" />
-      )}
-      <GeoToggle label="Dynamic Weather" value={settings.dynamicWeather} disabled={!isHost} onChange={v => set({ dynamicWeather: v })} />
-      <GeoToggle label="Fog of War" value={settings.fogOfWar} disabled={!isHost} onChange={v => set({ fogOfWar: v })} />
+      <div style={SECTION_LABEL}>RULES {isHost ? '' : '(SET BY THE HOST)'}</div>
+      <VictoryModeControl
+        victoryMode={settings.victoryMode}
+        doomsdayEnabled={settings.doomsdayEnabled}
+        disabled={!isHost}
+        onPatch={set}
+      />
+      <EnvironmentToggles
+        dynamicWeather={settings.dynamicWeather}
+        fogOfWar={settings.fogOfWar}
+        disabled={!isHost}
+        onPatch={set}
+      />
 
-      <div style={{ ...label, marginTop: '4px' }}>SQUAD ({total} UNITS EACH)</div>
-      {UNIT_META.map(({ type, label: name }) => (
-        <GeoWell key={type} coreStyle={{ padding: '6px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: '13px', fontWeight: 900 }}>{name}</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <GeoButton disabled={!isHost || settings.unitCounts[type] <= 0} onClick={() => count(type, -1)} coreStyle={{ padding: '3px 10px' }}>-</GeoButton>
-            <span style={{ fontSize: '15px', fontWeight: 900, width: '18px', textAlign: 'center' }}>{settings.unitCounts[type]}</span>
-            <GeoButton disabled={!isHost || settings.unitCounts[type] >= UNIT_LIMITS[type]} onClick={() => count(type, 1)} coreStyle={{ padding: '3px 10px' }}>+</GeoButton>
-          </div>
-        </GeoWell>
-      ))}
+      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>SQUAD ({total} UNITS EACH)</div>
+      <SquadLoadoutControls
+        unitCounts={settings.unitCounts}
+        disabled={!isHost}
+        minTotal={1}
+        onChange={unitCounts => set({ unitCounts })}
+      />
 
       {hasBots && (
         <>
-          <div style={{ ...label, marginTop: '4px' }}>BOT SKILL</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
-            {(['EASY', 'MEDIUM', 'HARD'] as AIDifficulty[]).map(d => (
-              <GeoButton
-                key={d}
-                fullWidth
-                disabled={!isHost}
-                variant={settings.aiDifficulty === d ? (d === 'EASY' ? 'mint' : d === 'MEDIUM' ? 'amber' : 'red') : 'default'}
-                onClick={() => set({ aiDifficulty: d })}
-                coreStyle={{ padding: '7px 4px' }}
-              >
-                {d}
-              </GeoButton>
-            ))}
-          </div>
+          <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>BOT SKILL</div>
+          <DifficultyButtons value={settings.aiDifficulty} disabled={!isHost} onChange={aiDifficulty => set({ aiDifficulty })} />
         </>
       )}
 
-      <div style={{ ...label, marginTop: '4px' }}>MUTATORS</div>
-      {MUTATORS.map(([key, text]) => (
-        <GeoToggle key={key} label={text} value={settings.mutators[key]} disabled={!isHost} onChange={v => set({ mutators: { ...settings.mutators, [key]: v } })} variant="amber" />
-      ))}
+      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>MUTATORS</div>
+      <MutatorToggles mutators={settings.mutators} disabled={!isHost} onChange={mutators => set({ mutators })} />
 
-      <div style={{ ...label, marginTop: '4px' }}>SECTOR SEED (OPTIONAL)</div>
+      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>SECTOR SEED (OPTIONAL)</div>
       <SeedInput value={settings.mapSeed} disabled={!isHost} onCommit={mapSeed => set({ mapSeed })} />
     </div>
   );
@@ -213,7 +156,8 @@ const SeedInput: React.FC<{ value: string; disabled: boolean; onCommit: (v: stri
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   const commit = () => {
-    if (draft !== value) onCommit(draft);
+    const clean = normalizeSeed(draft);
+    if (clean !== value) onCommit(clean);
   };
   return (
     <input
@@ -222,7 +166,7 @@ const SeedInput: React.FC<{ value: string; disabled: boolean; onCommit: (v: stri
       maxLength={12}
       value={draft}
       disabled={disabled}
-      onChange={e => setDraft(e.target.value.replace(/[^a-z0-9]/gi, '').toUpperCase())}
+      onChange={e => setDraft(normalizeSeed(e.target.value))}
       onBlur={commit}
       onKeyDown={e => {
         if (e.key === 'Enter') commit();
@@ -233,36 +177,32 @@ const SeedInput: React.FC<{ value: string; disabled: boolean; onCommit: (v: stri
 
 /** At a table, before the match: who's in, the rules, and Start. */
 const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
-  const { addBot, removeSeat, start, leave } = useOnline();
+  const addBot = useOnline(s => s.addBot);
+  const removeSeat = useOnline(s => s.removeSeat);
+  const start = useOnline(s => s.start);
+  const leave = useOnline(s => s.leave);
   const me = view.seats[view.mySeat];
   const isHost = Boolean(me?.isHost);
-  const [copied, setCopied] = useState(false);
-  const link = `${location.origin}/t/${view.code}`;
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
-  };
+  const { copied, copy } = useCopyState();
+  const link = `${location.origin}${tablePath(view.code)}`;
   const canStart = view.seats.length >= MIN_PLAYERS;
 
   return (
-    <Stage width={900}>
+    <StageShell width={900}>
       <Header right={<GeoButton variant="softRed" onClick={() => void leave()} coreStyle={{ padding: '7px 14px' }}>LEAVE TABLE</GeoButton>} />
       <ErrorBar />
       <div className="tt-cols" style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 42%) minmax(0, 1fr)', gap: '14px', alignItems: 'start' }}>
         <GeoCard>
           <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <div style={label}>TABLE CODE</div>
+            <div style={SECTION_LABEL}>TABLE CODE</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <span style={{ fontSize: '34px', fontWeight: 900, letterSpacing: '8px', color: 'var(--acc-violet-ink)' }}>{view.code}</span>
-              <GeoButton variant="softViolet" onClick={() => void copy()} coreStyle={{ padding: '6px 12px' }}>
+              <GeoButton variant="softViolet" onClick={() => void copy(link)} coreStyle={{ padding: '6px 12px' }}>
                 {copied ? 'COPIED ✓' : 'COPY LINK'}
               </GeoButton>
             </div>
 
-            <div style={{ ...label, marginTop: '6px' }}>
+            <div style={{ ...SECTION_LABEL, marginTop: '6px' }}>
               SEATS ({view.seats.length}/{MAX_PLAYERS})
             </div>
             {view.seats.map((s, i) => {
@@ -309,7 +249,7 @@ const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
           </div>
         </GeoCard>
       </div>
-    </Stage>
+    </StageShell>
   );
 };
 
@@ -326,11 +266,11 @@ export const OnlineLobby: React.FC = () => {
   if (!view) {
     if (busy) {
       return (
-        <Stage width={400}>
+        <StageShell width={400}>
           <GeoCard>
             <div style={{ padding: '20px', textAlign: 'center', fontWeight: 800 }}>Connecting…</div>
           </GeoCard>
-        </Stage>
+        </StageShell>
       );
     }
     return <Landing />;

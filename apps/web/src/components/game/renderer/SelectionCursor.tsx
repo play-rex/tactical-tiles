@@ -1,4 +1,4 @@
-import React, { useRef, useCallback } from 'react';
+import React, { useRef, useCallback, useEffect } from 'react';
 import { Graphics, useTick } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 import { TILE_SIZE } from '@tactical/engine/constants/Config';
@@ -13,12 +13,14 @@ export const SelectionCursor: React.FC<SelectionCursorProps> = ({ x, y, pulse = 
     const graphicsRef = useRef<PIXI.Graphics>(null);
     const timeRef = useRef(0);
 
-    useTick((delta) => {
-        if (!graphicsRef.current) return;
-        if (!pulse) {
+    useEffect(() => {
+        if (!pulse && graphicsRef.current) {
             graphicsRef.current.alpha = 0.92;
-            return;
         }
+    }, [pulse]);
+
+    useTick((delta) => {
+        if (!pulse || !graphicsRef.current) return;
         timeRef.current += 0.1 * delta;
         graphicsRef.current.alpha = 0.78 + Math.sin(timeRef.current) * 0.22;
     });
