@@ -48,7 +48,10 @@ import {
   type GameAction,
   type GameEvent,
   type GameState,
+  type KillCause,
   type SoundName,
+  type TilePoint,
+  type WeaponVisual,
 } from './state';
 
 const itemKeyToLoot = (itemKey: string): SupplyLootType =>
@@ -69,20 +72,134 @@ export interface ApplyResult {
   rejected?: string;
 }
 
+const pt = (tile: Pick<Tile, 'x' | 'y'>): TilePoint => ({ x: tile.x, y: tile.y });
+
 /** Collects an action's effects as it resolves. */
 class Fx {
   events: GameEvent[] = [];
-  sound(sound: SoundName) {
-    this.events.push({ kind: 'sound', sound });
+  sound(sound: SoundName, delayMs?: number) {
+    this.events.push(delayMs !== undefined ? { kind: 'sound', sound, delayMs } : { kind: 'sound', sound });
   }
-  projectile(from: Tile, to: Tile, style: 'BULLET' | 'LASER' | 'MISSILE') {
-    this.events.push({ kind: 'projectile', from: { x: from.x, y: from.y }, to: { x: to.x, y: to.y }, style });
+  projectile(
+    from: Tile,
+    to: Tile,
+    style: 'BULLET' | 'LASER' | 'MISSILE',
+    meta?: { weapon?: WeaponVisual; attackerId?: string; targetUnitId?: string; delayMs?: number; travelMs?: number },
+  ) {
+    this.events.push({
+      kind: 'projectile',
+      from: pt(from),
+      to: pt(to),
+      style,
+      ...(meta?.weapon ? { weapon: meta.weapon } : {}),
+      ...(meta?.attackerId ? { attackerId: meta.attackerId } : {}),
+      ...(meta?.targetUnitId ? { targetUnitId: meta.targetUnitId } : {}),
+      ...(meta?.delayMs !== undefined ? { delayMs: meta.delayMs } : {}),
+      ...(meta?.travelMs !== undefined ? { travelMs: meta.travelMs } : {}),
+    });
   }
-  popup(at: Tile, text: string, color: string, lift: number) {
-    this.events.push({ kind: 'popup', at: { x: at.x, y: at.y }, text, color, lift });
+  popup(at: Tile, text: string, color: string, lift: number, delayMs?: number) {
+    this.events.push(
+      delayMs !== undefined
+        ? { kind: 'popup', at: pt(at), text, color, lift, delayMs }
+        : { kind: 'popup', at: pt(at), text, color, lift },
+    );
   }
-  shake(intensity: number) {
-    this.events.push({ kind: 'shake', intensity });
+  shake(intensity: number, at?: Tile, delayMs?: number) {
+    this.events.push({
+      kind: 'shake',
+      intensity,
+      ...(at ? { at: pt(at) } : {}),
+      ...(delayMs !== undefined ? { delayMs } : {}),
+    });
+  }
+  movePath(unit: Pick<Unit, 'id' | 'type' | 'owner'>, path: Tile[], haltedAt?: number) {
+    if (path.length < 2) return;
+    this.events.push({
+      kind: 'movePath',
+      unitId: unit.id,
+      unitType: unit.type,
+      owner: unit.owner,
+      path: path.map(pt),
+      ...(haltedAt !== undefined ? { haltedAt } : {}),
+    });
+  }
+  hit(params: {
+    targetUnitId?: string;
+    at: Tile;
+    from?: Tile;
+    damage: number;
+    weapon?: WeaponVisual;
+    isKill?: boolean;
+    isCrit?: boolean;
+    suppressed?: boolean;
+    crossfireFrom?: Tile[];
+    delayMs?: number;
+  }) {
+    const crossfirePts = params.crossfireFrom && params.crossfireFrom.length > 0 ? params.crossfireFrom.map(pt) : undefined;
+    this.events.push({
+      kind: 'hit',
+      ...(params.targetUnitId ? { targetUnitId: params.targetUnitId } : {}),
+      at: pt(params.at),
+      ...(params.from ? { from: pt(params.from) } : {}),
+      damage: params.damage,
+      ...(params.weapon ? { weapon: params.weapon } : {}),
+      ...(params.isKill ? { isKill: true } : {}),
+      ...(params.isCrit ? { isCrit: true } : {}),
+      ...(params.suppressed ? { suppressed: true } : {}),
+      ...(crossfirePts ? { crossfireFrom: crossfirePts } : {}),
+      ...(params.delayMs !== undefined ? { delayMs: params.delayMs } : {}),
+    });
+  }
+  killed(unit: Pick<Unit, 'id' | 'type' | 'owner' | 'rank'>, at: Tile, cause: KillCause, killerOwner?: number) {
+    this.events.push({
+      kind: 'killed',
+      unitId: unit.id,
+      unitType: unit.type,
+      owner: unit.owner,
+      rank: unit.rank ?? 0,
+      at: pt(at),
+      ...(killerOwner !== undefined ? { killerOwner } : {}),
+      cause,
+    });
+  }
+  mineBlast(at: Tile, damage: number, victimUnitId?: string, victimDead?: boolean) {
+    this.events.push({
+      kind: 'mineBlast',
+      at: pt(at),
+      damage,
+      ...(victimUnitId ? { victimUnitId } : {}),
+      ...(victimDead !== undefined ? { victimDead } : {}),
+    });
+  }
+  structureHit(at: Tile, structureType: 'BASE' | 'BARRIER', damage: number, destroyed: boolean, owner?: number | null) {
+    this.events.push({
+      kind: 'structureHit',
+      at: pt(at),
+      structureType,
+      damage,
+      destroyed,
+      ...(owner !== undefined ? { owner } : {}),
+    });
+  }
+  heist(at: Tile, playerId: number) {
+    this.events.push({ kind: 'heist', at: pt(at), playerId });
+  }
+  promotion(unitId: string, at: Tile, rank: number, label: string) {
+    this.events.push({ kind: 'promotion', unitId, at: pt(at), rank, label });
+  }
+  overwatchSet(unitId: string, at: Tile, owner: number) {
+    this.events.push({ kind: 'overwatchSet', unitId, at: pt(at), owner });
+  }
+  heal(unitId: string, at: Tile, amount: number, item: 'MEDKIT' | 'FIRST_AID' | 'AMMO' | 'RELOAD') {
+    this.events.push({ kind: 'heal', unitId, at: pt(at), amount, item });
+  }
+  build(tiles: Tile[], itemKey: 'BARRIER' | 'BRIDGE') {
+    if (tiles.length === 0) return;
+    this.events.push({ kind: 'build', tiles: tiles.map(pt), itemKey });
+  }
+  supplyLanded(at: Tile, item: SupplyLootType) {
+    this.events.push({ kind: 'supplyLanded', at: pt(at), item });
   }
 }
 
@@ -104,7 +221,11 @@ const grantUnitXp = (
     const { unit: promotedUnit, promotedTo } = applyUnitXp(u, gainedXp);
     if (promotedTo !== null) {
       const uTile = getTileByIdFast(map, promotedUnit.tileId, gridSize);
-      if (uTile) fx.popup(uTile, VETERANCY_CONFIG.RANK_LABELS[promotedTo], '#FFD700', 24);
+      const rankLabel = VETERANCY_CONFIG.RANK_LABELS[promotedTo];
+      if (uTile) {
+        fx.promotion(promotedUnit.id, uTile, promotedTo, rankLabel);
+        fx.popup(uTile, rankLabel, '#FFD700', 24);
+      }
       fx.sound('capture');
       const rankName = VETERANCY_CONFIG.RANK_NAMES[promotedTo];
       extraLogs.push(createLog(round, playerId, `${UNIT_STATS[promotedUnit.type].name} promoted to ${rankName}!`, 'COMBAT'));
@@ -187,10 +308,14 @@ const detonateMineOnUnit = (params: {
     unitsList, graveyardList, round, nextPlayerGold, nextMatchStats, extraLogs, fx,
   } = params;
   const victimDead = victim.hp - damage <= 0;
+  fx.mineBlast(tile, damage, victim.id, victimDead);
   fx.sound('explosion');
   fx.popup(tile, 'LAND MINE!', '#EF4444', 34);
   fx.popup(tile, `-${damage}`, '#FF6D00', 14);
-  fx.shake(8);
+  fx.shake(9, tile);
+  if (victimDead) {
+    fx.killed(victim, tile, 'MINE', mineOwner);
+  }
   if (nextMatchStats[mineOwner]) {
     nextMatchStats[mineOwner].damageDealt += damage;
     if (victimDead) nextMatchStats[mineOwner].kills += 1;
@@ -337,6 +462,11 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const trig = moveResolution.trigger;
       const mineTrig = moveResolution.mineTrigger;
 
+      if (moveResolution.path.length >= 2) {
+        const walkedPath = moveResolution.path.slice(0, Math.max(2, moveResolution.finalIndex + 1));
+        fx.movePath(mUnit, walkedPath, moveResolution.haltedEarly ? moveResolution.finalIndex : undefined);
+      }
+
       if (trig) {
         const shooter = newUnits.find(u => u.id === trig.overwatcherId);
         const shooterTile = shooter ? getTileByIdFast(newMap, shooter.tileId, gridSize) : undefined;
@@ -346,9 +476,25 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           fx.sound(shooter.type === 'SNIPER' ? 'sniper' : 'attack');
           fx.sound('hit');
           if (shooterTile) {
-            fx.projectile(shooterTile, interceptTile, shooter.type === 'SNIPER' ? 'LASER' : 'BULLET');
+            fx.projectile(shooterTile, interceptTile, shooter.type === 'SNIPER' ? 'LASER' : 'BULLET', {
+              weapon: shooter.type,
+              attackerId: shooter.id,
+              targetUnitId: mUnit.id,
+            });
+            fx.hit({
+              targetUnitId: mUnit.id,
+              at: interceptTile,
+              from: shooterTile,
+              damage: trig.damage,
+              weapon: shooter.type,
+              isKill: trig.victimDead,
+              isCrit: trig.damage >= 7,
+            });
             fx.popup(interceptTile, `-${trig.damage}`, '#FF6D00', 12);
-            fx.shake(trig.damage > 5 ? 10 : 5);
+            fx.shake(trig.damage > 5 ? 10 : 5, interceptTile);
+          }
+          if (trig.victimDead) {
+            fx.killed(mUnit, interceptTile, 'OVERWATCH', shooter.owner);
           }
 
           newUnits = newUnits.map(u => {
@@ -478,7 +624,10 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       }
       spendCp(actionCost(action));
       newUnits = newUnits.map(u => u.id === unit.id ? { ...u, isOverwatching: true, completed: true } : u);
-      if (uTile) fx.popup(uTile, 'OVERWATCH', '#FFB300', 20);
+      if (uTile) {
+        fx.overwatchSet(unit.id, uTile, currentPlayer);
+        fx.popup(uTile, 'OVERWATCH', '#FFB300', 20);
+      }
       fx.sound('click');
       logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[unit.type].name} set Overwatch (${action.cost} CP)`, 'COMBAT');
       break;
@@ -489,7 +638,12 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       spendCp(actionCost(action));
       const added = Math.max(1, Math.ceil(unit.maxAmmo / 2));
       const nextAmmo = Math.min(unit.maxAmmo, unit.ammo + added);
+      const uTile = getTileByIdFast(newMap, unit.tileId, gridSize);
       newUnits = newUnits.map(u => u.id === unit.id ? { ...u, ammo: nextAmmo, completed: true } : u);
+      if (uTile) {
+        fx.heal(unit.id, uTile, Math.max(0, nextAmmo - unit.ammo), 'RELOAD');
+        fx.popup(uTile, `+${Math.max(0, nextAmmo - unit.ammo)} AMMO`, '#FBBF24', 20);
+      }
       fx.sound('click');
       logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[unit.type].name} Field Reloaded (${nextAmmo}/${unit.maxAmmo} Ammo)`, 'ECONOMY');
       break;
@@ -515,14 +669,35 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const unit = item ? newUnits.find(u => u.id === action.unitId) : undefined;
       if (!item || !unit) return reject('Cannot use item');
       spendCp(actionCost(action));
+      const uTile = getTileByIdFast(newMap, unit.tileId, gridSize);
       if (item === 'MEDKIT') {
-        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, hp: getUnitMaxHp(u) } : u);
+        const maxHp = getUnitMaxHp(unit);
+        const healed = Math.max(0, maxHp - unit.hp);
+        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, hp: maxHp } : u);
+        if (uTile) {
+          fx.heal(unit.id, uTile, healed, 'MEDKIT');
+          fx.popup(uTile, healed > 0 ? `+${healed} HP` : 'FULL HP', '#22C55E', 22);
+        }
+        fx.sound('capture');
       } else if (item === 'FIRST_AID') {
         const maxHp = getUnitMaxHp(unit);
         const healAmt = Math.ceil(maxHp * 0.5);
-        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, hp: Math.min(maxHp, u.hp + healAmt) } : u);
+        const nextHp = Math.min(maxHp, unit.hp + healAmt);
+        const healed = Math.max(0, nextHp - unit.hp);
+        newUnits = newUnits.map(u => u.id === unit.id ? { ...u, hp: nextHp } : u);
+        if (uTile) {
+          fx.heal(unit.id, uTile, healed, 'FIRST_AID');
+          fx.popup(uTile, healed > 0 ? `+${healed} HP` : 'FULL HP', '#22C55E', 22);
+        }
+        fx.sound('capture');
       } else if (item === 'AMMO') {
+        const addedAmmo = Math.max(0, unit.maxAmmo - unit.ammo);
         newUnits = newUnits.map(u => u.id === unit.id ? { ...u, ammo: u.maxAmmo } : u);
+        if (uTile) {
+          fx.heal(unit.id, uTile, addedAmmo, 'AMMO');
+          fx.popup(uTile, addedAmmo > 0 ? `+${addedAmmo} AMMO` : 'FULL AMMO', '#FBBF24', 22);
+        }
+        fx.sound('click');
       }
       const newInvList = [...inv];
       newInvList.splice(itemIndex, 1);
@@ -563,6 +738,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       newMap = newMap.map(t => t.id === action.tileId ? { ...t, hackProgress: 100 } : t);
       if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].heists += 1;
       newUnits = grantUnitXp(newUnits, unit.id, 2, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
+      if (bankTile) fx.heist(bankTile, currentPlayer);
       fx.sound('heist');
 
       if (options.autoBankReward) {
@@ -607,13 +783,35 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const remainingHp = tar.hp - finalDmg;
       const isKill = remainingHp <= 0;
 
+      const crossfireTiles = crossfireSupporters
+        .map(s => getTileByIdFast(mapData, s.tileId, gridSize))
+        .filter((t): t is Tile => Boolean(t));
+
       fx.sound(att.type === 'SNIPER' ? 'sniper' : 'attack');
       fx.sound('hit');
       if (attTile && tarTile) {
-        fx.projectile(attTile, tarTile, att.type === 'SNIPER' ? 'LASER' : 'BULLET');
+        fx.projectile(attTile, tarTile, att.type === 'SNIPER' ? 'LASER' : 'BULLET', {
+          weapon: att.type,
+          attackerId: att.id,
+          targetUnitId: tar.id,
+        });
+        fx.hit({
+          targetUnitId: tar.id,
+          at: tarTile,
+          from: attTile,
+          damage: finalDmg,
+          weapon: att.type,
+          isKill,
+          isCrit: crossfireBonus > 0 || finalDmg >= 7,
+          suppressed: Boolean(tar.isOverwatching && finalDmg > 0 && !isKill),
+          crossfireFrom: crossfireTiles,
+        });
         fx.popup(tarTile, `-${finalDmg}`, '#FF0000', 10);
         if (crossfireBonus > 0) fx.popup(tarTile, `CROSSFIRE +${crossfireBonus}`, '#F59E0B', 26);
-        fx.shake(finalDmg > 5 ? 12 : 4);
+        fx.shake(finalDmg > 5 ? 12 : 4, tarTile);
+        if (isKill) {
+          fx.killed(tar, tarTile, 'COMBAT', currentPlayer);
+        }
       }
 
       newUnits = newUnits.map(u => {
@@ -679,9 +877,10 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       } : u);
 
       if (attTile) {
-        fx.projectile(attTile, baseTile, 'MISSILE');
+        fx.projectile(attTile, baseTile, 'MISSILE', { weapon: 'SIEGE', attackerId: att.id });
+        fx.structureHit(baseTile, 'BASE', siegeDmg, newHp === 0, baseTile.owner);
         fx.popup(baseTile, `-${siegeDmg}`, '#FF4500', 20);
-        fx.shake(newHp === 0 ? 18 : 8);
+        fx.shake(newHp === 0 ? 18 : 8, baseTile);
       }
       fx.sound(newHp === 0 ? 'explosion' : 'attack');
       if (newHp > 0) fx.sound('hit');
@@ -709,9 +908,10 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const newHp = Math.max(0, barrierTile.hp - dmg);
 
       if (attTile) {
-        fx.projectile(attTile, barrierTile, 'MISSILE');
+        fx.projectile(attTile, barrierTile, 'MISSILE', { weapon: 'SIEGE', attackerId: att.id });
+        fx.structureHit(barrierTile, 'BARRIER', dmg, newHp === 0);
         fx.popup(barrierTile, `-${dmg}`, '#FFA500', 20);
-        fx.shake(5);
+        fx.shake(newHp === 0 ? 9 : 5, barrierTile);
       }
       fx.sound(newHp === 0 ? 'explosion' : 'attack');
 
@@ -831,6 +1031,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
             ? { ...t, type: 'BARRIER' as const, height: 1, hp: BARRIER_STATS.HP, maxHp: BARRIER_STATS.HP }
             : t
         );
+        fx.build(targetTiles, 'BARRIER');
         fx.sound('capture');
         const coords = targetTiles.map(t => `(${t.x},${t.y})`).join(', ');
         logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at ${coords}`, 'ECONOMY');
@@ -881,6 +1082,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       spendCp(actionCost(action));
       spendGold(item.cost);
       newMap = newMap.map(t => t.id === tile.id ? { ...t, type: newType, height: 1, hp: undefined, maxHp: undefined } : t);
+      fx.build([tile], 'BRIDGE');
       fx.sound('capture');
       logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at (${tile.x},${tile.y})`, 'ECONOMY');
       break;
@@ -895,6 +1097,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         if (dropTile) {
           const idx = dropTile.y * gridSize + dropTile.x;
           newMap[idx] = { ...newMap[idx], loot: drop.item };
+          fx.supplyLanded(dropTile, drop.item);
         }
       }
       newPendingDrops = [];
@@ -961,6 +1164,11 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           newUnits = newUnits.filter(u => !lavaTiles.has(u.tileId));
           meltingUnits.forEach(u => {
             if (nextMatchStats[u.owner]) nextMatchStats[u.owner].unitsLost += 1;
+            const meltTile = getTileByIdFast(newMap, u.tileId, gridSize);
+            if (meltTile) {
+              fx.killed(u, meltTile, 'LAVA');
+              fx.shake(5, meltTile);
+            }
             pushGraveyard(newGraveyard, u);
             extraLogs.push(createLog(currentRound, -1, `${UNIT_STATS[u.type].name} melted in Lava!`, 'COMBAT'));
           });
@@ -986,10 +1194,26 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         if (!target) return;
 
         const tarTile = getTileByIdFast(newMap, target.tileId, gridSize);
+        const weapon: WeaponVisual = projType === 'LASER' ? 'TURRET' : 'ARTILLERY';
+        const willKill = target.hp - dmg <= 0;
         if (tarTile) {
-          fx.projectile(origin, tarTile, projType);
+          fx.sound(projType === 'LASER' ? 'sniper' : 'attack');
+          fx.sound('hit');
+          fx.projectile(origin, tarTile, projType, { weapon, targetUnitId: target.id });
+          fx.hit({
+            targetUnitId: target.id,
+            at: tarTile,
+            from: origin,
+            damage: dmg,
+            weapon,
+            isKill: willKill,
+            suppressed: Boolean(target.isOverwatching && dmg > 0 && !willKill),
+          });
           fx.popup(tarTile, `-${dmg}`, colorHex, 14);
-          fx.shake(target.hp - dmg <= 0 ? 10 : 4);
+          fx.shake(willKill ? 10 : 4, tarTile);
+          if (willKill) {
+            fx.killed(target, tarTile, projType === 'LASER' ? 'TURRET' : 'ARTILLERY');
+          }
         }
 
         extraLogs.push(createLog(currentRound, -1, `${sourceLabel} hit P${target.owner + 1} ${UNIT_STATS[target.type].name} (-${dmg} HP)`, 'COMBAT'));

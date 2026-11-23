@@ -13,6 +13,7 @@ import { applyUnitXp, getEffectiveCpRules, getUnitMaxHp } from '../rules/CombatR
 import { createSeededRng, generateSectorSeed, normalizeSeed } from '../utils/SeededRandom';
 import { getChallengeById } from '../assets/ChallengeOps';
 import { cloneMatchStats, createEmptyGameState, createLog, createUnit, type GameState, type InventoryItem, type PlayerStatus } from './state';
+import { gameSettingsFor, type MapTilePatch, type TableSettings } from '../protocol';
 
 export const WEATHER_TYPES: WeatherType[] = ['CLEAR', 'SCORCHED', 'MONSOON', 'FOG', 'TAILWIND', 'SANDSTORM'];
 
@@ -477,31 +478,46 @@ export const createCustomMapGame = (settings: GameSettings, customMap: Tile[]): 
     const baseLocations: { x: number; y: number; owner: number }[] = [];
 
     if (potentialBases.length > 0) {
-        // Roughly top-left to bottom-right
-        potentialBases.sort((a, b) => (a.x + a.y) - (b.x + b.y));
+        const distinctOwners = new Set(potentialBases.map(b => b.owner));
+        const hasExplicitMatch =
+            potentialBases.length === settings.playerCount &&
+            distinctOwners.size === settings.playerCount &&
+            potentialBases.every(b => typeof b.owner === 'number' && b.owner >= 0 && b.owner < settings.playerCount);
 
-        // Two players take opposite corners (first and last); more take the first N.
-        let activeIndices: number[] = [];
-        if (settings.playerCount === 2 && potentialBases.length >= 2) {
-            activeIndices = [0, potentialBases.length - 1];
+        if (hasExplicitMatch) {
+            potentialBases.forEach(b => {
+                b.type = 'BASE';
+                b.height = 1;
+                baseLocations.push({ x: b.x, y: b.y, owner: b.owner! });
+            });
+            baseLocations.sort((a, b) => a.owner - b.owner);
         } else {
-            for (let i = 0; i < Math.min(settings.playerCount, potentialBases.length); i++) activeIndices.push(i);
-        }
+            // Roughly top-left to bottom-right
+            potentialBases.sort((a, b) => (a.x + a.y) - (b.x + b.y));
 
-        // Hide every base, then bring back only the ones in play
-        potentialBases.forEach(b => {
-            b.type = 'PLAINS';
-            delete b.owner;
-            delete b.hp;
-            delete b.maxHp;
-        });
-        activeIndices.forEach((baseIndex, ownerId) => {
-            const b = potentialBases[baseIndex];
-            b.type = 'BASE';
-            b.owner = ownerId;
-            b.height = 1;
-            baseLocations.push({ x: b.x, y: b.y, owner: ownerId });
-        });
+            // Two players take opposite corners (first and last); more take the first N.
+            let activeIndices: number[] = [];
+            if (settings.playerCount === 2 && potentialBases.length >= 2) {
+                activeIndices = [0, potentialBases.length - 1];
+            } else {
+                for (let i = 0; i < Math.min(settings.playerCount, potentialBases.length); i++) activeIndices.push(i);
+            }
+
+            // Hide every base, then bring back only the ones in play
+            potentialBases.forEach(b => {
+                b.type = 'PLAINS';
+                delete b.owner;
+                delete b.hp;
+                delete b.maxHp;
+            });
+            activeIndices.forEach((baseIndex, ownerId) => {
+                const b = potentialBases[baseIndex];
+                b.type = 'BASE';
+                b.owner = ownerId;
+                b.height = 1;
+                baseLocations.push({ x: b.x, y: b.y, owner: ownerId });
+            });
+        }
     } else {
         // No bases on the map: opposite corners
         const p1 = getTileByIdFast(zonedMap, '1,1', gridSize);
@@ -518,6 +534,84 @@ export const createCustomMapGame = (settings: GameSettings, customMap: Tile[]): 
     const units = spawnUnitsForPlayers(finalMap, settings.unitCounts, baseLocations, settings.mutators);
     const players = startingPlayers(settings, weatherRng);
     return freshGame(settings, finalMap, gridSize, units, seedUsed, players);
+};
+
+/** Computes sparse differences between a generated tile array and an edited version. */
+export const diffMapTilePatches = (baseTiles: Tile[], editedTiles: Tile[]): MapTilePatch[] => {
+    const patches: MapTilePatch[] = [];
+    const gridSize = Math.round(Math.sqrt(baseTiles.length));
+    for (const edited of editedTiles) {
+        const base = baseTiles[edited.y * gridSize + edited.x];
+        if (!base) continue;
+        if (
+            base.type === edited.type &&
+            base.height === edited.height &&
+            (base.subType ?? undefined) === (edited.subType ?? undefined) &&
+            (base.owner ?? undefined) === (edited.owner ?? undefined) &&
+            (base.bankGoldReward ?? undefined) === (edited.bankGoldReward ?? undefined) &&
+            (base.bankCpReward ?? undefined) === (edited.bankCpReward ?? undefined)
+        ) {
+            continue;
+        }
+        patches.push({
+            x: edited.x,
+            y: edited.y,
+            type: edited.type,
+            height: edited.height,
+            ...(edited.subType !== undefined ? { subType: edited.subType } : {}),
+            ...(edited.owner !== undefined ? { owner: edited.owner } : {}),
+            ...(edited.bankGoldReward !== undefined ? { bankGoldReward: edited.bankGoldReward } : {}),
+            ...(edited.bankCpReward !== undefined ? { bankCpReward: edited.bankCpReward } : {}),
+        });
+    }
+    return patches;
+};
+
+/** Applies sparse tile overrides onto a cloned tile grid. */
+export const applyMapTilePatches = (baseTiles: Tile[], patches: MapTilePatch[]): Tile[] => {
+    const next = cloneTiles(baseTiles);
+    const gridSize = Math.round(Math.sqrt(next.length));
+    for (const p of patches) {
+        if (p.x < 0 || p.x >= gridSize || p.y < 0 || p.y >= gridSize) continue;
+        const idx = p.y * gridSize + p.x;
+        const target = next[idx];
+        if (!target) continue;
+        next[idx] = {
+            ...target,
+            type: p.type,
+            height: p.height,
+            subType: p.subType,
+            owner: p.owner,
+            bankGoldReward: p.bankGoldReward,
+            bankCpReward: p.bankCpReward,
+            hp: undefined,
+            maxHp: undefined,
+        };
+    }
+    return next;
+};
+
+/** Builds an online table's game state from table rules and optional inline map edits. */
+export const createOnlineTableGame = (table: TableSettings, playerCount: number): GameState => {
+    const gameSettings = gameSettingsFor(table, playerCount);
+    const base = createGeneratedGame(gameSettings);
+    if (!table.mapEdits?.length) return base;
+    const patched = applyMapTilePatches(base.mapData, table.mapEdits);
+    // Recompute Voronoi zones if the host moved any HQs during lobby editing.
+    patched.forEach(t => { delete t.zone; });
+    return createCustomMapGame({ ...gameSettings, mapSeed: base.activeSeed }, patched);
+};
+
+/** Merges suggested tile patches into an online table's `mapEdits` array relative to its generated base map. */
+export const mergeOnlineMapEdits = (
+    table: TableSettings,
+    playerCount: number,
+    suggestionEdits: MapTilePatch[],
+): MapTilePatch[] => {
+    const base = createGeneratedGame(gameSettingsFor({ ...table, mapEdits: undefined }, playerCount));
+    const current = table.mapEdits?.length ? applyMapTilePatches(base.mapData, table.mapEdits) : base.mapData;
+    const merged = applyMapTilePatches(current, suggestionEdits);
+    return diffMapTilePatches(base.mapData, merged);
 };
 
 const settingsForMission = (

@@ -1,4 +1,13 @@
 import { create } from 'zustand';
+import type { WeaponVisual } from '@tactical/engine';
+import {
+  fxTimeline,
+  projectileColorFor,
+  type PopupSpawnRequest,
+  type ProjectileSpawnRequest,
+  type ProjectileVisualStyle,
+} from '../core/graphics/fxTimeline';
+import { SoundFX } from '../core/audio/SoundFX';
 
 export type FxMode = 'ECO' | 'LIVE';
 
@@ -6,110 +15,127 @@ const wakeListeners = new Set<(durationMs?: number) => void>();
 
 /** Wakes PixiJS WebGL rendering cleanly without triggering React re-renders (0 = single frame). */
 export const wakeBattleRenderer = (durationMs = 600) => {
-    wakeListeners.forEach(fn => fn(durationMs));
+  wakeListeners.forEach(fn => fn(durationMs));
 };
 
 export const subscribeRendererWake = (fn: (durationMs?: number) => void): (() => void) => {
-    wakeListeners.add(fn);
-    return () => {
-        wakeListeners.delete(fn);
-    };
+  wakeListeners.add(fn);
+  return () => {
+    wakeListeners.delete(fn);
+  };
 };
 
-interface DamagePopup {
-    id: string;
-    x: number;
-    y: number;
-    value: string;
-    color: string;
+export interface DamagePopup {
+  id: string;
+  x: number;
+  y: number;
+  value: string;
+  color: string;
+  durationMs: number;
 }
 
-interface Projectile {
-    id: string;
-    startX: number;
-    startY: number;
-    endX: number;
-    endY: number;
-    type: 'BULLET' | 'MISSILE' | 'LASER';
-    color: number;
+export interface Projectile {
+  id: string;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  type: ProjectileVisualStyle;
+  weapon?: WeaponVisual;
+  color: number;
+  travelMs: number;
 }
 
 interface EffectStore {
-    damagePopups: DamagePopup[];
-    shakeIntensity: number;
-    projectiles: Projectile[];
-    fxMode: FxMode;
+  damagePopups: DamagePopup[];
+  projectiles: Projectile[];
+  fxMode: FxMode;
 
-    toggleFxMode: () => void;
-    setFxMode: (mode: FxMode) => void;
-    
-    addDamagePopup: (x: number, y: number, value: string, color?: string) => void;
-    removePopup: (id: string) => void;
-    
-    addProjectile: (sx: number, sy: number, ex: number, ey: number, type?: 'BULLET' | 'MISSILE' | 'LASER') => void;
-    removeProjectile: (id: string) => void;
+  toggleFxMode: () => void;
+  setFxMode: (mode: FxMode) => void;
 
-    triggerScreenShake: (intensity: number) => void;
-    reduceShake: () => void;
+  spawnPopup: (popup: PopupSpawnRequest) => void;
+  addDamagePopup: (x: number, y: number, value: string, color?: string) => void;
+  removePopup: (id: string) => void;
+
+  spawnProjectile: (proj: ProjectileSpawnRequest) => void;
+  addProjectile: (sx: number, sy: number, ex: number, ey: number, type?: ProjectileVisualStyle) => void;
+  removeProjectile: (id: string) => void;
+
+  triggerScreenShake: (intensity: number) => void;
+  clearAllFx: () => void;
 }
 
+let manualFxSeq = 1;
+
 export const useEffectStore = create<EffectStore>((set, get) => ({
-    damagePopups: [],
-    shakeIntensity: 0,
-    projectiles: [],
-    fxMode: 'ECO',
+  damagePopups: [],
+  projectiles: [],
+  fxMode: 'ECO',
 
-    toggleFxMode: () => set(state => ({ fxMode: state.fxMode === 'ECO' ? 'LIVE' : 'ECO' })),
-    setFxMode: (mode) => set({ fxMode: mode }),
+  toggleFxMode: () => set(state => ({ fxMode: state.fxMode === 'ECO' ? 'LIVE' : 'ECO' })),
+  setFxMode: (mode) => set({ fxMode: mode }),
 
-    addProjectile: (sx, sy, ex, ey, type = 'BULLET') => {
-        const id = Math.random().toString(36).substr(2, 9);
-        const color = type === 'LASER' ? 0xFF0000 : (type === 'MISSILE' ? 0xFFA500 : 0xFFFF00);
-        
-        set(state => ({
-            projectiles: [...state.projectiles, { id, startX: sx, startY: sy, endX: ex, endY: ey, type, color }]
-        }));
-        wakeBattleRenderer(450);
+  spawnProjectile: (proj) => {
+    set(state => ({ projectiles: [...state.projectiles, proj] }));
+    wakeBattleRenderer(proj.travelMs + 220);
+  },
 
-        // Remove after animation (approx 300ms)
-        setTimeout(() => get().removeProjectile(id), 300);
-    },
+  addProjectile: (sx, sy, ex, ey, type = 'BULLET') => {
+    const id = `manual_proj_${manualFxSeq++}`;
+    const travelMs = type === 'LASER' ? 140 : type === 'MISSILE' ? 220 : 170;
+    const color = projectileColorFor(type);
+    get().spawnProjectile({ id, startX: sx, startY: sy, endX: ex, endY: ey, type, color, travelMs });
+    fxTimeline.schedule(travelMs + 60, () => get().removeProjectile(id), 'manual-proj-cleanup');
+  },
 
-    removeProjectile: (id) => {
-        set(state => ({
-            projectiles: state.projectiles.filter(p => p.id !== id)
-        }));
-    },
+  removeProjectile: (id) => {
+    set(state => {
+      if (!state.projectiles.some(p => p.id === id)) return state;
+      return { projectiles: state.projectiles.filter(p => p.id !== id) };
+    });
+  },
 
-    addDamagePopup: (x, y, value, color = '#ffffff') => {
-        const id = Math.random().toString(36).substr(2, 9);
-        const popup = { id, x, y, value, color };
-        
-        set(state => ({
-            damagePopups: [...state.damagePopups, popup]
-        }));
-        wakeBattleRenderer(1150);
+  spawnPopup: (popup) => {
+    set(state => ({ damagePopups: [...state.damagePopups, popup] }));
+    wakeBattleRenderer(popup.durationMs + 160);
+  },
 
-        // Auto-remove after 1 second (animation duration)
-        setTimeout(() => get().removePopup(id), 1000);
-    },
+  addDamagePopup: (x, y, value, color = '#ffffff') => {
+    const id = `manual_pop_${manualFxSeq++}`;
+    const durationMs = 960;
+    get().spawnPopup({ id, x, y, value, color, durationMs });
+    fxTimeline.schedule(durationMs, () => get().removePopup(id), 'manual-pop-cleanup');
+  },
 
-    removePopup: (id) => {
-        set(state => ({
-            damagePopups: state.damagePopups.filter(p => p.id !== id)
-        }));
-    },
+  removePopup: (id) => {
+    set(state => {
+      if (!state.damagePopups.some(p => p.id === id)) return state;
+      return { damagePopups: state.damagePopups.filter(p => p.id !== id) };
+    });
+  },
 
-    triggerScreenShake: (intensity) => {
-        // Add to current intensity to stack shakes explicitly, or just set max
-        set(state => ({ shakeIntensity: Math.max(state.shakeIntensity, intensity) }));
-        wakeBattleRenderer(550);
-    },
+  triggerScreenShake: (intensity) => {
+    fxTimeline.addTraumaFromIntensity(intensity);
+  },
 
-    reduceShake: () => {
-        set(state => {
-            const next = state.shakeIntensity * 0.9;
-            return { shakeIntensity: next <= 0.1 ? 0 : next };
-        });
-    }
+  clearAllFx: () => {
+    fxTimeline.clear();
+  },
 }));
+
+// Wire fxTimeline's store + audio + wake sink once at module load
+fxTimeline.configure({
+  playSound: (sound) => SoundFX.play(sound),
+  spawnProjectile: (proj) => useEffectStore.getState().spawnProjectile(proj),
+  removeProjectile: (id) => useEffectStore.getState().removeProjectile(id),
+  spawnPopup: (popup) => useEffectStore.getState().spawnPopup(popup),
+  removePopup: (id) => useEffectStore.getState().removePopup(id),
+  onWake: (durationMs) => wakeBattleRenderer(durationMs),
+  onClearVisuals: () => {
+    const st = useEffectStore.getState();
+    if (st.projectiles.length > 0 || st.damagePopups.length > 0) {
+      useEffectStore.setState({ projectiles: [], damagePopups: [] });
+    }
+  },
+});

@@ -1,9 +1,9 @@
 import React, { useEffect, useRef } from 'react';
-import { PixiComponent, useApp, useTick } from '@pixi/react';
+import { Container, PixiComponent, useApp, useTick } from '@pixi/react';
 import { Viewport } from 'pixi-viewport';
 import * as PIXI from 'pixi.js';
 import { useViewportContext } from '../../../context/ViewportContext';
-import { useEffectStore } from '../../../store/useEffectStore';
+import { fxTimeline, getPrefersReducedMotion, subscribeReducedMotion } from '../../../core/graphics/fxTimeline';
 
 interface ViewportComponentProps {
     app: PIXI.Application;
@@ -11,7 +11,7 @@ interface ViewportComponentProps {
     height: number;
     worldWidth: number;
     worldHeight: number;
-    setViewportRef: (viewport: Viewport) => void;
+    setViewportRef: (viewport: Viewport | null) => void;
     children?: React.ReactNode;
 }
 
@@ -70,6 +70,7 @@ const PixiViewport = PixiComponent<ViewportComponentProps, Viewport>('GameViewpo
         return viewport;
     },
     applyProps: (instance, oldProps, newProps) => {
+         if (instance.destroyed) return;
          const oldP = oldProps as ViewportComponentProps;
          const newP = newProps as ViewportComponentProps;
          
@@ -83,12 +84,14 @@ const PixiViewport = PixiComponent<ViewportComponentProps, Viewport>('GameViewpo
     },
     willUnmount: (instance) => {
         try {
-            instance.plugins.pause('drag');
-            instance.plugins.pause('wheel');
-            instance.plugins.pause('pinch');
-            instance.plugins.pause('decelerate');
-            instance.plugins.pause('clamp');
-            instance.plugins.pause('clampZoom');
+            if (!instance.destroyed) {
+                instance.plugins.pause('drag');
+                instance.plugins.pause('wheel');
+                instance.plugins.pause('pinch');
+                instance.plugins.pause('decelerate');
+                instance.plugins.pause('clamp');
+                instance.plugins.pause('clampZoom');
+            }
             const vpAny = instance as any;
             if (vpAny.options?.ticker?._head && vpAny.tickerFunction) {
                 vpAny.options.ticker.remove(vpAny.tickerFunction);
@@ -119,7 +122,7 @@ export const KeyboardPanController = () => {
     }, []);
 
     useTick((delta) => {
-        if (!viewport) return;
+        if (!viewport || viewport.destroyed) return;
         
         const speed = 15 * delta;
         // Divide speed by scale so panning doesn't feel ultra-fast when zoomed in
@@ -134,37 +137,60 @@ export const KeyboardPanController = () => {
     return null;
 };
 
-const ScreenShakeController = () => {
+/**
+ * Zero-drift trauma camera shake container wrapping ALL world content inside the viewport
+ * (pre-rotated terrain, rotated board, units, particles, and weather) so layers never shear
+ * and the camera itself (`viewport.x` / `viewport.y`) never drifts.
+ */
+const WorldShakeContainer: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
     const { viewport } = useViewportContext();
-    const shakeIntensity = useEffectStore(state => state.shakeIntensity);
-    const reduceShake = useEffectStore(state => state.reduceShake);
+    const shakeRef = useRef<PIXI.Container>(null);
+    const reducedMotionRef = useRef<boolean>(getPrefersReducedMotion());
 
-    useTick((delta) => {
-        if (!viewport || shakeIntensity <= 0.1) return;
+    useEffect(() => {
+        reducedMotionRef.current = getPrefersReducedMotion();
+        return subscribeReducedMotion((reduced) => {
+            reducedMotionRef.current = reduced;
+            if (reduced && shakeRef.current && !shakeRef.current.destroyed) {
+                shakeRef.current.position.set(0, 0);
+            }
+        });
+    }, []);
 
-        // Apply shake (Drift method - simple impact)
-        // High frequency shake
-        const power = shakeIntensity * ((Math.random() > 0.5) ? 1 : -1);
-        const powerY = shakeIntensity * ((Math.random() > 0.5) ? 1 : -1);
-
-        viewport.x += power;
-        viewport.y += powerY;
-
-        // Damping
-        reduceShake();
+    useTick(() => {
+        const container = shakeRef.current;
+        if (!container || container.destroyed) return;
+        const scale = viewport && !viewport.destroyed ? viewport.scale.x : 1;
+        const offset = fxTimeline.getShakeOffset(scale, reducedMotionRef.current);
+        if (container.x !== offset.x || container.y !== offset.y) {
+            container.position.set(offset.x, offset.y);
+        }
     });
 
-    return null;
+    return (
+        <Container ref={shakeRef} name="world_shake_root">
+            {children}
+        </Container>
+    );
 };
 
-export const GameViewport = (props: Omit<ViewportComponentProps, 'app' | 'setViewportRef'> & { setViewport: (viewport: Viewport) => void }) => {
+export const GameViewport = (props: Omit<ViewportComponentProps, 'app' | 'setViewportRef'> & { setViewport: (viewport: Viewport | null) => void }) => {
     const app = useApp();
+    const { children, setViewport, ...rest } = props;
+
+    useEffect(() => {
+        return () => {
+            setViewport(null);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     
     return (
         <>
-            <PixiViewport app={app} setViewportRef={props.setViewport} {...props} />
+            <PixiViewport app={app} setViewportRef={setViewport} {...rest}>
+                <WorldShakeContainer>{children}</WorldShakeContainer>
+            </PixiViewport>
             <KeyboardPanController />
-            <ScreenShakeController />
         </>
     );
 };

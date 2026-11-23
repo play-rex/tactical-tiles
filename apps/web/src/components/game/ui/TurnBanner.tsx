@@ -4,8 +4,8 @@ import { useOnline } from '../../../net/useOnline';
 import { PLAYER_UI_THEME, playerDisplayName } from '../../ui/GeoPrimitives';
 
 /**
- * A banner over the map each time you can act: your turn online or against the AI, and each
- * player's turn at a shared screen (so the next player knows to take the device).
+ * A banner over the map at the start of every turn: calls out your turn to act,
+ * other players' turns online / vs AI, and who takes the device on shared-screen play.
  */
 export const TurnBanner: React.FC = () => {
   const currentPlayer = useGameStore(s => s.currentPlayer);
@@ -16,29 +16,42 @@ export const TurnBanner: React.FC = () => {
   const mode = useGameStore(s => s.mode);
   const gameMode = useGameStore(s => s.settings.gameMode);
   const playerNames = useGameStore(s => s.settings.playerNames);
-  const seatName = useOnline(s => (mode === 'ONLINE' ? s.view?.seats[currentPlayer]?.name : undefined));
-  const displayName = playerDisplayName(currentPlayer, playerNames, seatName);
+  const activeSeat = useOnline(s => (mode === 'ONLINE' ? s.view?.seats[currentPlayer] : undefined));
+  const displayName = playerDisplayName(currentPlayer, playerNames, activeSeat?.name);
   const [shown, setShown] = useState<number | null>(null);
 
-  const myMove = !isAiTurn && winner === null;
   useEffect(() => {
-    if (!myMove) return;
+    if (winner !== null) {
+      setShown(null);
+      return;
+    }
     setShown(turnCounter);
     const t = setTimeout(() => setShown(null), 1700);
     return () => clearTimeout(t);
-  }, [myMove, turnCounter, currentPlayer]);
+  }, [turnCounter, currentPlayer, winner]);
 
-  if (shown === null || !myMove) return null;
+  if (shown === null || winner !== null) return null;
   const theme = PLAYER_UI_THEME[currentPlayer] ?? PLAYER_UI_THEME[0];
   const sharedScreen = mode === 'LOCAL' && gameMode !== 'PVE';
-  const title = sharedScreen ? `${displayName} — you're up` : `${displayName} — your turn`;
+  const title = isAiTurn
+    ? `${displayName}'s Turn`
+    : sharedScreen
+      ? `${displayName} — You're Up`
+      : `${displayName} — Your Turn`;
+  const roleTag = isAiTurn
+    ? activeSeat?.isBot
+      ? ' · Bot'
+      : mode === 'LOCAL' && gameMode === 'PVE'
+        ? ' · AI'
+        : ''
+    : '';
 
   return (
     <div className="tt-turn-banner" key={`${shown}-${currentPlayer}`} role="status" aria-live="polite">
       <div className="tt-turn-banner__plate" style={{ background: theme.badgeBg, color: theme.badgeText }}>
         <span className="tt-turn-banner__title">{title}</span>
         <span className="tt-turn-banner__sub">
-          Round {totalTurns + 1} · Player {currentPlayer + 1}
+          Round {totalTurns + 1} · Player {currentPlayer + 1}{roleTag}
         </span>
       </div>
     </div>

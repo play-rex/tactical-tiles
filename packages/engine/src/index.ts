@@ -8,3 +8,4 @@ export * from './game/validate';
 export * from './game/view';
 export * from './game/bot';
 export * from './protocol';
+export { generateSectorSeed, normalizeSeed } from './utils/SeededRandom';

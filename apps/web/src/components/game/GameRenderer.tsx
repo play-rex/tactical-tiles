@@ -16,13 +16,16 @@ import { useViewportContext } from '../../context/ViewportContext';
 import { SelectionCursor } from './renderer/SelectionCursor';
 import { DamageText } from './renderer/DamageText';
 import { ProjectileRenderer } from './renderer/ProjectileRenderer';
+import { ParticleLayer } from './renderer/ParticleLayer';
 import { WeatherSystemMemo as WeatherSystem } from './renderer/WeatherSystem.tsx'; // Explicit .tsx extension
 import { FxMode, subscribeRendererWake, useEffectStore, wakeBattleRenderer } from '../../store/useEffectStore';
+import { fxTimeline } from '../../core/graphics/fxTimeline';
+import type { ParticlePool } from '../../core/graphics/ParticlePool';
 import { canUnitAttackFromTile } from '@tactical/engine/rules/CombatRules';
 import { getOverwatchCoverageTiles } from '@tactical/engine/rules/OverwatchRules';
 import { useLowPowerStageOptions } from './renderer/pixiStageUtils';
-import { computeUnitAttackPreview, getHoverMoveResolution, getPostMoveTargetTiles } from '../../core/hoverMovePreview';
 import { type BoardRotation, rotateBoardPoint, unrotateBoardPoint } from '../../core/boardRotation';
+import { computeUnitAttackPreview, getHoverMoveResolution, getPostMoveTargetTiles } from '../../core/hoverMovePreview';
 
 const LOOT_MARKER_STYLE = new PIXI.TextStyle({
     fill: '#FFD700',
@@ -898,8 +901,13 @@ const HoverOverlayLayer = React.memo<{
 });
 
 /** Isolated FX layer so transient projectiles/popups do not re-render the map, units, or viewport. */
-const EffectsLayer = React.memo<{ selectedUnitPos: { x: number; y: number } | null; fxMode: FxMode; mapRotation: BoardRotation }>(
-    ({ selectedUnitPos, fxMode, mapRotation }) => {
+const EffectsLayer = React.memo<{
+    selectedUnitPos: { x: number; y: number } | null;
+    fxMode: FxMode;
+    mapRotation: BoardRotation;
+    particlePoolRef: React.MutableRefObject<ParticlePool | null>;
+}>(
+    ({ selectedUnitPos, fxMode, mapRotation, particlePoolRef }) => {
         const damagePopups = useEffectStore(state => state.damagePopups);
         const projectiles = useEffectStore(state => state.projectiles);
         return (
@@ -910,6 +918,7 @@ const EffectsLayer = React.memo<{ selectedUnitPos: { x: number; y: number } | nu
                 {projectiles.map(proj => (
                     <ProjectileRenderer key={proj.id} data={proj} />
                 ))}
+                <ParticleLayer mapRotation={mapRotation} poolRef={particlePoolRef} />
                 {damagePopups.map(popup => (
                     <DamageText key={popup.id} data={popup} mapRotation={mapRotation} />
                 ))}
@@ -918,21 +927,27 @@ const EffectsLayer = React.memo<{ selectedUnitPos: { x: number; y: number } | nu
     }
 );
 
-/** Demand-driven + FPS-capped PixiJS Stage lifecycle controller (0% idle GPU in ECO mode). */
+/**
+ * Demand-driven + adaptive-FPS PixiJS Stage lifecycle & FX timeline driver:
+ * - ECO idle: 0% GPU (`ticker.stop()`)
+ * - Active combat / movement / pan (both ECO & LIVE): silky 60 FPS with wake delta-spike clamp
+ * - LIVE idle: 24 FPS ambient map life
+ */
 const BattleRenderController: React.FC<{
     fxMode: FxMode;
     viewport: any;
     unitsAnimKey: string;
     sceneRenderDeps: unknown[];
-}> = ({ fxMode, viewport, unitsAnimKey, sceneRenderDeps }) => {
+    particlePoolRef: React.MutableRefObject<ParticlePool | null>;
+}> = ({ fxMode, viewport, unitsAnimKey, sceneRenderDeps, particlePoolRef }) => {
     const app = useApp();
     const hasProjectiles = useEffectStore(state => state.projectiles.length > 0);
     const hasPopups = useEffectStore(state => state.damagePopups.length > 0);
-    const hasShake = useEffectStore(state => state.shakeIntensity > 0.1);
-    const activeFx = hasProjectiles || hasPopups || hasShake;
+    const activeFx = hasProjectiles || hasPopups;
 
     const wakeUntilRef = useRef<number>(0);
     const singleRafRef = useRef<number | null>(null);
+    const justWokeRef = useRef<boolean>(false);
     const fxModeRef = useRef<FxMode>(fxMode);
     const activeFxRef = useRef<boolean>(activeFx);
     fxModeRef.current = fxMode;
@@ -943,26 +958,76 @@ const BattleRenderController: React.FC<{
         if (singleRafRef.current !== null) return;
         singleRafRef.current = requestAnimationFrame(() => {
             singleRafRef.current = null;
-            if (!(app.renderer as any)?.destroyed) {
-                app.renderer.render(app.stage);
+            const renderer = (app as any)?.renderer;
+            const stage = (app as any)?.stage;
+            if (renderer && !renderer.destroyed && stage) {
+                renderer.render(stage);
             }
         });
     }, [app]);
 
     const wake = useCallback((durationMs = 600) => {
+        const ticker = (app as any)?.ticker;
+        if (!ticker || ticker.destroyed) return;
+        if (durationMs > 0) {
+            wakeUntilRef.current = Math.max(wakeUntilRef.current, performance.now() + durationMs);
+        }
         if (fxModeRef.current === 'LIVE') {
-            if (!app.ticker.started) app.ticker.start();
+            if (durationMs > 0) ticker.maxFPS = 60;
+            if (!ticker.started) {
+                justWokeRef.current = true;
+                ticker.start();
+            }
             return;
         }
         if (durationMs <= 0) {
             scheduleSingleFrame();
             return;
         }
-        wakeUntilRef.current = Math.max(wakeUntilRef.current, performance.now() + durationMs);
-        if (!app.ticker.started) {
-            app.ticker.start();
+        ticker.maxFPS = 60;
+        if (!ticker.started) {
+            justWokeRef.current = true;
+            ticker.start();
         }
     }, [app, scheduleSingleFrame]);
+
+    // Connect pooled particle sink to fxTimeline + clear cleanly on unmount or tab hide
+    useEffect(() => {
+        fxTimeline.configure({
+            emitParticles: (req) => particlePoolRef.current?.emit(req),
+            hasActiveParticles: () => Boolean(particlePoolRef.current?.hasActiveParticles()),
+        });
+        const unsubTimelineActive = fxTimeline.subscribeActive((active) => {
+            if (active) wake(350);
+        });
+
+        const onVisibilityChange = () => {
+            if (document.hidden) {
+                fxTimeline.clear();
+                particlePoolRef.current?.clear();
+                wakeUntilRef.current = 0;
+                const ticker = (app as any)?.ticker;
+                if (fxModeRef.current === 'ECO' && ticker && !ticker.destroyed && ticker.started) {
+                    ticker.stop();
+                }
+            } else {
+                justWokeRef.current = true;
+                scheduleSingleFrame();
+            }
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+
+        return () => {
+            unsubTimelineActive();
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            fxTimeline.configure({
+                emitParticles: undefined,
+                hasActiveParticles: undefined,
+            });
+            fxTimeline.clear();
+            particlePoolRef.current?.clear();
+        };
+    }, [app, particlePoolRef, wake, scheduleSingleFrame]);
 
     // Stop PixiJS global Ticker.shared so no stray background RAF loop runs
     useEffect(() => {
@@ -980,32 +1045,52 @@ const BattleRenderController: React.FC<{
         };
     }, []);
 
-    // Configure FPS cap + ECO idle auto-sleep ticker check
-    useEffect(() => {
-        app.ticker.maxFPS = fxMode === 'LIVE' ? 24 : 30;
-        if (fxMode === 'LIVE') {
-            app.ticker.start();
-            return;
+    // Central clamped timeline & particle stepping + adaptive FPS / ECO auto-sleep
+    useTick(() => {
+        const ticker = (app as any)?.ticker;
+        if (!ticker || ticker.destroyed) return;
+
+        let rawMs = ticker.deltaMS;
+        if (justWokeRef.current) {
+            justWokeRef.current = false;
+            rawMs = 16.67;
+        }
+        const { combatDtMs } = fxTimeline.step(rawMs);
+        if (combatDtMs > 0) {
+            particlePoolRef.current?.update(combatDtMs);
         }
 
-        const onTick = () => {
-            if (fxModeRef.current !== 'ECO') return;
-            if (!activeFxRef.current && performance.now() >= wakeUntilRef.current) {
+        const fxBusy = activeFxRef.current || fxTimeline.isActive();
+        const withinWake = performance.now() < wakeUntilRef.current;
+
+        if (fxModeRef.current === 'LIVE') {
+            const targetFps = fxBusy || withinWake ? 60 : 24;
+            if (ticker.maxFPS !== targetFps) ticker.maxFPS = targetFps;
+        } else {
+            if (ticker.maxFPS !== 60) ticker.maxFPS = 60;
+            if (!fxBusy && !withinWake) {
                 wakeUntilRef.current = 0;
-                app.ticker.stop();
+                ticker.stop();
                 scheduleSingleFrame();
             }
-        };
-        app.ticker.add(onTick);
-        // Kick off one clean initial settle window
-        wake(450);
+        }
+    });
 
-        return () => {
-            if ((app.ticker as any)?._head) {
-                app.ticker.remove(onTick);
+    // Configure ticker startup on ECO <-> LIVE mode change
+    useEffect(() => {
+        const ticker = (app as any)?.ticker;
+        if (!ticker || ticker.destroyed) return;
+        if (fxMode === 'LIVE') {
+            ticker.maxFPS = 24;
+            if (!ticker.started) {
+                justWokeRef.current = true;
+                ticker.start();
             }
-        };
-    }, [app, fxMode, wake, scheduleSingleFrame]);
+            return;
+        }
+        // ECO: kick off one clean settle window then drop to 0% idle GPU
+        wake(450);
+    }, [app, fxMode, wake]);
 
     // Wake for unit movement / spawns / combat FX
     useEffect(() => {
@@ -1055,7 +1140,7 @@ const BattleRenderController: React.FC<{
                 viewport.off('zoomed', onVpActive);
             }
         };
-    }, [viewport, wake, scheduleSingleFrame]);
+    }, [viewport, wake]);
 
     return null;
 };
@@ -1109,8 +1194,8 @@ export const GameRenderer = () => {
     const fxMode = useEffectStore(state => state.fxMode);
     const stageOptions = useLowPowerStageOptions(0xCFD7E4, fxMode === 'ECO' ? 1.25 : 1.5);
 
-    const terrainSig = useMemo(() => computeTerrainSignature(mapData, gridSize), [mapData, gridSize]);
-    const bakedBoard = useMemo(() => bakeTacticalReconBoard(mapData, gridSize), [terrainSig]);
+    const terrainSig = useMemo(() => computeTerrainSignature(mapData, gridSize, mapRotation), [mapData, gridSize, mapRotation]);
+    const bakedBoard = useMemo(() => bakeTacticalReconBoard(mapData, gridSize, mapRotation), [terrainSig]);
     const waterTiles = useMemo(() => mapData.filter(t => t.type === 'WATER'), [terrainSig]);
     const baseTiles = useMemo(() => mapData.filter(t => t.type === 'BASE'), [terrainSig]);
     const tileById = useMemo(() => {
@@ -1149,6 +1234,7 @@ export const GameRenderer = () => {
     
     const weather = useGameStore(state => state.weather);
     const hitPlaneRef = useRef<PIXI.Graphics>(null);
+    const particlePoolRef = useRef<ParticlePool | null>(null);
     const lastHoverRef = useRef<string | null>(null);
 
     const unitsAnimKey = useMemo(
@@ -1214,7 +1300,9 @@ export const GameRenderer = () => {
 
     // Resize Handler
     useEffect(() => {
+        let alive = true;
         const resize = () => {
+            if (!alive) return;
             let w = 800; 
             let h = 600;
 
@@ -1227,16 +1315,18 @@ export const GameRenderer = () => {
                  h = window.innerHeight;
             }
 
-            setDimensions({ width: w, height: h });
+            setDimensions({ width: Math.max(1, w), height: Math.max(1, h) });
         };
         
         const ro = new ResizeObserver(resize);
         if (parentRef.current) ro.observe(parentRef.current);
         window.addEventListener('resize', resize);
         
-        setTimeout(resize, 50);
+        const timer = setTimeout(resize, 50);
 
         return () => {
+            alive = false;
+            clearTimeout(timer);
             ro.disconnect();
             window.removeEventListener('resize', resize);
         };
@@ -1342,6 +1432,7 @@ export const GameRenderer = () => {
                     fxMode={fxMode}
                     viewport={viewport}
                     unitsAnimKey={unitsAnimKey}
+                    particlePoolRef={particlePoolRef}
                     sceneRenderDeps={[
                         dimensions,
                         bakedBoard,
@@ -1376,6 +1467,16 @@ export const GameRenderer = () => {
                     worldHeight={totalBoardSize}
                     setViewport={setViewport}
                 >
+                    {/* 0a. BAKED TACTICAL RECON HD TERRAIN (pre-rotated in upright screen space so assets never flip) */}
+                    <SafeSprite
+                        texture={bakedBoard.terrainTexture}
+                        x={0}
+                        y={0}
+                        width={totalBoardSize}
+                        height={totalBoardSize}
+                        eventMode="none"
+                    />
+
                     <Container
                         name="rotated_board"
                         x={totalBoardSize / 2}
@@ -1383,19 +1484,11 @@ export const GameRenderer = () => {
                         pivot={{ x: totalBoardSize / 2, y: totalBoardSize / 2 }}
                         angle={mapRotation}
                     >
-                        {/* 0. WORLD BOARD INSET FRAME */}
+                        {/* 0b. WORLD BOARD INSET FRAME */}
                         <Graphics eventMode="none" draw={drawBoardFrame} />
 
-                        {/* 1. BAKED TACTICAL RECON HD TERRAIN + LIVE WATER + BASE RADAR + SINGLE HIT PLANE */}
+                        {/* 1. LIVE WATER + BASE RADAR + SINGLE HIT PLANE */}
                         <Container name="terrain">
-                            <SafeSprite
-                                texture={bakedBoard.terrainTexture}
-                                x={0}
-                                y={0}
-                                width={totalBoardSize}
-                                height={totalBoardSize}
-                                eventMode="none"
-                            />
                             <AnimatedWaterLayer waterTiles={waterTiles} animate={fxMode === 'LIVE'} />
                             <AnimatedBaseRadarLayer baseTiles={baseTiles} fogOfWar={settings.fogOfWar} visibleTiles={visibleTiles} animate={fxMode === 'LIVE'} />
                             <Graphics
@@ -1498,8 +1591,13 @@ export const GameRenderer = () => {
                             mapRotation={mapRotation}
                         />
 
-                        {/* 6. EFFECTS LAYER (Damage, Selection, Projectiles) */}
-                        <EffectsLayer selectedUnitPos={selectedUnitPos} fxMode={fxMode} mapRotation={mapRotation} />
+                        {/* 6. EFFECTS LAYER (Damage, Selection, Projectiles, Pooled Particles) */}
+                        <EffectsLayer
+                            selectedUnitPos={selectedUnitPos}
+                            fxMode={fxMode}
+                            mapRotation={mapRotation}
+                            particlePoolRef={particlePoolRef}
+                        />
                     </Container>
 
                     {/* Phase 4: Weather System (Atmosphere) - stays unrotated above board so rain/wind stay screen-upright */}

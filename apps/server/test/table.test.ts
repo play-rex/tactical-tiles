@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import { matchMaker, Server } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
-import { ClientMsg, CloseCode, moveCostsFor, ROOM_NAME, ServerMsg, type TableView } from '@tactical/engine';
+import { ClientMsg, CloseCode, generateSectorSeed, moveCostsFor, ROOM_NAME, ServerMsg, type TableView } from '@tactical/engine';
 import { Client, type Room } from 'colyseus.js';
 import { limits, restoreTables, TableRoom, timings } from '../src/TableRoom';
 import { fileTableStore } from '../src/store';
@@ -305,4 +305,117 @@ test('sync and reconnect never replay stale action events, and restoreTables ski
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('lobby pre-rolls a map seed for previews and launches with the randomized seed', async () => {
+  const a = await host();
+  const initialA = await a.view(() => true);
+  assert.ok(initialA.settings.mapSeed.length >= 4, 'new lobby starts with an active random preview seed');
+
+  const b = await join(initialA.code);
+  const initialB = await b.view(() => true);
+  assert.equal(initialB.settings.mapSeed, initialA.settings.mapSeed, 'guests receive the exact preview seed');
+
+  const nextSeed = generateSectorSeed() === initialA.settings.mapSeed ? 'SECTOR99' : generateSectorSeed();
+  const patches = [{ x: 10, y: 10, type: 'BUILDING' as const, height: 1, subType: 'WATCHTOWER' as const }];
+  a.room.send(ClientMsg.settings, { ...initialA.settings, mapSeed: nextSeed, mapEdits: patches });
+  const updatedB = await b.view(
+    v => v.settings.mapSeed === nextSeed && v.settings.mapEdits?.length === 1,
+    'guest receives randomized seed and map edits',
+  );
+  assert.equal(updatedB.settings.mapSeed, nextSeed);
+  assert.equal(updatedB.settings.mapEdits?.[0].subType, 'WATCHTOWER');
+
+  a.room.send(ClientMsg.start);
+  const startedA = await a.view(v => v.status === 'playing');
+  const startedB = await b.view(v => v.status === 'playing');
+  assert.equal(startedA.game!.game.activeSeed, nextSeed);
+  assert.equal(startedB.game!.game.activeSeed, nextSeed);
+  assert.equal(startedA.game!.game.mapData[10 * startedA.game!.game.gridSize + 10]?.subType, 'WATCHTOWER');
+
+  await a.room.leave();
+  await b.room.leave();
+});
+
+test('lobby live drafts, guest suggestions toggle, per-player edit grant, and lock controls', async () => {
+  const a = await host('Host');
+  const initial = await a.view(() => true);
+  const b = await join(initial.code, 'Guest');
+  await b.view(() => true);
+
+  // 1. Host sends a transient live draft -> guest views it before Apply
+  const draftPatch = [{ x: 4, y: 4, type: 'MOUNTAIN' as const, height: 2 }];
+  a.room.send(ClientMsg.mapDraft, { edits: draftPatch });
+  const draftView = await b.view(v => v.liveDraft?.seat === 0 && v.liveDraft.edits.length === 1, 'guest sees host live draft');
+  assert.equal(draftView.settings.mapEdits, undefined, 'live draft does not mutate committed mapEdits yet');
+  a.room.send(ClientMsg.mapDraft, { edits: null });
+  await b.view(v => v.liveDraft === null, 'draft cleared on cancel');
+
+  // 2. Guest cannot directly edit unless host grants permission, but can suggest when Suggestions ON
+  b.room.send(ClientMsg.mapDraft, { edits: draftPatch });
+  const sugPatch = [{ x: 6, y: 6, type: 'BANK' as const, height: 1, bankGoldReward: 200, bankCpReward: 10 }];
+  b.room.send(ClientMsg.mapSuggest, { edits: sugPatch });
+  const sugView = await a.view(v => (v.mapSuggestions?.length ?? 0) === 1, 'host sees guest suggestion');
+  assert.equal(sugView.mapSuggestions![0].seat, 1);
+
+  // Host accepts guest suggestion -> merges into settings.mapEdits and clears suggestion queue
+  a.room.send(ClientMsg.resolveSuggestion, { seat: 1, accept: true });
+  const mergedView = await b.view(
+    v => (v.mapSuggestions?.length ?? 0) === 0 && v.settings.mapEdits?.some(e => e.x === 6 && e.y === 6 && e.type === 'BANK'),
+    'accepted suggestion applied to mapEdits',
+  );
+  assert.ok(mergedView.settings.mapEdits?.length);
+
+  // 3. Host turns Suggestions OFF -> guest suggestion is rejected
+  a.room.send(ClientMsg.settings, { ...mergedView.settings, suggestionsEnabled: false });
+  await b.view(v => v.settings.suggestionsEnabled === false, 'suggestions turned off');
+  b.room.send(ClientMsg.mapSuggest, { edits: draftPatch });
+  await new Promise(r => setTimeout(r, 80));
+  assert.equal((a.latest()?.mapSuggestions?.length ?? 0), 0);
+
+  // 4. Host grants direct edit access to Guest -> Host & Guest follow single-active-editor exclusivity
+  a.room.send(ClientMsg.setSeatMapAccess, { seat: 1, canEditMap: true, mapLocked: false });
+  const grantedB = await b.view(v => v.seats[1].canEditMap === true, 'guest granted edit access');
+  assert.equal(grantedB.seats[1].mapLocked, false);
+
+  // While Host holds active Edit lock (even before placing first tile), Guest cannot edit directly and can only suggest
+  a.room.send(ClientMsg.mapDraft, { edits: [] });
+  await b.view(v => v.liveDraft?.seat === 0, 'guest sees host holds edit lock');
+  const errCountBefore = b.errors.length;
+  b.room.send(ClientMsg.mapDraft, { edits: draftPatch });
+  b.room.send(ClientMsg.mapCommitEdit, { edits: draftPatch });
+  await new Promise(r => setTimeout(r, 80));
+  assert.ok(b.errors.length > errCountBefore, 'second editor rejected while first editor is active');
+  a.room.send(ClientMsg.settings, { ...mergedView.settings, suggestionsEnabled: true });
+  await b.view(v => v.settings.suggestionsEnabled === true);
+  b.room.send(ClientMsg.mapSuggest, { edits: draftPatch });
+  await a.view(v => (v.mapSuggestions?.length ?? 0) === 1, 'other permitted editor can still suggest while host edits');
+  a.room.send(ClientMsg.resolveSuggestion, { seat: 1, accept: false });
+  a.room.send(ClientMsg.mapDraft, { edits: null });
+  await b.view(v => v.liveDraft === null, 'host released edit lock');
+
+  // Once Host finished editing, Permitted Guest can acquire Edit lock and commit directly
+  b.room.send(ClientMsg.mapDraft, { edits: draftPatch });
+  await a.view(v => v.liveDraft?.seat === 1, 'host sees permitted guest editing live');
+  b.room.send(ClientMsg.mapCommitEdit, { edits: [...mergedView.settings.mapEdits!, ...draftPatch] });
+  const committed = await a.view(
+    v => v.liveDraft === null && Boolean(v.settings.mapEdits?.some(e => e.x === 4 && e.y === 4 && e.type === 'MOUNTAIN')),
+    'guest committed direct edit',
+  );
+  assert.ok(committed.settings.mapEdits?.some(e => e.x === 4 && e.y === 4));
+
+  // 5. Host locks Guest from editing & suggesting -> drops live draft and blocks new suggestions/edits
+  a.room.send(ClientMsg.settings, { ...committed.settings, suggestionsEnabled: true });
+  await b.view(v => v.settings.suggestionsEnabled === true);
+  b.room.send(ClientMsg.mapDraft, { edits: draftPatch });
+  await a.view(v => v.liveDraft?.seat === 1);
+  a.room.send(ClientMsg.setSeatMapAccess, { seat: 1, canEditMap: false, mapLocked: true });
+  const locked = await b.view(v => v.seats[1].mapLocked === true && v.seats[1].canEditMap === false && v.liveDraft === null, 'guest locked cleanly');
+  assert.equal(locked.seats[1].mapLocked, true);
+  b.room.send(ClientMsg.mapSuggest, { edits: draftPatch });
+  await new Promise(r => setTimeout(r, 80));
+  assert.equal((a.latest()?.mapSuggestions?.length ?? 0), 0);
+
+  await a.room.leave();
+  await b.room.leave();
 });

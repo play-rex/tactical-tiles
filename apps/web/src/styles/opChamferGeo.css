@@ -359,6 +359,51 @@
   .tt-squad3 { grid-template-columns: minmax(0, 1fr); }
 }
 
+/* ── Top-layer native modal dialog for setup battlefield inspection ── */
+.tt-map-dialog {
+  padding: 4px;
+  border: none;
+  background: transparent;
+  color: var(--op-ink);
+  margin: auto;
+  max-width: min(96vw, 940px);
+  max-height: 94dvh;
+  width: fit-content;
+}
+.tt-map-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.tt-map-dialog:modal {
+  overscroll-behavior: contain;
+}
+.tt-map-dialog::backdrop {
+  background: rgba(20, 24, 33, 0.62);
+  backdrop-filter: blur(3px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.tt-preview-thumb-btn {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 2px solid var(--op-line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #DCE5EE;
+  cursor: zoom-in;
+  position: relative;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+.tt-preview-thumb-btn:hover {
+  border-color: var(--acc-blue);
+  transform: translateY(-1px);
+}
+.tt-preview-thumb-btn:focus-visible {
+  outline: 2px solid var(--acc-blue);
+  outline-offset: 2px;
+}
+
 /* Side-by-side setup columns stack on narrow screens (inline grid styles need !important) */
 @media (max-width: 899px) {
   .tt-cols { grid-template-columns: minmax(0, 1fr) !important; }

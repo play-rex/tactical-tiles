@@ -1,6 +1,7 @@
 import * as PIXI from 'pixi.js';
 import { TerrainType, Tile, UnitType } from '@tactical/engine/types';
 import { TILE_SIZE } from '@tactical/engine/constants/Config';
+import { type BoardRotation, rotateTileCoord } from '../boardRotation';
 
 const DESERT_TYPES = new Set<TerrainType>(['SAND', 'DUNES', 'QUICKSAND', 'CANYON']);
 
@@ -62,9 +63,9 @@ function isCanyonLike(t: Tile | undefined): boolean {
 }
 
 /** Stable signature capturing visual terrain topology without flickering on unit/UI selection changes. */
-export function computeTerrainSignature(mapData: Tile[], gridSize: number): string {
+export function computeTerrainSignature(mapData: Tile[], gridSize: number, rotation: BoardRotation = 0): string {
   const parts = new Array<string>(mapData.length + 1);
-  parts[0] = String(gridSize);
+  parts[0] = `${gridSize}@${rotation}`;
   for (let i = 0; i < mapData.length; i++) {
     const t = mapData[i];
     const looted = t.type === 'BANK' && (t.hackProgress || 0) >= 100 ? 1 : 0;
@@ -162,17 +163,27 @@ export interface BakedReconBoard {
   waterMaskTexture: PIXI.Texture;
 }
 
+export interface RenderedReconCanvases {
+  terrainCanvas: HTMLCanvasElement;
+  waterMaskCanvas: HTMLCanvasElement;
+}
+
 /**
- * Bakes an entire battlefield grid using Tactical Recon HD procedural layers:
- * continuous FBM ground, auto-tiled water shorelines & roads, sculpted mountains & dunes,
- * multi-canopy tree groves, directional sun cast shadows, and military structures.
+ * Renders an entire battlefield grid onto offscreen 2D canvases using Tactical Recon HD
+ * procedural layers: continuous FBM ground, auto-tiled water shorelines & roads, sculpted
+ * mountains & dunes, multi-canopy tree groves, directional sun cast shadows, and structures.
  */
-export function bakeTacticalReconBoard(mapData: Tile[], gridSize: number): BakedReconBoard {
+export function renderTacticalReconCanvases(
+  mapData: Tile[],
+  gridSize: number,
+  rotation: BoardRotation = 0,
+): RenderedReconCanvases {
   const totalPx = gridSize * TILE_SIZE;
   const grid: (Tile | undefined)[][] = Array.from({ length: gridSize }, () => Array(gridSize).fill(undefined));
   for (const t of mapData) {
     if (t.x >= 0 && t.x < gridSize && t.y >= 0 && t.y < gridSize) {
-      grid[t.y][t.x] = t;
+      const rot = rotateTileCoord(t.x, t.y, rotation, gridSize);
+      grid[rot.y][rot.x] = t;
     }
   }
 
@@ -405,14 +416,15 @@ export function bakeTacticalReconBoard(mapData: Tile[], gridSize: number): Baked
     }
   }
 
-  // Pass C2: Riveted Steel Truss BRIDGES (Horizontal & Vertical)
+  // Pass C2: Riveted Steel Truss BRIDGES (Horizontal & Vertical, swapped when rotated 90°/270°)
+  const swapBridgeAxes = rotation === 90 || rotation === 270;
   for (let y = 0; y < gridSize; y++) {
     for (let x = 0; x < gridSize; x++) {
       const t = grid[y][x];
       if (!t || (t.type !== 'BRIDGE' && t.type !== 'BRIDGE_V')) continue;
       const px = x * TILE_SIZE;
       const py = y * TILE_SIZE;
-      const isVertical = t.type === 'BRIDGE_V';
+      const isVertical = swapBridgeAxes ? t.type !== 'BRIDGE_V' : t.type === 'BRIDGE_V';
 
       ctx.save();
       if (isVertical) {
@@ -494,11 +506,12 @@ export function bakeTacticalReconBoard(mapData: Tile[], gridSize: number): Baked
 
   for (let y = 0; y < gridSize; y++) {
     for (let x = 0; x < gridSize; x++) {
-      if (grid[y][x]?.type !== 'MOUNTAIN') continue;
+      const mTile = grid[y][x];
+      if (mTile?.type !== 'MOUNTAIN') continue;
       const px = x * TILE_SIZE;
       const py = y * TILE_SIZE;
-      const ox = (hash2(x, y) - 0.5) * 8;
-      const oy = (hash2(y, x) - 0.5) * 6;
+      const ox = (hash2(mTile.x, mTile.y) - 0.5) * 8;
+      const oy = (hash2(mTile.y, mTile.x) - 0.5) * 6;
       const peakX = px + 32 + ox;
       const peakY = py + 10 + oy;
 
@@ -541,7 +554,8 @@ export function bakeTacticalReconBoard(mapData: Tile[], gridSize: number): Baked
   const trees: Array<{ cx: number; cy: number; r: number }> = [];
   for (let y = 0; y < gridSize; y++) {
     for (let x = 0; x < gridSize; x++) {
-      if (grid[y][x]?.type !== 'FOREST') continue;
+      const fTile = grid[y][x];
+      if (fTile?.type !== 'FOREST') continue;
       const px = x * TILE_SIZE;
       const py = y * TILE_SIZE;
       ctx.fillStyle = 'rgba(20, 42, 18, 0.35)';
@@ -550,12 +564,12 @@ export function bakeTacticalReconBoard(mapData: Tile[], gridSize: number): Baked
       ctx.fill();
 
       for (let i = 0; i < 5; i++) {
-        const rx = hash2(x * 7 + i, y * 13);
-        const ry = hash2(x * 19, y * 5 + i);
+        const rx = hash2(fTile.x * 7 + i, fTile.y * 13);
+        const ry = hash2(fTile.x * 19, fTile.y * 5 + i);
         trees.push({
           cx: px + 10 + rx * 44,
           cy: py + 10 + ry * 44,
-          r: 11 + hash2(i + x, y + i) * 7,
+          r: 11 + hash2(i + fTile.x, fTile.y + i) * 7,
         });
       }
     }
@@ -709,6 +723,14 @@ export function bakeTacticalReconBoard(mapData: Tile[], gridSize: number): Baked
     }
   }
 
+  return { terrainCanvas, waterMaskCanvas };
+}
+
+/**
+ * Bakes an entire battlefield grid into PixiJS GPU textures using Tactical Recon HD procedural layers.
+ */
+export function bakeTacticalReconBoard(mapData: Tile[], gridSize: number, rotation: BoardRotation = 0): BakedReconBoard {
+  const { terrainCanvas, waterMaskCanvas } = renderTacticalReconCanvases(mapData, gridSize, rotation);
   return {
     terrainTexture: PIXI.Texture.from(terrainCanvas),
     waterMaskTexture: PIXI.Texture.from(waterMaskCanvas),

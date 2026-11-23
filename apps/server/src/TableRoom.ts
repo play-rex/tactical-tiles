@@ -10,16 +10,19 @@ import {
   ClientMsg,
   ROOM_NAME,
   CloseCode,
-  createGeneratedGame,
+  createOnlineTableGame,
   DEFAULT_TABLE_SETTINGS,
   eventsFor,
-  gameSettingsFor,
+  generateSectorSeed,
   MAX_PLAYERS,
+  mergeOnlineMapEdits,
   MIN_PLAYERS,
   prepareAction,
   type GameAction,
   type GameEvent,
   type GameState,
+  type MapDraftState,
+  type MapSuggestion,
   type SeatInfo,
   ServerMsg,
   type TableSettings,
@@ -30,7 +33,15 @@ import {
 
 const EMPTY_SIGHT = new Set<string>();
 import type { z } from 'zod';
-import { actionMsg, joinOptions, removeSeatMsg, settingsMsg } from './messages';
+import {
+  actionMsg,
+  joinOptions,
+  mapEditsPayloadMsg,
+  removeSeatMsg,
+  resolveSuggestionMsg,
+  seatMapAccessMsg,
+  settingsMsg,
+} from './messages';
 import type { TableStore } from './store';
 
 interface Seat {
@@ -40,6 +51,8 @@ interface Seat {
   name: string;
   isBot: boolean;
   connected: boolean;
+  canEditMap?: boolean;
+  mapLocked?: boolean;
 }
 
 const BOT_NAMES = ['Viper', 'Granite', 'Talon', 'Mirage', 'Cobalt', 'Ember', 'Onyx', 'Sable'];
@@ -162,6 +175,9 @@ export class TableRoom extends Room {
   private turnKey = '';
   private turnTimeout: { clear(): void } | null = null;
   private counted = false;
+  /** Transient live map draft and guest map suggestions (lobby-only, cleared on match start or seed change). */
+  private liveDraft: MapDraftState | null = null;
+  private suggestions = new Map<number, MapSuggestion>();
   /** After a restore: bots hold off for players finding their way back until then. */
   private graceUntil = 0;
   private static openTables = 0;
@@ -189,6 +205,8 @@ export class TableRoom extends Room {
         throw new Error('The server is full right now. Try again in a few minutes.');
       }
       this.roomId = await TableRoom.generateCode(async c => Boolean(await this.presence.sismember(CODES_KEY, c)));
+      this.settings.mapSeed = generateSectorSeed();
+      this.settings.suggestionsEnabled = true;
     }
     await this.presence.sadd(CODES_KEY, this.roomId);
     TableRoom.openTables++;
@@ -216,6 +234,7 @@ export class TableRoom extends Room {
         this.evictSession(seat.sessionId, CloseCode.removed, 'Removed by host');
       }
       this.seats.splice(msg.seat, 1);
+      this.dropSeatMapEdits(msg.seat);
       this.snapshotDirty = true;
       this.broadcastViews();
     });
@@ -223,8 +242,115 @@ export class TableRoom extends Room {
     this.on(ClientMsg.settings, (client, raw) => {
       const msg = this.parse(client, settingsMsg, raw);
       if (!msg || !this.requireHost(client) || !this.requireLobby(client)) return;
-      this.settings = msg;
+      const seedChanged = msg.mapSeed !== this.settings.mapSeed;
+      const nextSeed = msg.mapSeed || generateSectorSeed();
+      const keptOldEdits =
+        seedChanged &&
+        Boolean(msg.mapEdits?.length) &&
+        JSON.stringify(msg.mapEdits) === JSON.stringify(this.settings.mapEdits);
+      this.settings = keptOldEdits
+        ? { ...msg, mapSeed: nextSeed, mapEdits: undefined }
+        : { ...msg, mapSeed: nextSeed };
+      if (seedChanged) {
+        this.liveDraft = null;
+        this.suggestions.clear();
+      } else if (this.liveDraft?.seat === this.seatOf(client)) {
+        this.liveDraft = null;
+      }
+      if (this.settings.suggestionsEnabled === false) {
+        this.suggestions.clear();
+      }
       this.snapshotDirty = true;
+      this.broadcastViews();
+    });
+
+    this.on(ClientMsg.setSeatMapAccess, (client, raw) => {
+      const msg = this.parse(client, seatMapAccessMsg, raw);
+      if (!msg || !this.requireHost(client) || !this.requireLobby(client)) return;
+      const seat = this.seats[msg.seat];
+      if (!seat || seat.isBot || seat.playerId === this.hostPlayerId) return;
+      seat.mapLocked = msg.mapLocked;
+      seat.canEditMap = msg.mapLocked ? false : msg.canEditMap;
+      if (!seat.canEditMap && this.liveDraft?.seat === msg.seat) {
+        this.liveDraft = null;
+      }
+      if (seat.mapLocked) {
+        this.suggestions.delete(msg.seat);
+      }
+      this.broadcastViews();
+    });
+
+    this.on(ClientMsg.mapDraft, (client, raw) => {
+      const msg = this.parse(client, mapEditsPayloadMsg, raw);
+      if (!msg || !this.requireLobby(client)) return;
+      const seatIdx = this.seatOf(client);
+      const seat = this.seats[seatIdx];
+      if (!seat) return;
+      const isHost = Boolean(seat.playerId && seat.playerId === this.hostPlayerId);
+      if (!isHost && (seat.mapLocked || !seat.canEditMap)) {
+        return this.err(client, 'You do not have edit access for this table.');
+      }
+      if (msg.edits === null) {
+        if (this.liveDraft?.seat === seatIdx) {
+          this.liveDraft = null;
+          this.broadcastViews();
+        }
+        return;
+      }
+      if (this.liveDraft && this.liveDraft.seat !== seatIdx) {
+        return this.err(client, `${this.liveDraft.name} is currently editing — you can suggest changes until they finish.`);
+      }
+      this.liveDraft = { seat: seatIdx, name: seat.name, edits: msg.edits };
+      this.broadcastViews();
+    });
+
+    this.on(ClientMsg.mapCommitEdit, (client, raw) => {
+      const msg = this.parse(client, mapEditsPayloadMsg, raw);
+      if (!msg || !this.requireLobby(client)) return;
+      const seatIdx = this.seatOf(client);
+      const seat = this.seats[seatIdx];
+      if (!seat) return;
+      const isHost = Boolean(seat.playerId && seat.playerId === this.hostPlayerId);
+      if (!isHost && (seat.mapLocked || !seat.canEditMap)) {
+        return this.err(client, 'Edit access is locked for your seat.');
+      }
+      if (this.liveDraft && this.liveDraft.seat !== seatIdx) {
+        return this.err(client, `${this.liveDraft.name} is currently editing — wait until they finish.`);
+      }
+      this.settings = { ...this.settings, mapEdits: msg.edits && msg.edits.length > 0 ? msg.edits : undefined };
+      if (this.liveDraft?.seat === seatIdx) this.liveDraft = null;
+      this.snapshotDirty = true;
+      this.broadcastViews();
+    });
+
+    this.on(ClientMsg.mapSuggest, (client, raw) => {
+      const msg = this.parse(client, mapEditsPayloadMsg, raw);
+      if (!msg || !this.requireLobby(client)) return;
+      const seatIdx = this.seatOf(client);
+      const seat = this.seats[seatIdx];
+      if (!seat) return;
+      if (seat.mapLocked) return this.err(client, 'The host has locked map changes for your seat.');
+      if (this.settings.suggestionsEnabled === false) return this.err(client, 'Map suggestions are turned off.');
+      if (!msg.edits || msg.edits.length === 0) {
+        if (this.suggestions.delete(seatIdx)) this.broadcastViews();
+        return;
+      }
+      this.suggestions.set(seatIdx, { seat: seatIdx, name: seat.name, edits: msg.edits });
+      this.broadcastViews();
+    });
+
+    this.on(ClientMsg.resolveSuggestion, (client, raw) => {
+      const msg = this.parse(client, resolveSuggestionMsg, raw);
+      if (!msg || !this.requireHost(client) || !this.requireLobby(client)) return;
+      const suggestion = this.suggestions.get(msg.seat);
+      if (!suggestion) return;
+      this.suggestions.delete(msg.seat);
+      if (msg.accept) {
+        const merged = mergeOnlineMapEdits(this.settings, Math.max(MIN_PLAYERS, this.seats.length), suggestion.edits);
+        this.settings = { ...this.settings, mapEdits: merged.length > 0 ? merged : undefined };
+        this.liveDraft = null;
+        this.snapshotDirty = true;
+      }
       this.broadcastViews();
     });
 
@@ -334,13 +460,17 @@ export class TableRoom extends Room {
   override async onLeave(client: Client, consented: boolean) {
     // Server stopping: leave seats as they are; the saved table brings everyone back.
     if (TableRoom.shuttingDown) return;
-    const seat = this.seats[this.seatOf(client)];
+    const seatIdx = this.seatOf(client);
+    const seat = this.seats[seatIdx];
     if (!seat) return;
     if (consented) {
       this.retire(seat);
       return;
     }
     seat.connected = false;
+    if (this.status === 'lobby' && this.liveDraft?.seat === seatIdx) {
+      this.liveDraft = null;
+    }
     // If it was their turn, a bot steps in after a moment.
     this.afterChange();
 
@@ -386,7 +516,9 @@ export class TableRoom extends Room {
     if (this.seats.length < MIN_PLAYERS) {
       return this.err(client, `Need at least ${MIN_PLAYERS} seats — add a bot?`);
     }
-    this.game = createGeneratedGame(gameSettingsFor(this.settings, this.seats.length));
+    this.liveDraft = null;
+    this.suggestions.clear();
+    this.game = createOnlineTableGame(this.settings, this.seats.length);
     this.status = 'playing';
     this.seq++;
     this.snapshotDirty = true;
@@ -552,7 +684,9 @@ export class TableRoom extends Room {
   private retire(seat: Seat) {
     const wasHost = seat.playerId !== null && seat.playerId === this.hostPlayerId;
     if (this.status === 'lobby') {
-      this.seats.splice(this.seats.indexOf(seat), 1);
+      const idx = this.seats.indexOf(seat);
+      this.seats.splice(idx, 1);
+      if (idx >= 0) this.dropSeatMapEdits(idx);
     } else {
       seat.sessionId = null;
       seat.playerId = null;
@@ -659,6 +793,20 @@ export class TableRoom extends Room {
     }
   }
 
+  private dropSeatMapEdits(removedIdx: number) {
+    if (this.liveDraft) {
+      if (this.liveDraft.seat === removedIdx) this.liveDraft = null;
+      else if (this.liveDraft.seat > removedIdx) this.liveDraft = { ...this.liveDraft, seat: this.liveDraft.seat - 1 };
+    }
+    const next = new Map<number, MapSuggestion>();
+    for (const [seatIdx, sug] of this.suggestions) {
+      if (seatIdx === removedIdx) continue;
+      const newSeat = seatIdx > removedIdx ? seatIdx - 1 : seatIdx;
+      next.set(newSeat, { ...sug, seat: newSeat });
+    }
+    this.suggestions = next;
+  }
+
   private seatInfo(): SeatInfo[] {
     return this.seats.map(s => ({
       name: s.name,
@@ -666,6 +814,8 @@ export class TableRoom extends Room {
       connected: s.connected,
       isHost: s.playerId !== null && s.playerId === this.hostPlayerId,
       autopilot: !s.isBot && !s.connected && this.status === 'playing',
+      canEditMap: Boolean(s.canEditMap),
+      mapLocked: Boolean(s.mapLocked),
     }));
   }
 
@@ -691,6 +841,8 @@ export class TableRoom extends Room {
       settings: this.settings,
       turnClock: this.turnClockView(),
       game: gameView,
+      liveDraft: this.status === 'lobby' ? this.liveDraft : null,
+      mapSuggestions: this.status === 'lobby' ? Array.from(this.suggestions.values()) : [],
       events,
       seq: this.seq,
     };

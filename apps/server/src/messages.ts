@@ -11,6 +11,22 @@ export const joinOptions = z.object({
 
 const unitCount = (max: number) => z.number().int().min(0).max(max);
 
+const terrainType = z.enum([
+  'PLAINS', 'FOREST', 'MOUNTAIN', 'WATER', 'BASE', 'ROAD', 'ROAD_H',
+  'BRIDGE', 'BRIDGE_V', 'BANK', 'BUILDING', 'BARRIER', 'SAND', 'DUNES', 'QUICKSAND', 'CANYON',
+]);
+
+const mapTilePatchSchema = z.object({
+  x: z.number().int().min(0).max(49),
+  y: z.number().int().min(0).max(49),
+  type: terrainType,
+  height: z.number().int().min(0).max(3),
+  subType: z.enum(['WATCHTOWER', 'BUNKER', 'NONE']).optional(),
+  owner: z.number().int().min(0).max(5).nullable().optional(),
+  bankGoldReward: z.number().int().min(0).max(1000).optional(),
+  bankCpReward: z.number().int().min(0).max(100).optional(),
+});
+
 export const settingsMsg = z.object({
   unitCounts: z
     .object({
@@ -28,9 +44,26 @@ export const settingsMsg = z.object({
   mapSeed: z.string().max(12).regex(/^[A-Za-z0-9]*$/),
   turnBaseS: z.number().int().refine(v => [0, 30, 45, 60, 90].includes(v), 'Invalid turn time'),
   turnIncrementS: z.number().int().refine(v => [0, 15, 30, 45, 60].includes(v), 'Invalid increment'),
+  mapEdits: z.array(mapTilePatchSchema).max(900).optional(),
+  suggestionsEnabled: z.boolean().optional(),
 });
 
 export const removeSeatMsg = z.object({ seat: z.number().int().min(0) });
+
+export const seatMapAccessMsg = z.object({
+  seat: z.number().int().min(0),
+  canEditMap: z.boolean(),
+  mapLocked: z.boolean(),
+});
+
+export const mapEditsPayloadMsg = z.object({
+  edits: z.array(mapTilePatchSchema).max(900).nullable(),
+});
+
+export const resolveSuggestionMsg = z.object({
+  seat: z.number().int().min(0),
+  accept: z.boolean(),
+});
 
 const id = z.string().min(1).max(32);
 const cost = z.number().int().min(0).max(1000);

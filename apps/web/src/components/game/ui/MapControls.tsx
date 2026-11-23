@@ -13,7 +13,7 @@ const Swatch: React.FC<{ color: string; label: string }> = ({ color, label }) =>
 );
 
 const fitViewport = (viewport: ReturnType<typeof useViewportContext>['viewport']) => {
-  if (!viewport) return;
+  if (!viewport || viewport.destroyed) return;
   wakeBattleRenderer(450);
   viewport.plugins.remove('animate');
   frameMap(viewport);
@@ -44,7 +44,7 @@ export const MapControls: React.FC = () => {
   const { isMyTurn, readyUnitCount, canUndoMove, endTurn, selectNextReadyUnit, undoLastMove } = useTurnControls();
 
   const handleZoomIn = () => {
-    if (!viewport) return;
+    if (!viewport || viewport.destroyed) return;
     wakeBattleRenderer(500);
     viewport.animate({
       time: 350,
@@ -54,7 +54,7 @@ export const MapControls: React.FC = () => {
   };
 
   const handleZoomOut = () => {
-    if (!viewport) return;
+    if (!viewport || viewport.destroyed) return;
     wakeBattleRenderer(500);
     viewport.animate({
       time: 350,

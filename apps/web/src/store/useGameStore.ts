@@ -6,7 +6,7 @@
  * them to the server and show the views it sends back (see applyServerView).
  */
 import { create } from 'zustand';
-import { BARRIER_STATS, CP_SYSTEM, DEFAULT_GRID_SIZE, OVERWATCH_STATS, SHOP_ITEMS, TILE_SIZE, UNIT_COSTS } from '@tactical/engine/constants/Config';
+import { BARRIER_STATS, CP_SYSTEM, DEFAULT_GRID_SIZE, OVERWATCH_STATS, SHOP_ITEMS, UNIT_COSTS } from '@tactical/engine/constants/Config';
 import type { GameSettings, SavedMap, Tile, Unit, WeatherState } from '@tactical/engine/types';
 import { getStepCost, getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { canConstructOnTile, canUnitEnterOverwatch, getUnitAttackCost, isWithinEnemyHqExclusion } from '@tactical/engine/rules/CombatRules';
@@ -34,6 +34,7 @@ import {
   type TableView,
 } from '@tactical/engine';
 import { useEffectStore } from './useEffectStore';
+import { fxTimeline } from '../core/graphics/fxTimeline';
 import { SoundFX } from '../core/audio/SoundFX';
 import {
   type BoardRotation,
@@ -206,22 +207,11 @@ const aiPlays = (s: Pick<GameState, 'winner' | 'currentPlayer' | 'settings'>) =>
 export const viewerSeat = (s: Pick<GameStore, 'mode' | 'mySeat' | 'currentPlayer' | 'settings'>): number =>
   s.mode === 'ONLINE' ? s.mySeat : s.settings.gameMode === 'PVE' ? 0 : s.currentPlayer;
 
-/** Play an action's effects: shots, damage numbers, screen shake and sounds. */
+/** Play an action's effects through the synchronized FX timeline. */
 const playEvents = (events: GameEvent[]) => {
-  const fxStore = useEffectStore.getState();
-  const center = (p: { x: number; y: number }) => [p.x * TILE_SIZE + TILE_SIZE / 2, p.y * TILE_SIZE + TILE_SIZE / 2] as const;
-  for (const e of events) {
-    if (e.kind === 'sound') SoundFX.play(e.sound);
-    else if (e.kind === 'shake') fxStore.triggerScreenShake(e.intensity);
-    else if (e.kind === 'popup') {
-      const [x, y] = center(e.at);
-      fxStore.addDamagePopup(x, y - e.lift, e.text, e.color);
-    } else {
-      const [sx, sy] = center(e.from);
-      const [ex, ey] = center(e.to);
-      fxStore.addProjectile(sx, sy, ex, ey, e.style);
-    }
-  }
+  // Ensure effect store sink is registered before dispatching timeline cues
+  void useEffectStore.getState();
+  fxTimeline.dispatchGameEvents(events);
 };
 
 const sameArr = (a: number[] | undefined, b: number[] | undefined) =>
@@ -423,6 +413,7 @@ const hasFollowUpAction = (game: GameState, unit: Unit, sel: ReturnType<typeof o
 export const useGameStore = create<GameStore>((set, get) => {
   /** Start a local game. */
   const beginLocal = (game: GameState, lastCustomMap: Tile[] | null) => {
+    useEffectStore.getState().clearAllFx();
     set({
       ...commitGameView(get(), game, visibleSet(game, 0), 0, false, false),
       lastCustomMap,
@@ -502,6 +493,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     },
 
     resetGame: () => {
+      useEffectStore.getState().clearAllFx();
       if (get().mode === 'ONLINE') {
         get().online?.leave();
         return;
@@ -1012,6 +1004,9 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
       const hadGame = state.mode === 'ONLINE' && state.mapData.length > 0;
+      if (!hadGame) {
+        useEffectStore.getState().clearAllFx();
+      }
       const nextGame: GameState = hadGame
         ? {
             ...rawGame,
@@ -1045,6 +1040,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     },
 
     exitOnline: () => {
+      useEffectStore.getState().clearAllFx();
       const { localSettings } = get();
       set({
         ...createEmptyGameState(localSettings ?? DEFAULT_GAME_SETTINGS, DEFAULT_GRID_SIZE),

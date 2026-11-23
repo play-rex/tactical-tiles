@@ -8,6 +8,25 @@ const VALID_ROTATIONS = new Set<number>([0, 90, 180, 270]);
 export const nextBoardRotation = (rotation: BoardRotation, delta: 90 | -90 = 90): BoardRotation =>
   (((rotation + delta) % 360 + 360) % 360) as BoardRotation;
 
+/** Maps a logical tile `(x, y)` in `[0, gridSize)` to its rotated screen-grid coordinate. */
+export const rotateTileCoord = (
+  x: number,
+  y: number,
+  rotation: BoardRotation,
+  gridSize: number,
+): { x: number; y: number } => {
+  switch (rotation) {
+    case 90:
+      return { x: gridSize - 1 - y, y: x };
+    case 180:
+      return { x: gridSize - 1 - x, y: gridSize - 1 - y };
+    case 270:
+      return { x: y, y: gridSize - 1 - x };
+    default:
+      return { x, y };
+  }
+};
+
 /**
  * Maps an unrotated board pixel point `(wx, wy)` inside `[0, boardSize]` into the rotated
  * board coordinate system matching `<Container pivot={[boardSize/2, boardSize/2]} angle={rotation}>`.

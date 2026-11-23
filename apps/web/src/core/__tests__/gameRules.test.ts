@@ -28,8 +28,22 @@ import { CHALLENGE_OPERATIONS } from '@tactical/engine/assets/ChallengeOps';
 import { PRESET_MAPS } from '@tactical/engine/assets/Presets';
 import { calculateMatchScorecard } from '@tactical/engine/storage/CareerStatsManager';
 import { createSeededRng, normalizeSeed } from '@tactical/engine/utils/SeededRandom';
-import { createGeneratedGame, DEFAULT_GAME_SETTINGS, DEFAULT_TABLE_SETTINGS, viewFor } from '@tactical/engine';
-import { nextBoardRotation, rotateBoardPoint, unrotateBoardPoint, type BoardRotation } from '../boardRotation';
+import {
+    applyMapTilePatches,
+    cloneTiles,
+    createChallengeGame,
+    createCustomMapGame,
+    createGeneratedGame,
+    createOnlineTableGame,
+    DEFAULT_GAME_SETTINGS,
+    DEFAULT_TABLE_SETTINGS,
+    diffMapTilePatches,
+    generateSectorSeed,
+    mergeOnlineMapEdits,
+    viewFor,
+} from '@tactical/engine';
+import { nextBoardRotation, rotateBoardPoint, rotateTileCoord, unrotateBoardPoint, type BoardRotation } from '../boardRotation';
+import { computeTerrainSignature } from '../graphics/TacticalReconRenderer';
 import { useGameStore } from '../../store/useGameStore';
 import { Tile, Unit, WeatherState } from '@tactical/engine/types';
 
@@ -1524,6 +1538,9 @@ test('Map rotation helpers invert accurately across 0/90/180/270 and multiplayer
     assert.deepEqual(rotateBoardPoint(0, 0, 90, 1280), { x: 1280, y: 0 });
     assert.deepEqual(rotateBoardPoint(0, 0, 180, 1280), { x: 1280, y: 1280 });
     assert.deepEqual(rotateBoardPoint(0, 0, 270, 1280), { x: 0, y: 1280 });
+    assert.deepEqual(rotateTileCoord(2, 5, 90, 20), { x: 14, y: 2 });
+    assert.deepEqual(rotateTileCoord(2, 5, 180, 20), { x: 17, y: 14 });
+    assert.deepEqual(rotateTileCoord(2, 5, 270, 20), { x: 5, y: 17 });
 
     useGameStore.getState().setMapRotation(0);
     useGameStore.getState().rotateMap(90);
@@ -1533,6 +1550,11 @@ test('Map rotation helpers invert accurately across 0/90/180/270 and multiplayer
 
     // Online server views never reset a player's chosen camera angle
     const game = createGeneratedGame({ ...DEFAULT_GAME_SETTINGS, gameMode: 'PVP', mapSeed: 'ROTAT1' });
+    assert.notEqual(
+        computeTerrainSignature(game.mapData, game.gridSize, 0),
+        computeTerrainSignature(game.mapData, game.gridSize, 180),
+        'terrain signature must vary with rotation so upright terrain assets rebake'
+    );
     const p2View = viewFor(game, 1);
     useGameStore.getState().applyServerView({
         code: 'ROOM01',
@@ -1555,4 +1577,92 @@ test('Map rotation helpers invert accurately across 0/90/180/270 and multiplayer
     useGameStore.getState().exitOnline();
     assert.equal(useGameStore.getState().mapRotation, 180);
     useGameStore.getState().setMapRotation(0);
+});
+
+test('setup map preview matches the exact battlefield deployed locally and supports seed reroll', () => {
+    const seed = generateSectorSeed();
+    const previewSettings = { ...DEFAULT_GAME_SETTINGS, playerCount: 3, mapSeed: seed };
+    const preview = createGeneratedGame(previewSettings);
+
+    useGameStore.getState().setGameSettings(previewSettings);
+    useGameStore.getState().initializeMap();
+    const deployed = useGameStore.getState();
+
+    assert.equal(deployed.activeSeed, seed);
+    assert.equal(deployed.gridSize, preview.gridSize);
+    assert.equal(
+        computeTerrainSignature(deployed.mapData, deployed.gridSize),
+        computeTerrainSignature(preview.mapData, preview.gridSize),
+    );
+    assert.deepEqual(
+        deployed.units.map(u => ({ tileId: u.tileId, owner: u.owner, type: u.type })),
+        preview.units.map(u => ({ tileId: u.tileId, owner: u.owner, type: u.type })),
+    );
+
+    const reroll = createGeneratedGame({ ...previewSettings, mapSeed: `${seed}Z` });
+    assert.notEqual(
+        computeTerrainSignature(reroll.mapData, reroll.gridSize),
+        computeTerrainSignature(preview.mapData, preview.gridSize),
+        'Randomizing seed produces a distinct battlefield preview',
+    );
+
+    const presetPreview = createCustomMapGame(previewSettings, PRESET_MAPS[0].data);
+    assert.ok(presetPreview.mapData.length > 0 && presetPreview.units.length > 0);
+    const challengePreview = createChallengeGame(DEFAULT_GAME_SETTINGS, CHALLENGE_OPERATIONS[0].id);
+    assert.ok(challengePreview && challengePreview.mapData.length > 0 && challengePreview.units.length > 0);
+
+    // Inline map edits: move P0 base cleanly & add a Watchtower, diff patches, and confirm online/local parity
+    const edited = cloneTiles(preview.mapData);
+    const p0BaseIdx = edited.findIndex(t => t.type === 'BASE' && t.owner === 0);
+    const dstIdx = edited.findIndex(t => t.type === 'PLAINS' && t.x >= 2 && t.y >= 2);
+    assert.ok(p0BaseIdx >= 0 && dstIdx >= 0);
+    const oldP0 = { ...edited[p0BaseIdx] };
+    const oldDst = { ...edited[dstIdx] };
+    edited[dstIdx] = { ...edited[dstIdx], type: 'BASE', owner: 0, height: 1 };
+    edited[p0BaseIdx] = { ...edited[p0BaseIdx], type: oldDst.type, owner: undefined, height: oldDst.height };
+
+    const towerIdx = edited.findIndex((t, i) => i !== p0BaseIdx && i !== dstIdx && t.type === 'PLAINS');
+    assert.ok(towerIdx >= 0);
+    edited[towerIdx] = { ...edited[towerIdx], type: 'BUILDING', subType: 'WATCHTOWER', height: 1 };
+
+    const patches = diffMapTilePatches(preview.mapData, edited);
+    assert.equal(patches.length, 3, 'diffMapTilePatches emits only modified tiles');
+    const reapplied = applyMapTilePatches(preview.mapData, patches);
+    assert.equal(reapplied[towerIdx].subType, 'WATCHTOWER');
+    assert.equal(reapplied[dstIdx].type, 'BASE');
+    assert.equal(reapplied[dstIdx].owner, 0);
+
+    const onlineEdited = createOnlineTableGame({ ...DEFAULT_TABLE_SETTINGS, mapSeed: seed, mapEdits: patches }, 3);
+    assert.equal(onlineEdited.mapData[towerIdx].subType, 'WATCHTOWER');
+    assert.equal(onlineEdited.mapData[dstIdx].owner, 0, 'moved HQ preserves original owner');
+    assert.ok(oldP0.id !== edited[dstIdx].id);
+
+    // Guest suggestion merges cleanly on top of existing host edits
+    const tableWithHostEdit = { ...DEFAULT_TABLE_SETTINGS, mapSeed: seed, mapEdits: patches };
+    const bunkerTile = edited.find(
+        t =>
+            !(t.x === 0 && t.y === 1) &&
+            !(t.x === 1 && t.y === 0) &&
+            (t.x !== edited[towerIdx].x || t.y !== edited[towerIdx].y) &&
+            t.type === 'PLAINS',
+    )!;
+    const merged = mergeOnlineMapEdits(tableWithHostEdit, 3, [
+        { x: bunkerTile.x, y: bunkerTile.y, type: 'BUILDING', height: 1, subType: 'BUNKER' },
+        { x: 0, y: 1, type: 'DUNES', height: 2 },
+        { x: 1, y: 0, type: 'BRIDGE_V', height: 1 },
+    ]);
+    const finalOnline = createOnlineTableGame({ ...tableWithHostEdit, mapEdits: merged }, 3);
+    assert.equal(finalOnline.mapData[towerIdx].subType, 'WATCHTOWER');
+    assert.equal(finalOnline.mapData[bunkerTile.y * finalOnline.gridSize + bunkerTile.x].subType, 'BUNKER');
+    assert.equal(finalOnline.mapData[finalOnline.gridSize].type, 'DUNES');
+    assert.equal(finalOnline.mapData[1].type, 'BRIDGE_V');
+
+    // Deleting an asset restores bare PLAINS cleanly without stale building subType
+    const cleared = mergeOnlineMapEdits({ ...tableWithHostEdit, mapEdits: merged }, 3, [
+        { x: bunkerTile.x, y: bunkerTile.y, type: 'PLAINS', height: 1 },
+    ]);
+    const clearedOnline = createOnlineTableGame({ ...tableWithHostEdit, mapEdits: cleared }, 3);
+    const clearedTile = clearedOnline.mapData[bunkerTile.y * clearedOnline.gridSize + bunkerTile.x];
+    assert.equal(clearedTile.type, 'PLAINS');
+    assert.equal(clearedTile.subType, undefined);
 });

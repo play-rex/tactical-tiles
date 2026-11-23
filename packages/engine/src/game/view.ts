@@ -44,9 +44,55 @@ export function viewFor(state: GameState, seat: number, visible = visibleSet(sta
 export function eventsFor(events: GameEvent[], fog: boolean, before: Set<string>, after: Set<string>): GameEvent[] {
   if (!fog) return events;
   const seen = (p: { x: number; y: number }) => before.has(`${p.x},${p.y}`) || after.has(`${p.x},${p.y}`);
-  return events.filter(e => {
-    if (e.kind === 'projectile') return seen(e.from) || seen(e.to);
-    if (e.kind === 'popup') return seen(e.at);
-    return true;
-  });
+  const out: GameEvent[] = [];
+  for (const e of events) {
+    switch (e.kind) {
+      case 'sound':
+        out.push(e);
+        break;
+      case 'shake':
+        if (!e.at || seen(e.at)) out.push(e);
+        break;
+      case 'projectile':
+        if (seen(e.from) || seen(e.to)) out.push(e);
+        break;
+      case 'popup':
+      case 'killed':
+      case 'mineBlast':
+      case 'structureHit':
+      case 'heist':
+      case 'promotion':
+      case 'overwatchSet':
+      case 'heal':
+      case 'supplyLanded':
+        if (seen(e.at)) out.push(e);
+        break;
+      case 'hit':
+        if (seen(e.at)) {
+          const visibleCrossfire = e.crossfireFrom?.filter(seen);
+          out.push({
+            ...e,
+            from: e.from && seen(e.from) ? e.from : undefined,
+            crossfireFrom: visibleCrossfire && visibleCrossfire.length > 0 ? visibleCrossfire : undefined,
+          });
+        }
+        break;
+      case 'movePath': {
+        // Trim strictly to visible tiles so hidden enemy origin/intermediate tiles never leak under fog.
+        const visiblePath = e.path.filter(seen);
+        if (visiblePath.length >= 2) {
+          out.push({ ...e, path: visiblePath, haltedAt: undefined });
+        }
+        break;
+      }
+      case 'build': {
+        const visibleTiles = e.tiles.filter(seen);
+        if (visibleTiles.length > 0) {
+          out.push({ ...e, tiles: visibleTiles });
+        }
+        break;
+      }
+    }
+  }
+  return out;
 }

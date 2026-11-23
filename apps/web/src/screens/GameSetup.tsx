@@ -1,13 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { createChallengeGame, createCustomMapGame, createGeneratedGame } from '@tactical/engine';
 import { useGameStore } from '../store/useGameStore';
-import { GameSettings, SavedMap, MissionConfig } from '@tactical/engine/types';
+import { GameSettings, SavedMap, MissionConfig, Tile } from '@tactical/engine/types';
 import { PRESET_MAPS } from '@tactical/engine/assets/Presets';
 import { CHALLENGE_OPERATIONS } from '@tactical/engine/assets/ChallengeOps';
 import { UNIT_STATS } from '@tactical/engine/constants/Config';
 import { MapStorage } from '../core/storage/MapStorageManager';
-import { generateSectorSeed } from '@tactical/engine/utils/SeededRandom';
+import { generateSectorSeed, normalizeSeed } from '@tactical/engine/utils/SeededRandom';
 import { CareerStorage } from '@tactical/engine/storage/CareerStatsManager';
 import { GeoButton, GeoCard, GeoChip, GeoWell } from '../components/ui/GeoPrimitives';
+import { MapPreviewCard } from '../components/ui/MapPreviewModal';
 import {
   BrandHeader,
   DifficultyButtons,
@@ -126,6 +128,8 @@ export const GameSetup: React.FC = () => {
   const [selectedMap, setSelectedMap] = useState<SavedMap | null>(null);
   const [selectedChallenge, setSelectedChallenge] = useState<MissionConfig>(CHALLENGE_OPERATIONS[0]);
   const [customMaps, setCustomMaps] = useState<SavedMap[]>([]);
+  const [editedMapData, setEditedMapData] = useState<Tile[] | null>(null);
+  const [fallbackSeed, setFallbackSeed] = useState<string>(() => generateSectorSeed());
   const career = CareerStorage.get();
 
   const [settings, setSettings] = useState<GameSettings>(() => {
@@ -138,7 +142,7 @@ export const GameSetup: React.FC = () => {
       gameMode: 'PVP',
       victoryMode: 'CONQUER',
       aiDifficulty: 'MEDIUM',
-      mapSeed: '',
+      mapSeed: fallbackSeed,
       mutators: { blitzCp: false, scarcity: false, ironman: false },
     };
     // Keep last match's names: the store survives resetGame (same session),
@@ -171,6 +175,7 @@ export const GameSetup: React.FC = () => {
       setCustomMaps(MapStorage.getAll());
     }
     setSelectedMap(null);
+    setEditedMapData(null);
   }, [activeTab]);
 
   useEffect(() => {
@@ -180,7 +185,23 @@ export const GameSetup: React.FC = () => {
         playerCount: Math.min(s.playerCount, selectedMap.baseCount || 2),
       }));
     }
+    setEditedMapData(null);
   }, [selectedMap]);
+
+  useEffect(() => {
+    if (activeTab === 'RANDOM') {
+      setEditedMapData(null);
+    }
+  }, [settings.playerCount]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resolvedRandomSeed = normalizeSeed(settings.mapSeed) || fallbackSeed;
+
+  const randomizeSectorSeed = () => {
+    const next = generateSectorSeed();
+    setFallbackSeed(next);
+    setEditedMapData(null);
+    setSettings(prev => ({ ...prev, mapSeed: next }));
+  };
 
   const handleDeploy = () => {
     if (activeTab === 'CHALLENGES') {
@@ -188,7 +209,11 @@ export const GameSetup: React.FC = () => {
       return;
     }
     savePersistedHotseatNames(settings.playerNames);
-    setGameSettings(settings);
+    setGameSettings(activeTab === 'RANDOM' ? { ...settings, mapSeed: resolvedRandomSeed } : settings);
+    if (editedMapData) {
+      loadMapAndStart(editedMapData);
+      return;
+    }
     if (activeTab === 'RANDOM') {
       startGame();
     } else {
@@ -235,6 +260,42 @@ export const GameSetup: React.FC = () => {
   const canDeploy = activeTab === 'CHALLENGES' || (totalUnits > 0 && (activeTab === 'RANDOM' || Boolean(selectedMap)));
   const randomGridPreview = settings.playerCount >= 6 ? '30×30' : settings.playerCount >= 4 ? '25×25' : '20×20';
   const patchSettings = (patch: Partial<GameSettings>) => setSettings(prev => ({ ...prev, ...patch }));
+
+  const previewGame = useMemo(() => {
+    const previewSettings: GameSettings = {
+      ...settings,
+      mapSeed: resolvedRandomSeed,
+    };
+    if (activeTab !== 'CHALLENGES' && editedMapData) {
+      return createCustomMapGame(previewSettings, editedMapData);
+    }
+    if (activeTab === 'RANDOM') {
+      return createGeneratedGame(previewSettings);
+    }
+    if (activeTab === 'PRESET' || activeTab === 'CUSTOM') {
+      return selectedMap ? createCustomMapGame(previewSettings, selectedMap.data) : null;
+    }
+    return createChallengeGame(previewSettings, selectedChallenge.id);
+    // Intentionally depend only on map/unit-shaping fields so typing player names or toggling HUD rules does not re-bake terrain.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeTab,
+    resolvedRandomSeed,
+    settings.playerCount,
+    settings.unitCounts.SOLDIER,
+    settings.unitCounts.ASSAULTER,
+    settings.unitCounts.SNIPER,
+    selectedMap,
+    selectedChallenge,
+    editedMapData,
+  ]);
+
+  const previewTitle =
+    activeTab === 'RANDOM'
+      ? `Sector ${resolvedRandomSeed}`
+      : activeTab === 'CHALLENGES'
+        ? selectedChallenge.title
+        : (selectedMap?.name ?? 'Select Map');
 
   return (
     <StageShell width={1140}>
@@ -299,7 +360,18 @@ export const GameSetup: React.FC = () => {
                 ))}
               </div>
 
-              <div className="opgeo-scroll" style={{ flex: 1, overflowY: 'auto', maxHeight: '430px', paddingRight: '3px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div
+                className="opgeo-scroll"
+                style={{
+                  flex: 1,
+                  overflowY: 'auto',
+                  maxHeight: activeTab === 'RANDOM' ? 'none' : '240px',
+                  paddingRight: '3px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
                 {activeTab === 'RANDOM' && (
                   <>
                     <GeoWell coreStyle={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -310,9 +382,12 @@ export const GameSetup: React.FC = () => {
                         <input
                           type="text"
                           maxLength={12}
-                          placeholder="AUTO RANDOM SEED"
+                          placeholder={fallbackSeed}
                           value={settings.mapSeed || ''}
-                          onChange={e => setSettings({ ...settings, mapSeed: e.target.value.toUpperCase() })}
+                          onChange={e => {
+                            setEditedMapData(null);
+                            setSettings({ ...settings, mapSeed: e.target.value.toUpperCase() });
+                          }}
                           style={{
                             flex: 1,
                             minWidth: 0,
@@ -330,34 +405,15 @@ export const GameSetup: React.FC = () => {
                         />
                         <GeoButton
                           title="Roll Random Sector Seed"
-                          onClick={() => setSettings({ ...settings, mapSeed: generateSectorSeed() })}
+                          onClick={randomizeSectorSeed}
                           coreStyle={{ padding: '7px 12px' }}
                         >
                           🎲 ROLL
                         </GeoButton>
                       </div>
                       <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', lineHeight: 1.4 }}>
-                        Enter a seed to replay or share an exact map layout &amp; weather schedule, or leave blank for a fresh roll.
+                        Live preview matches this exact seed — randomize anytime or share the code to replay it.
                       </div>
-                      {settings.mapSeed && (
-                        <button
-                          type="button"
-                          onClick={() => setSettings({ ...settings, mapSeed: '' })}
-                          style={{
-                            alignSelf: 'flex-start',
-                            background: 'transparent',
-                            border: 'none',
-                            color: 'var(--acc-blue-ink)',
-                            fontSize: '12px',
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                            padding: 0,
-                            textDecoration: 'underline',
-                          }}
-                        >
-                          Clear seed (generate fresh on deploy)
-                        </button>
-                      )}
                     </GeoWell>
 
                     <GeoWell coreStyle={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -437,6 +493,38 @@ export const GameSetup: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {previewGame ? (
+                <MapPreviewCard
+                  game={previewGame}
+                  title={previewTitle}
+                  subtitle={
+                    activeTab === 'RANDOM'
+                      ? `${settings.playerCount} Players · ${previewGame.gridSize}×${previewGame.gridSize} Procedural Sector`
+                      : activeTab === 'CHALLENGES'
+                        ? selectedChallenge.subtitle
+                        : `${selectedMap?.gridSize ?? previewGame.gridSize}×${selectedMap?.gridSize ?? previewGame.gridSize} Custom Arena`
+                  }
+                  seedLabel={activeTab === 'RANDOM' ? resolvedRandomSeed : undefined}
+                  canRandomize={activeTab === 'RANDOM'}
+                  onRandomize={activeTab === 'RANDOM' ? randomizeSectorSeed : undefined}
+                  canEdit={activeTab !== 'CHALLENGES'}
+                  isEdited={Boolean(editedMapData)}
+                  onApplyEdits={tiles => {
+                    const next = tiles.map(t => ({ ...t }));
+                    // Let createCustomMapGame recalculate Voronoi weather zones when editing procedural maps.
+                    if (activeTab === 'RANDOM') next.forEach(t => { delete t.zone; });
+                    setEditedMapData(next);
+                  }}
+                  onResetEdits={() => setEditedMapData(null)}
+                  playerNames={settings.playerNames}
+                  maxPreviewPx={170}
+                />
+              ) : (
+                <GeoWell coreStyle={{ padding: '14px 12px', textAlign: 'center', fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>
+                  Select a map from the list above to inspect its miniature preview &amp; full-size board.
+                </GeoWell>
+              )}
             </div>
           </GeoCard>
 

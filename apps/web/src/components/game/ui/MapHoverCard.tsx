@@ -22,13 +22,13 @@ import {
   isWithinEnemyHqExclusion,
 } from '@tactical/engine/rules/CombatRules';
 import { useViewportContext } from '../../../context/ViewportContext';
-import { rotateBoardPoint } from '../../../core/boardRotation';
 import {
   computeUnitAttackPreview,
   getHoveredEnemyBlocker,
   getHoverMoveResolution,
   getPostMoveTargetTiles,
 } from '../../../core/hoverMovePreview';
+import { rotateBoardPoint } from '../../../core/boardRotation';
 import { useGameStore, viewerSeat } from '../../../store/useGameStore';
 import { useOnline } from '../../../net/useOnline';
 import { playerDisplayName } from '../../ui/GeoPrimitives';
@@ -109,7 +109,7 @@ export const MapHoverCard: React.FC = () => {
   );
 
   const computeScreenPos = useCallback((): ScreenPt | null => {
-    if (!viewport || !anchorTile || !hostRef.current) return null;
+    if (!viewport || viewport.destroyed || !anchorTile || !hostRef.current) return null;
     const w = hostRef.current.clientWidth;
     const h = hostRef.current.clientHeight;
     if (w <= 0 || h <= 0) return null;

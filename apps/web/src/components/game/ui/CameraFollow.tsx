@@ -4,6 +4,7 @@ import { getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { useViewportContext } from '../../../context/ViewportContext';
 import { useGameStore } from '../../../store/useGameStore';
 import { wakeBattleRenderer } from '../../../store/useEffectStore';
+import { rotateBoardPoint } from '../../../core/boardRotation';
 
 /**
  * On a phone only part of the map fits: glide to your squad when your turn starts, and to
@@ -16,8 +17,8 @@ export const CameraFollow = () => {
   const myMove = useGameStore(s => !s.isAiTurn && s.winner === null);
 
   const glideTo = (tileIds: string[]) => {
-    if (!viewport || tileIds.length === 0) return;
-    const { mapData, gridSize } = useGameStore.getState();
+    if (!viewport || viewport.destroyed || tileIds.length === 0) return;
+    const { mapData, gridSize, mapRotation } = useGameStore.getState();
     let sumX = 0;
     let sumY = 0;
     let count = 0;
@@ -30,21 +31,22 @@ export const CameraFollow = () => {
       }
     }
     if (count === 0) return;
-    const x = (sumX / count + 0.5) * TILE_SIZE;
-    const y = (sumY / count + 0.5) * TILE_SIZE;
+    const rawX = (sumX / count + 0.5) * TILE_SIZE;
+    const rawY = (sumY / count + 0.5) * TILE_SIZE;
+    const { x, y } = rotateBoardPoint(rawX, rawY, mapRotation, gridSize * TILE_SIZE);
     wakeBattleRenderer(500);
     viewport.animate({ position: { x, y }, time: 400, ease: 'easeInOutQuad' });
   };
 
   useEffect(() => {
-    if (!myMove || !viewport) return;
+    if (!myMove || !viewport || viewport.destroyed) return;
     const { units, currentPlayer } = useGameStore.getState();
     glideTo(units.filter(u => u.owner === currentPlayer).map(u => u.tileId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myMove, turnCounter, viewport]);
 
   useEffect(() => {
-    if (!selectedUnitId || !viewport) return;
+    if (!selectedUnitId || !viewport || viewport.destroyed) return;
     const unit = useGameStore.getState().units.find(u => u.id === selectedUnitId);
     if (unit) glideTo([unit.tileId]);
     // eslint-disable-next-line react-hooks/exhaustive-deps

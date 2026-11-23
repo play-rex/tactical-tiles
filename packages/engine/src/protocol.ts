@@ -1,5 +1,5 @@
 /** Wire types shared by the server and the web client. */
-import type { GameSettings } from './types';
+import type { BuildingSubType, GameSettings, TerrainType } from './types';
 import type { GameEvent } from './game/state';
 import type { PlayerGameView } from './game/view';
 
@@ -14,6 +14,33 @@ export interface SeatInfo {
   isHost: boolean;
   /** A bot is playing this seat's turns because the player is disconnected. */
   autopilot: boolean;
+  /** Host granted this player direct map editing access in the lobby. */
+  canEditMap?: boolean;
+  /** Host locked this player from editing or suggesting map changes in the lobby. */
+  mapLocked?: boolean;
+}
+
+export interface MapTilePatch {
+  x: number;
+  y: number;
+  type: TerrainType;
+  height: number;
+  subType?: BuildingSubType;
+  owner?: number | null;
+  bankGoldReward?: number;
+  bankCpReward?: number;
+}
+
+export interface MapDraftState {
+  seat: number;
+  name: string;
+  edits: MapTilePatch[];
+}
+
+export interface MapSuggestion {
+  seat: number;
+  name: string;
+  edits: MapTilePatch[];
 }
 
 /**
@@ -28,6 +55,10 @@ export type TableSettings = Required<
   turnBaseS: number;
   /** Seconds banked after every action. 0 = no increment. Host picks 0 | 15 | 30 | 45 | 60. */
   turnIncrementS: number;
+  /** Optional sparse tile overrides from host/editor inline map edits in the lobby. */
+  mapEdits?: MapTilePatch[];
+  /** Whether unlocked non-editor guests can submit map suggestions (default true). */
+  suggestionsEnabled?: boolean;
 };
 
 export const TURN_BASE_OPTIONS = [0, 30, 45, 60, 90] as const;
@@ -48,9 +79,11 @@ export const DEFAULT_TABLE_SETTINGS: TableSettings = {
 
 /** Settings for a match from a table's rules (a fresh copy, safe to keep). */
 export const gameSettingsFor = (table: TableSettings, playerCount: number): GameSettings => {
-  const { turnBaseS: _base, turnIncrementS: _inc, ...rest } = table;
+  const { turnBaseS: _base, turnIncrementS: _inc, mapEdits: _edits, suggestionsEnabled: _sug, ...rest } = table;
   void _base;
   void _inc;
+  void _edits;
+  void _sug;
   return {
     ...structuredClone(rest),
     playerCount,
@@ -84,6 +117,10 @@ export interface TableView {
   settings: TableSettings;
   turnClock: TurnClock | null;
   game: PlayerGameView | null;
+  /** Transient live map draft currently being edited in the lobby (cleared on apply/cancel/start). */
+  liveDraft?: MapDraftState | null;
+  /** Pending map edit suggestions submitted by unlocked guests for the host to review. */
+  mapSuggestions?: MapSuggestion[];
   /**
    * Effects of the change this view brings (shots, damage numbers, sounds), to play once.
    * Empty on a resend of the same state (a reconnect, a seat change).
@@ -105,6 +142,11 @@ export const ClientMsg = {
   addBot: 'addBot',
   removeSeat: 'removeSeat',
   settings: 'settings',
+  setSeatMapAccess: 'setSeatMapAccess',
+  mapDraft: 'mapDraft',
+  mapCommitEdit: 'mapCommitEdit',
+  mapSuggest: 'mapSuggest',
+  resolveSuggestion: 'resolveSuggestion',
   start: 'start',
   action: 'action',
   rematch: 'rematch',

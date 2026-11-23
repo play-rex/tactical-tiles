@@ -7,6 +7,7 @@ import {
   CloseCode,
   ROOM_NAME,
   ServerMsg,
+  type MapTilePatch,
   type TableSettings,
   type TableView,
 } from '@tactical/engine';
@@ -82,6 +83,11 @@ interface OnlineState {
   addBot(): void;
   removeSeat(seat: number): void;
   updateSettings(settings: TableSettings): void;
+  setSeatMapAccess(seat: number, canEditMap: boolean, mapLocked: boolean): void;
+  sendMapDraft(edits: MapTilePatch[] | null): void;
+  commitMapEdits(edits: MapTilePatch[] | null): void;
+  sendMapSuggestion(edits: MapTilePatch[] | null): void;
+  resolveSuggestion(seat: number, accept: boolean): void;
   start(): void;
   rematch(): void;
   clearError(): void;
@@ -120,7 +126,15 @@ function describe(e: unknown) {
 const sameSeats = (a: TableView['seats'], b: TableView['seats']) =>
   a.length === b.length && a.every((s, i) => {
     const o = b[i];
-    return s.name === o.name && s.isBot === o.isBot && s.connected === o.connected && s.isHost === o.isHost && s.autopilot === o.autopilot;
+    return (
+      s.name === o.name &&
+      s.isBot === o.isBot &&
+      s.connected === o.connected &&
+      s.isHost === o.isHost &&
+      s.autopilot === o.autopilot &&
+      Boolean(s.canEditMap) === Boolean(o.canEditMap) &&
+      Boolean(s.mapLocked) === Boolean(o.mapLocked)
+    );
   });
 
 const forget = () => {
@@ -265,6 +279,12 @@ export const useOnline = create<OnlineState>((set, get) => {
     addBot: () => send(ClientMsg.addBot),
     removeSeat: seat => send(ClientMsg.removeSeat, { seat }),
     updateSettings: settings => send(ClientMsg.settings, settings),
+    setSeatMapAccess: (seat, canEditMap, mapLocked) =>
+      send(ClientMsg.setSeatMapAccess, { seat, canEditMap, mapLocked }),
+    sendMapDraft: edits => send(ClientMsg.mapDraft, { edits }),
+    commitMapEdits: edits => send(ClientMsg.mapCommitEdit, { edits }),
+    sendMapSuggestion: edits => send(ClientMsg.mapSuggest, { edits }),
+    resolveSuggestion: (seat, accept) => send(ClientMsg.resolveSuggestion, { seat, accept }),
     start: () => send(ClientMsg.start),
     rematch: () => send(ClientMsg.rematch),
     clearError: () => set({ error: null }),

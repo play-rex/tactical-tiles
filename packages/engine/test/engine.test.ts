@@ -539,3 +539,124 @@ test('Barrier x3 builds up to 3 tiles for 150€ and Land Mine deals 8 DMG + sto
   assert.equal(afterTrigger.state.playerCp[1], p1Turn.playerCp[1] - 1, 'only 1 CP spent walking onto 6,7');
   assert.equal(afterTrigger.state.mines.length, 0, 'triggered mine is consumed');
 });
+
+test('eventsFor enforces fog-of-war honesty on declarative FX events (movePath trimming, located shakes, secret mines)', () => {
+  const before = new Set(['2,2', '3,2']);
+  const after = new Set(['3,2', '4,2']);
+  const events = [
+    {
+      kind: 'movePath' as const,
+      unitId: 'u1',
+      unitType: 'SOLDIER' as const,
+      owner: 1,
+      path: [
+        { x: 0, y: 2 },
+        { x: 1, y: 2 },
+        { x: 2, y: 2 },
+        { x: 3, y: 2 },
+        { x: 4, y: 2 },
+      ],
+    },
+    {
+      kind: 'movePath' as const,
+      unitId: 'u2',
+      unitType: 'SNIPER' as const,
+      owner: 1,
+      path: [
+        { x: 9, y: 9 },
+        { x: 9, y: 8 },
+      ],
+    },
+    { kind: 'shake' as const, intensity: 10, at: { x: 9, y: 9 } },
+    { kind: 'shake' as const, intensity: 8, at: { x: 3, y: 2 } },
+    {
+      kind: 'hit' as const,
+      targetUnitId: 'u1',
+      at: { x: 3, y: 2 },
+      from: { x: 9, y: 9 },
+      damage: 5,
+      crossfireFrom: [{ x: 2, y: 2 }, { x: 9, y: 8 }],
+    },
+    {
+      kind: 'killed' as const,
+      unitId: 'u2',
+      unitType: 'SNIPER' as const,
+      owner: 1,
+      rank: 2,
+      at: { x: 9, y: 9 },
+      cause: 'COMBAT' as const,
+    },
+    { kind: 'mineBlast' as const, at: { x: 3, y: 2 }, damage: 8, victimDead: false },
+    { kind: 'mineBlast' as const, at: { x: 8, y: 8 }, damage: 8, victimDead: true },
+    { kind: 'build' as const, tiles: [{ x: 3, y: 2 }, { x: 8, y: 8 }], itemKey: 'BARRIER' as const },
+  ];
+
+  const filtered = eventsFor(events, true, before, after);
+  const movePaths = filtered.filter(e => e.kind === 'movePath');
+  assert.equal(movePaths.length, 1, 'unseen movePath is dropped');
+  assert.deepEqual(movePaths[0].path, [{ x: 2, y: 2 }, { x: 3, y: 2 }, { x: 4, y: 2 }], 'hidden origin tiles are trimmed');
+
+  const shakes = filtered.filter(e => e.kind === 'shake');
+  assert.equal(shakes.length, 1, 'unseen located shake is dropped');
+  assert.deepEqual(shakes[0].at, { x: 3, y: 2 });
+
+  const hits = filtered.filter(e => e.kind === 'hit');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].from, undefined, 'unseen attacker tile is stripped from hit event');
+  assert.deepEqual(hits[0].crossfireFrom, [{ x: 2, y: 2 }], 'only visible crossfire supporters remain');
+
+  assert.equal(filtered.filter(e => e.kind === 'killed').length, 0, 'unseen kill is hidden under fog');
+  assert.equal(filtered.filter(e => e.kind === 'mineBlast').length, 1, 'only visible mine blast passes');
+
+  const builds = filtered.filter(e => e.kind === 'build');
+  assert.equal(builds.length, 1);
+  assert.deepEqual(builds[0].tiles, [{ x: 3, y: 2 }]);
+
+  // Without fog, all events pass verbatim
+  assert.equal(eventsFor(events, false, before, after).length, events.length);
+});
+
+test('applyAction emits declarative animation cues and never leaks LAND_MINE build events', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'FXEV01', fogOfWar: false, playerCount: 2 }));
+  const map = base.mapData.map(t => ({
+    ...t,
+    type: 'PLAINS' as const,
+    subType: undefined,
+    owner: undefined,
+    hazardState: undefined,
+  }));
+  const clearWeather = { ...base.weather, playerZones: { 0: 'CLEAR' as const, 1: 'CLEAR' as const } };
+  const p0 = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '3,3', hp: 10, maxHp: 10, ammo: 5, completed: false, hasMoved: false };
+  const p1 = { ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!, tileId: '5,3', hp: 3, maxHp: 10, ammo: 5 };
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    weather: clearWeather,
+    units: [p0, p1],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerGold: { 0: 500, 1: 500 },
+    mines: [],
+  };
+
+  // Planting a hidden Land Mine must NOT emit a `build` event
+  const plantMine = applyAction(state, { type: 'BUILD', itemKey: 'LAND_MINE', tileId: '7,7' });
+  assert.equal(plantMine.rejected, undefined);
+  assert.equal(plantMine.events.some(e => e.kind === 'build'), false, 'hidden land mine never emits build event');
+
+  // Lethal attack emits projectile (with weapon/attacker/target), hit, killed, and located shake
+  const atk = applyAction(state, { type: 'ATTACK', attackerId: p0.id, targetUnitId: p1.id, cost: 3 });
+  assert.equal(atk.rejected, undefined);
+  const proj = atk.events.find(e => e.kind === 'projectile');
+  const hit = atk.events.find(e => e.kind === 'hit');
+  const killed = atk.events.find(e => e.kind === 'killed');
+  const shake = atk.events.find(e => e.kind === 'shake');
+  assert.ok(proj && proj.weapon === 'SOLDIER' && proj.attackerId === p0.id && proj.targetUnitId === p1.id);
+  assert.ok(hit && hit.isKill === true && hit.targetUnitId === p1.id);
+  assert.ok(killed && killed.unitId === p1.id && killed.cause === 'COMBAT' && killed.killerOwner === 0);
+  assert.ok(shake && shake.at?.x === 5 && shake.at?.y === 3);
+
+  // Events remain strictly JSON-serializable for Colyseus transport
+  const wire = JSON.stringify(atk.events);
+  assert.deepEqual(JSON.parse(wire), atk.events);
+});

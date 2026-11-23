@@ -6,6 +6,7 @@ import { TILE_SIZE } from '@tactical/engine/constants/Config';
 import { getUnitMaxHp } from '@tactical/engine/rules/CombatRules';
 import { PLAYER_UI_THEME, hexToPixiColor } from '../../ui/GeoPrimitives';
 import type { BoardRotation } from '../../../core/boardRotation';
+import { fxTimeline } from '../../../core/graphics/fxTimeline';
 
 const lerp = (start: number, end: number, alpha: number) => start + (end - start) * alpha;
 
@@ -49,8 +50,10 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
 }) => {
     const containerRef = useRef<PIXI.Container>(null);
     const rotWrapperRef = useRef<PIXI.Container>(null);
+    const hitFlashRef = useRef<PIXI.Graphics>(null);
     const visual = useRef({ x, y });
     const settledRef = useRef(true);
+    const hadImpulseRef = useRef(false);
     const worldCenter = (gridSize * TILE_SIZE) / 2;
     const facingRef = useRef<number>(Math.atan2(worldCenter - y, worldCenter - x));
 
@@ -66,6 +69,34 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     }, [x, y]);
 
     useTick((delta) => {
+        const clampedDelta = Math.min(2, typeof delta === 'number' && Number.isFinite(delta) ? delta : 1);
+        const impulse = fxTimeline.getUnitImpulse(unit.id);
+
+        if (rotWrapperRef.current) {
+            if (impulse) {
+                hadImpulseRef.current = true;
+                rotWrapperRef.current.position.set(
+                    TILE_SIZE / 2 + impulse.offsetX,
+                    TILE_SIZE / 2 + impulse.offsetY,
+                );
+                if (hitFlashRef.current) {
+                    const showFlash = impulse.flashAlpha > 0.01;
+                    hitFlashRef.current.visible = showFlash;
+                    if (showFlash) {
+                        hitFlashRef.current.alpha = impulse.flashAlpha * 0.65;
+                        hitFlashRef.current.tint = impulse.flashColor;
+                    }
+                }
+            } else if (hadImpulseRef.current) {
+                hadImpulseRef.current = false;
+                rotWrapperRef.current.position.set(TILE_SIZE / 2, TILE_SIZE / 2);
+                if (hitFlashRef.current) {
+                    hitFlashRef.current.visible = false;
+                    hitFlashRef.current.alpha = 0;
+                }
+            }
+        }
+
         if (settledRef.current || !containerRef.current) return;
 
         const targetX = x;
@@ -74,7 +105,7 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
         const dy = targetY - visual.current.y;
         const dist = Math.hypot(dx, dy);
 
-        const speed = Math.min(1, 0.22 * delta);
+        const speed = Math.min(1, 0.22 * clampedDelta);
         visual.current.x = lerp(visual.current.x, targetX, speed);
         visual.current.y = lerp(visual.current.y, targetY, speed);
 
@@ -86,13 +117,13 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
                 facingRef.current = Math.atan2(dy, dx);
                 rotWrapperRef.current.scale.set(1.06, 0.96);
             } else {
-                const scaleSpeed = Math.min(1, 0.16 * delta);
+                const scaleSpeed = Math.min(1, 0.16 * clampedDelta);
                 rotWrapperRef.current.scale.x = lerp(rotWrapperRef.current.scale.x, 1, scaleSpeed);
                 rotWrapperRef.current.scale.y = lerp(rotWrapperRef.current.scale.y, 1, scaleSpeed);
             }
             const cur = rotWrapperRef.current.rotation;
             const diff = ((facingRef.current - cur + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-            rotWrapperRef.current.rotation = cur + diff * Math.min(1, 0.25 * delta);
+            rotWrapperRef.current.rotation = cur + diff * Math.min(1, 0.25 * clampedDelta);
 
             if (dist < 0.25 && Math.abs(diff) < 0.01 && Math.abs(rotWrapperRef.current.scale.x - 1) < 0.005) {
                 visual.current.x = targetX;
@@ -105,6 +136,13 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
             }
         }
     });
+
+    const drawHitFlash = useCallback((g: PIXI.Graphics) => {
+        g.clear();
+        g.beginFill(0xFFFFFF, 1);
+        g.drawCircle(0, 0, TILE_SIZE * 0.38);
+        g.endFill();
+    }, []);
 
     const drawOverwatchRing = useCallback((g: PIXI.Graphics) => {
         g.clear();
@@ -234,6 +272,7 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
                     x={0}
                     y={0}
                 />
+                <Graphics ref={hitFlashRef} draw={drawHitFlash} visible={false} alpha={0} eventMode="none" />
             </Container>
 
             {/* Counter-rotate HUD overlay so HP bars, text, badges, and rank stars stay upright */}

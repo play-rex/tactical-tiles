@@ -133,7 +133,7 @@ class ZoneWeatherEngine {
     }
 
     public update(delta: number) {
-        if (!this.viewportRef || (this.graphics as any).destroyed) return;
+        if (!this.viewportRef || this.viewportRef.destroyed || (this.graphics as any).destroyed) return;
         this.graphics.clear();
         
         const dt = Math.min(3, delta || 1);
@@ -550,7 +550,8 @@ export const WeatherSystem: React.FC<WeatherSystemProps> = ({ viewportInstance }
 
     // Attach to ticker (~30fps updates keep GPU graphics clear/draw light)
     useEffect(() => {
-        if (!app || !engineRef.current) return;
+        const ticker = (app as any)?.ticker;
+        if (!ticker || ticker.destroyed || !engineRef.current) return;
         
         const engine = engineRef.current;
         let accum = 0;
@@ -563,11 +564,12 @@ export const WeatherSystem: React.FC<WeatherSystemProps> = ({ viewportInstance }
             engine.update(step);
         };
         
-        app.ticker.add(update);
+        ticker.add(update);
         
         return () => {
-            if ((app?.ticker as any)?._head) {
-                app.ticker.remove(update);
+            const activeTicker = (app as any)?.ticker;
+            if (activeTicker && !activeTicker.destroyed && activeTicker._head) {
+                activeTicker.remove(update);
             }
         };
     }, [app]);

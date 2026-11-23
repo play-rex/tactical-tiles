@@ -1,7 +1,17 @@
-import React, { useEffect, useState } from 'react';
-import { MAX_PLAYERS, MIN_PLAYERS, type TableSettings, type TableView } from '@tactical/engine';
-import { normalizeSeed } from '@tactical/engine/utils/SeededRandom';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  createGeneratedGame,
+  createOnlineTableGame,
+  diffMapTilePatches,
+  gameSettingsFor,
+  MAX_PLAYERS,
+  MIN_PLAYERS,
+  type TableSettings,
+  type TableView,
+} from '@tactical/engine';
+import { generateSectorSeed, normalizeSeed } from '@tactical/engine/utils/SeededRandom';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from '../components/ui/GeoPrimitives';
+import { MapPreviewCard } from '../components/ui/MapPreviewModal';
 import {
   BrandHeader,
   DifficultyButtons,
@@ -153,14 +163,24 @@ const RulesPanel: React.FC<{ settings: TableSettings; isHost: boolean; hasBots: 
       <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>MUTATORS</div>
       <MutatorToggles mutators={settings.mutators} disabled={!isHost} onChange={mutators => set({ mutators })} />
 
-      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>SECTOR SEED (OPTIONAL)</div>
-      <SeedInput value={settings.mapSeed} disabled={!isHost} onCommit={mapSeed => set({ mapSeed })} />
+      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>SECTOR SEED</div>
+      <SeedInput
+        value={settings.mapSeed}
+        disabled={!isHost}
+        onCommit={mapSeed => set({ mapSeed, mapEdits: undefined })}
+        onRandomize={() => set({ mapSeed: generateSectorSeed(), mapEdits: undefined })}
+      />
     </div>
   );
 };
 
 /** Sent when you leave the field, not on every keystroke. */
-const SeedInput: React.FC<{ value: string; disabled: boolean; onCommit: (v: string) => void }> = ({ value, disabled, onCommit }) => {
+const SeedInput: React.FC<{
+  value: string;
+  disabled: boolean;
+  onCommit: (v: string) => void;
+  onRandomize?: () => void;
+}> = ({ value, disabled, onCommit, onRandomize }) => {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   const commit = () => {
@@ -168,18 +188,30 @@ const SeedInput: React.FC<{ value: string; disabled: boolean; onCommit: (v: stri
     if (clean !== value) onCommit(clean);
   };
   return (
-    <input
-      style={{ ...inputStyle, textTransform: 'uppercase', letterSpacing: '2px' }}
-      placeholder="Random map each game"
-      maxLength={12}
-      value={draft}
-      disabled={disabled}
-      onChange={e => setDraft(normalizeSeed(e.target.value))}
-      onBlur={commit}
-      onKeyDown={e => {
-        if (e.key === 'Enter') commit();
-      }}
-    />
+    <div style={{ display: 'flex', gap: '6px' }}>
+      <input
+        style={{ ...inputStyle, flex: 1, minWidth: 0, textTransform: 'uppercase', letterSpacing: '2px' }}
+        placeholder="Auto random seed"
+        maxLength={12}
+        value={draft}
+        disabled={disabled}
+        onChange={e => setDraft(normalizeSeed(e.target.value))}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') commit();
+        }}
+      />
+      {onRandomize && (
+        <GeoButton
+          disabled={disabled}
+          onClick={onRandomize}
+          title="Roll a fresh random battlefield seed"
+          coreStyle={{ padding: '7px 11px' }}
+        >
+          🎲
+        </GeoButton>
+      )}
+    </div>
   );
 };
 
@@ -189,11 +221,47 @@ const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
   const removeSeat = useOnline(s => s.removeSeat);
   const start = useOnline(s => s.start);
   const leave = useOnline(s => s.leave);
+  const updateSettings = useOnline(s => s.updateSettings);
+  const setSeatMapAccess = useOnline(s => s.setSeatMapAccess);
+  const sendMapDraft = useOnline(s => s.sendMapDraft);
+  const commitMapEdits = useOnline(s => s.commitMapEdits);
+  const sendMapSuggestion = useOnline(s => s.sendMapSuggestion);
+  const resolveSuggestion = useOnline(s => s.resolveSuggestion);
   const me = view.seats[view.mySeat];
   const isHost = Boolean(me?.isHost);
+  const suggestionsEnabled = view.settings.suggestionsEnabled !== false;
+  const isLocked = Boolean(me?.mapLocked) && !isHost;
+  const hasEditAccess = isHost || (Boolean(me?.canEditMap) && !me?.mapLocked);
+  const someoneElseEditing = Boolean(view.liveDraft && view.liveDraft.seat !== view.mySeat);
+  const canEdit = hasEditAccess && !someoneElseEditing;
+  const canSuggest = !canEdit && !isLocked && suggestionsEnabled;
+  const suggestions = view.mapSuggestions ?? [];
+  const hasOwnSuggestion = suggestions.some(s => s.seat === view.mySeat);
   const { copied, copy } = useCopyState();
   const link = `${location.origin}${tablePath(view.code)}`;
   const canStart = view.seats.length >= MIN_PLAYERS;
+
+  const previewPlayers = Math.max(MIN_PLAYERS, view.seats.length);
+  const uneditedGame = useMemo(
+    () => createGeneratedGame(gameSettingsFor({ ...view.settings, mapEdits: undefined }, previewPlayers)),
+    // Re-bake only when seed, seat count, or starting squad counts change (not when toggling fog/weather/timers).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      view.settings.mapSeed,
+      previewPlayers,
+      view.settings.unitCounts.SOLDIER,
+      view.settings.unitCounts.ASSAULTER,
+      view.settings.unitCounts.SNIPER,
+    ],
+  );
+  const mapEditsKey = JSON.stringify(view.settings.mapEdits ?? []);
+  const previewGame = useMemo(
+    () => (view.settings.mapEdits?.length ? createOnlineTableGame(view.settings, previewPlayers) : uneditedGame),
+    // Depend on serialized `mapEditsKey` rather than array identity so liveDraft broadcasts do not recompute `mapData`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [uneditedGame, mapEditsKey, view.settings.victoryMode],
+  );
+  const activeSeed = view.settings.mapSeed || previewGame.activeSeed;
 
   return (
     <StageShell width={900}>
@@ -226,7 +294,41 @@ const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
                   </span>
                   {s.isHost && <GeoChip variant="softAmber" style={{ padding: '1px 7px' }}>HOST</GeoChip>}
                   {s.isBot && <GeoChip variant="softViolet" style={{ padding: '1px 7px' }}>BOT</GeoChip>}
+                  {!s.isHost && !s.isBot && s.canEditMap && !s.mapLocked && (
+                    <GeoChip variant="softBlue" style={{ padding: '1px 6px' }}>EDIT</GeoChip>
+                  )}
+                  {!s.isHost && !s.isBot && s.mapLocked && (
+                    <GeoChip variant="softRed" style={{ padding: '1px 6px' }}>LOCKED</GeoChip>
+                  )}
                   {!s.isBot && !s.connected && <GeoChip variant="softRed" style={{ padding: '1px 7px' }}>AWAY</GeoChip>}
+                  {isHost && !s.isHost && !s.isBot && (
+                    <>
+                      <GeoButton
+                        variant={s.canEditMap && !s.mapLocked ? 'blue' : 'default'}
+                        onClick={() => setSeatMapAccess(i, !(s.canEditMap && !s.mapLocked), false)}
+                        coreStyle={{ padding: '2px 7px', fontSize: '11px' }}
+                        title={
+                          s.canEditMap && !s.mapLocked
+                            ? 'Revoke direct map edit permission'
+                            : 'Allow this player to edit the lobby map directly'
+                        }
+                      >
+                        ✏️
+                      </GeoButton>
+                      <GeoButton
+                        variant={s.mapLocked ? 'red' : 'default'}
+                        onClick={() => setSeatMapAccess(i, false, !s.mapLocked)}
+                        coreStyle={{ padding: '2px 7px', fontSize: '11px' }}
+                        title={
+                          s.mapLocked
+                            ? 'Unlock this player so they can suggest or be given edit access'
+                            : 'Lock this player from editing or suggesting map changes'
+                        }
+                      >
+                        🔒
+                      </GeoButton>
+                    </>
+                  )}
                   {isHost && i !== view.mySeat && (
                     <GeoButton onClick={() => removeSeat(i)} coreStyle={{ padding: '2px 8px' }}>✕</GeoButton>
                   )}
@@ -237,7 +339,48 @@ const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
               <GeoButton variant="softViolet" fullWidth onClick={addBot}>+ ADD BOT</GeoButton>
             )}
 
-            <div style={{ marginTop: '8px' }}>
+            <MapPreviewCard
+              game={previewGame}
+              title={`Sector ${activeSeed}`}
+              subtitle={`${previewPlayers} Players · ${previewGame.gridSize}×${previewGame.gridSize} Online Battlefield`}
+              seedLabel={activeSeed}
+              canRandomize={isHost}
+              onRandomize={() => updateSettings({ ...view.settings, mapSeed: generateSectorSeed(), mapEdits: undefined })}
+              canEdit={canEdit}
+              isEdited={Boolean(view.settings.mapEdits?.length)}
+              onApplyEdits={editedTiles => {
+                const patches = diffMapTilePatches(uneditedGame.mapData, editedTiles);
+                commitMapEdits(patches.length ? patches : null);
+              }}
+              onResetEdits={() => commitMapEdits(null)}
+              canSuggest={canSuggest}
+              onSendSuggestion={suggestedTiles => {
+                const patches = diffMapTilePatches(previewGame.mapData, suggestedTiles);
+                sendMapSuggestion(patches.length ? patches : null);
+              }}
+              onWithdrawSuggestion={() => sendMapSuggestion(null)}
+              hasOwnSuggestion={hasOwnSuggestion}
+              isLocked={isLocked}
+              isHost={isHost}
+              suggestionsEnabled={suggestionsEnabled}
+              onToggleSuggestions={() => updateSettings({ ...view.settings, suggestionsEnabled: !suggestionsEnabled })}
+              liveDraft={view.liveDraft ?? null}
+              mySeat={view.mySeat}
+              onDraftTilesChange={draftTiles => {
+                if (!draftTiles) {
+                  sendMapDraft(null);
+                  return;
+                }
+                const patches = diffMapTilePatches(previewGame.mapData, draftTiles);
+                sendMapDraft(patches);
+              }}
+              suggestions={suggestions}
+              onResolveSuggestion={(seat, accept) => resolveSuggestion(seat, accept)}
+              playerNames={view.seats.map(s => s.name)}
+              maxPreviewPx={160}
+            />
+
+            <div style={{ marginTop: '4px' }}>
               {isHost ? (
                 <GeoButton variant="blue" fullWidth disabled={!canStart} onClick={start} coreStyle={{ padding: '12px' }}>
                   {canStart ? `START MATCH (${view.seats.length} PLAYERS) →` : 'NEED 2 SEATS — SHARE THE CODE OR ADD A BOT'}

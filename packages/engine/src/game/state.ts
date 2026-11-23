@@ -91,16 +91,78 @@ export type SoundName =
 
 export interface TilePoint { x: number; y: number }
 
+export type WeaponVisual = 'SOLDIER' | 'ASSAULTER' | 'SNIPER' | 'TURRET' | 'ARTILLERY' | 'SIEGE';
+
+export type KillCause = 'COMBAT' | 'OVERWATCH' | 'MINE' | 'TURRET' | 'ARTILLERY' | 'LAVA' | 'BASE_FALL';
+
 /**
  * What an action looked and sounded like, for the client to play back. Positions are tile
  * coordinates, so the server can leave out what a player can't see.
  */
 export type GameEvent =
-  | { kind: 'sound'; sound: SoundName }
-  | { kind: 'projectile'; from: TilePoint; to: TilePoint; style: 'BULLET' | 'LASER' | 'MISSILE' }
+  | { kind: 'sound'; sound: SoundName; delayMs?: number }
+  | {
+      kind: 'projectile';
+      from: TilePoint;
+      to: TilePoint;
+      style: 'BULLET' | 'LASER' | 'MISSILE';
+      weapon?: WeaponVisual;
+      attackerId?: string;
+      targetUnitId?: string;
+      delayMs?: number;
+      travelMs?: number;
+    }
   /** Floating text above a tile; `lift` raises it by that many pixels. */
-  | { kind: 'popup'; at: TilePoint; text: string; color: string; lift: number }
-  | { kind: 'shake'; intensity: number };
+  | { kind: 'popup'; at: TilePoint; text: string; color: string; lift: number; delayMs?: number }
+  | { kind: 'shake'; intensity: number; at?: TilePoint; delayMs?: number }
+  | { kind: 'movePath'; unitId: string; unitType: UnitType; owner: number; path: TilePoint[]; haltedAt?: number }
+  | {
+      kind: 'hit';
+      targetUnitId?: string;
+      at: TilePoint;
+      from?: TilePoint;
+      damage: number;
+      weapon?: WeaponVisual;
+      isKill?: boolean;
+      isCrit?: boolean;
+      suppressed?: boolean;
+      crossfireFrom?: TilePoint[];
+      delayMs?: number;
+    }
+  | {
+      kind: 'killed';
+      unitId: string;
+      unitType: UnitType;
+      owner: number;
+      rank: number;
+      at: TilePoint;
+      killerOwner?: number;
+      cause: KillCause;
+      delayMs?: number;
+    }
+  | {
+      kind: 'mineBlast';
+      at: TilePoint;
+      damage: number;
+      victimUnitId?: string;
+      victimDead?: boolean;
+      delayMs?: number;
+    }
+  | {
+      kind: 'structureHit';
+      at: TilePoint;
+      structureType: 'BASE' | 'BARRIER';
+      damage: number;
+      destroyed: boolean;
+      owner?: number | null;
+      delayMs?: number;
+    }
+  | { kind: 'heist'; at: TilePoint; playerId: number }
+  | { kind: 'promotion'; unitId: string; at: TilePoint; rank: number; label: string }
+  | { kind: 'overwatchSet'; unitId: string; at: TilePoint; owner: number }
+  | { kind: 'heal'; unitId: string; at: TilePoint; amount: number; item: 'MEDKIT' | 'FIRST_AID' | 'AMMO' | 'RELOAD' }
+  | { kind: 'build'; tiles: TilePoint[]; itemKey: 'BARRIER' | 'BRIDGE' }
+  | { kind: 'supplyLanded'; at: TilePoint; item: SupplyLootType };
 
 // ── Logs ─────────────────────────────────────────────────────────
 
