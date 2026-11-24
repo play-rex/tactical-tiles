@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useTick, Container, Graphics, Text } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 import { SafeSprite } from '../SafeSprite';
@@ -6,7 +6,9 @@ import { TILE_SIZE } from '@tactical/engine/constants/Config';
 import { getUnitMaxHp } from '@tactical/engine/rules/CombatRules';
 import { PLAYER_UI_THEME, hexToPixiColor } from '../../ui/GeoPrimitives';
 import type { BoardRotation } from '../../../core/boardRotation';
-import { fxTimeline } from '../../../core/graphics/fxTimeline';
+import { fxTimeline, getPrefersReducedMotion, subscribeReducedMotion } from '../../../core/graphics/fxTimeline';
+import { screenUpVector } from '../../../core/graphics/ParticlePool';
+import { useEffectStore } from '../../../store/useEffectStore';
 
 const lerp = (start: number, end: number, alpha: number) => start + (end - start) * alpha;
 
@@ -38,31 +40,52 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     texture,
     x,
     y,
-    tileX,
-    tileY,
     gridSize = 20,
     isSelected,
     isReadyTurn = false,
     unit,
-    mapRotation = 0,
-    onSelectTile,
-    onPointerDown,
+    mapRotation = 0 as BoardRotation,
 }) => {
     const containerRef = useRef<PIXI.Container>(null);
     const rotWrapperRef = useRef<PIXI.Container>(null);
     const hitFlashRef = useRef<PIXI.Graphics>(null);
     const visual = useRef({ x, y });
     const settledRef = useRef(true);
+    const wasMarchingRef = useRef(false);
     const hadImpulseRef = useRef(false);
+    const reducedMotionRef = useRef<boolean>(getPrefersReducedMotion());
     const worldCenter = (gridSize * TILE_SIZE) / 2;
     const facingRef = useRef<number>(Math.atan2(worldCenter - y, worldCenter - x));
 
+    // Narrow selector: only re-renders this single unit when a projectile targeting it launches & lands
+    const deferredHpBonus = useEffectStore(state => state.deferredHp[unit.id] ?? 0);
+
     useEffect(() => {
-        visual.current = { x, y };
+        reducedMotionRef.current = getPrefersReducedMotion();
+        return subscribeReducedMotion((reduced) => {
+            reducedMotionRef.current = reduced;
+        });
+    }, []);
+
+    // Place container once synchronously on mount (honoring any already-active movePath to avoid a 1-frame snap)
+    useLayoutEffect(() => {
+        const pose = fxTimeline.getUnitMovePose(unit.id, reducedMotionRef.current);
+        const initX = pose ? pose.x : x;
+        const initY = pose ? pose.y : y;
+        visual.current = { x: initX, y: initY };
+        if (pose) {
+            facingRef.current = pose.facingRad;
+            wasMarchingRef.current = true;
+            settledRef.current = false;
+        }
+        if (containerRef.current) {
+            containerRef.current.position.set(initX, initY);
+        }
         if (rotWrapperRef.current) {
             rotWrapperRef.current.rotation = facingRef.current;
         }
-    }, []); // Only on mount
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     useEffect(() => {
         settledRef.current = false;
@@ -71,7 +94,62 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     useTick((delta) => {
         const clampedDelta = Math.min(2, typeof delta === 'number' && Number.isFinite(delta) ? delta : 1);
         const impulse = fxTimeline.getUnitImpulse(unit.id);
+        const movePose = fxTimeline.getUnitMovePose(unit.id, reducedMotionRef.current);
 
+        // 1. Update hit-flash overlay (strictly single-pulse fade)
+        if (hitFlashRef.current) {
+            const showFlash = Boolean(impulse && impulse.flashAlpha > 0.01);
+            hitFlashRef.current.visible = showFlash;
+            if (showFlash && impulse) {
+                hitFlashRef.current.alpha = impulse.flashAlpha * 0.65;
+                hitFlashRef.current.tint = impulse.flashColor;
+            }
+        }
+
+        // 2. Active tile-by-tile path march driven by fxTimeline
+        if (movePose && containerRef.current) {
+            wasMarchingRef.current = true;
+            settledRef.current = false;
+            visual.current.x = movePose.x;
+            visual.current.y = movePose.y;
+            containerRef.current.position.set(movePose.x, movePose.y);
+
+            if (rotWrapperRef.current) {
+                const up = screenUpVector(mapRotation);
+                const offX = up.x * movePose.strideBobPx + (impulse?.offsetX ?? 0);
+                const offY = up.y * movePose.strideBobPx + (impulse?.offsetY ?? 0);
+                rotWrapperRef.current.position.set(TILE_SIZE / 2 + offX, TILE_SIZE / 2 + offY);
+                rotWrapperRef.current.scale.set(movePose.scaleX, movePose.scaleY);
+
+                facingRef.current = movePose.facingRad;
+                const cur = rotWrapperRef.current.rotation;
+                const diff = ((facingRef.current - cur + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+                rotWrapperRef.current.rotation = cur + diff * Math.min(1, 0.34 * clampedDelta);
+            }
+            if (impulse) hadImpulseRef.current = true;
+            return;
+        }
+
+        // 3. Clean finish right after path march completes
+        if (wasMarchingRef.current) {
+            wasMarchingRef.current = false;
+            visual.current.x = x;
+            visual.current.y = y;
+            if (containerRef.current) {
+                containerRef.current.position.set(x, y);
+            }
+            if (rotWrapperRef.current) {
+                rotWrapperRef.current.scale.set(1, 1);
+                rotWrapperRef.current.rotation = facingRef.current;
+                rotWrapperRef.current.position.set(
+                    TILE_SIZE / 2 + (impulse?.offsetX ?? 0),
+                    TILE_SIZE / 2 + (impulse?.offsetY ?? 0),
+                );
+            }
+            settledRef.current = true;
+        }
+
+        // 4. Recoil / knockback impulse on stationary unit
         if (rotWrapperRef.current) {
             if (impulse) {
                 hadImpulseRef.current = true;
@@ -79,24 +157,13 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
                     TILE_SIZE / 2 + impulse.offsetX,
                     TILE_SIZE / 2 + impulse.offsetY,
                 );
-                if (hitFlashRef.current) {
-                    const showFlash = impulse.flashAlpha > 0.01;
-                    hitFlashRef.current.visible = showFlash;
-                    if (showFlash) {
-                        hitFlashRef.current.alpha = impulse.flashAlpha * 0.65;
-                        hitFlashRef.current.tint = impulse.flashColor;
-                    }
-                }
             } else if (hadImpulseRef.current) {
                 hadImpulseRef.current = false;
                 rotWrapperRef.current.position.set(TILE_SIZE / 2, TILE_SIZE / 2);
-                if (hitFlashRef.current) {
-                    hitFlashRef.current.visible = false;
-                    hitFlashRef.current.alpha = 0;
-                }
             }
         }
 
+        // 5. Smooth fallback interpolation (e.g., Undo Move or instant position updates without movePath)
         if (settledRef.current || !containerRef.current) return;
 
         const targetX = x;
@@ -105,19 +172,19 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
         const dy = targetY - visual.current.y;
         const dist = Math.hypot(dx, dy);
 
-        const speed = Math.min(1, 0.22 * clampedDelta);
+        const speed = Math.min(1, 0.24 * clampedDelta);
         visual.current.x = lerp(visual.current.x, targetX, speed);
         visual.current.y = lerp(visual.current.y, targetY, speed);
-
-        containerRef.current.x = visual.current.x;
-        containerRef.current.y = visual.current.y;
+        containerRef.current.position.set(visual.current.x, visual.current.y);
 
         if (rotWrapperRef.current) {
             if (dist > 1.5) {
                 facingRef.current = Math.atan2(dy, dx);
-                rotWrapperRef.current.scale.set(1.06, 0.96);
+                if (!reducedMotionRef.current) {
+                    rotWrapperRef.current.scale.set(1.05, 0.96);
+                }
             } else {
-                const scaleSpeed = Math.min(1, 0.16 * clampedDelta);
+                const scaleSpeed = Math.min(1, 0.18 * clampedDelta);
                 rotWrapperRef.current.scale.x = lerp(rotWrapperRef.current.scale.x, 1, scaleSpeed);
                 rotWrapperRef.current.scale.y = lerp(rotWrapperRef.current.scale.y, 1, scaleSpeed);
             }
@@ -128,8 +195,7 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
             if (dist < 0.25 && Math.abs(diff) < 0.01 && Math.abs(rotWrapperRef.current.scale.x - 1) < 0.005) {
                 visual.current.x = targetX;
                 visual.current.y = targetY;
-                containerRef.current.x = targetX;
-                containerRef.current.y = targetY;
+                containerRef.current.position.set(targetX, targetY);
                 rotWrapperRef.current.scale.set(1, 1);
                 rotWrapperRef.current.rotation = facingRef.current;
                 settledRef.current = true;
@@ -168,8 +234,6 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
         g.moveTo(max - arm, max); g.lineTo(max, max); g.lineTo(max, max - arm);
     }, []);
 
-    // A plate in the team's colour under every unit: whose it is reads at any zoom, and it
-    // fades once the unit has acted this turn.
     const teamColor = hexToPixiColor((PLAYER_UI_THEME[unit.owner] ?? PLAYER_UI_THEME[0]).badgeBg);
     const drawTeamPlate = useCallback((g: PIXI.Graphics) => {
         g.clear();
@@ -183,9 +247,11 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     }, [teamColor]);
 
     const maxHp = getUnitMaxHp(unit);
+    const displayHp = Math.min(maxHp, Math.max(0, unit.hp + deferredHpBonus));
+
     const drawHudBars = useCallback((g: PIXI.Graphics) => {
         g.clear();
-        const pct = Math.min(1, Math.max(0, unit.hp / maxHp));
+        const pct = Math.min(1, Math.max(0, displayHp / maxHp));
         const color = pct > 0.5 ? 0x00FF00 : pct > 0.25 ? 0xFFA500 : 0xFF0000;
 
         g.beginFill(0x000000, 0.8);
@@ -248,13 +314,11 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
             g.drawCircle(TILE_SIZE - 9, 9, 4);
             g.endFill();
         }
-    }, [unit.hp, maxHp, unit.ammo, unit.maxAmmo, unit.rank, unit.isOverwatching, isReadyTurn]);
+    }, [displayHp, maxHp, unit.ammo, unit.maxAmmo, unit.rank, unit.isOverwatching, isReadyTurn]);
 
     return (
         <Container
             ref={containerRef}
-            x={x}
-            y={y}
             eventMode="none"
         >
             <Graphics draw={drawTeamPlate} alpha={unit.completed ? 0.45 : 1} />
@@ -284,7 +348,7 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
             >
                 <Graphics draw={drawHudBars} />
                 <Text
-                    text={`${unit.hp}`}
+                    text={`${displayHp}`}
                     x={8}
                     y={TILE_SIZE - 17}
                     anchor={[0, 1]}

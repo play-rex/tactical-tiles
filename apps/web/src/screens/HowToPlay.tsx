@@ -166,7 +166,7 @@ export const HowToPlay: React.FC = () => {
                     <div style={{ fontWeight: 900, fontSize: '14px', color: 'var(--acc-blue-ink)', marginBottom: '6px' }}>HEADQUARTERS (BASE)</div>
                     <div style={{ fontSize: '13px', marginBottom: '6px' }}>Unit respawn &amp; shop drop center. Primary Conquer target.</div>
                     <div style={{ fontSize: '12px', color: 'var(--acc-red-ink)', fontWeight: 700 }}>
-                      Heavy Artillery: {BASE_STATS.RANGE} Tile Range • {BASE_STATS.MIN_DMG}-{BASE_STATS.MAX_DMG} DMG/turn.
+                      Heavy Artillery: {BASE_STATS.RANGE} Tile Range • {BASE_STATS.MIN_DMG}-{BASE_STATS.MAX_DMG} DMG to weakest enemy + {BASE_STATS.SPLASH_MIN_DMG}-{BASE_STATS.SPLASH_MAX_DMG} splash to every other enemy in range.
                     </div>
                   </GeoWell>
                 </div>

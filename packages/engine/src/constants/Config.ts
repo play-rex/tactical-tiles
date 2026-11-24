@@ -11,7 +11,9 @@ export const BASE_STATS = {
   HP: 50,
   RANGE: 4,
   MIN_DMG: 3,
-  MAX_DMG: 5
+  MAX_DMG: 5,
+  SPLASH_MIN_DMG: 2,
+  SPLASH_MAX_DMG: 3
 };
 
 export const BANK_STATS = {

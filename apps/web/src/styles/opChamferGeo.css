@@ -317,6 +317,50 @@
   100% { opacity: 0; }
 }
 
+/* ── Tactical kill / breach callout toast: upper lane, never collides with turn banner ── */
+.tt-tactical-banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 10%;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 22;
+  animation: tt-banner-fade var(--tt-callout-ms, 1600ms) linear forwards;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .tt-tactical-banner {
+    animation: tt-callout-slide var(--tt-callout-ms, 1600ms) cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
+  }
+}
+.tt-tactical-banner__plate {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 24px 8px 18px;
+  clip-path: polygon(11px 0, 100% 0, calc(100% - 11px) 100%, 0 100%);
+  box-shadow: 0 5px 0 rgba(20, 24, 33, 0.28);
+}
+.tt-tactical-banner__title {
+  font-size: clamp(16px, 3.2vw, 23px);
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.tt-tactical-banner__sub {
+  font-size: 12px;
+  font-weight: 800;
+  opacity: 0.9;
+}
+@keyframes tt-callout-slide {
+  0% { opacity: 0; transform: translateY(-16px) scale(0.94); }
+  12% { opacity: 1; transform: translateY(0) scale(1); }
+  80% { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-10px) scale(0.98); }
+}
+
 /* ── Phone layout: the side panels open as a sheet over the bottom of the map ── */
 .tt-sheet {
   position: absolute;

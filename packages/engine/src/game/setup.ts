@@ -115,31 +115,115 @@ export const generateDynamicMap = (
         }
     }
 
-    for (let i = 0; i < Math.max(4, numPlayers * 2); i++) {
-         const mx = Math.floor(rng() * size);
-         const my = Math.floor(rng() * size);
-         let cx = mx, cy = my;
-         for(let s=0; s<4; s++) {
-             const t = getTile(cx, cy);
-             if (t && t.type === 'PLAINS') {
-                 t.type = 'MOUNTAIN';
-                 t.height = 2;
-             }
-             cx += Math.floor(rng()*3 - 1);
-             cy += Math.floor(rng()*3 - 1);
-         }
+    const isNearAnyBase = (x: number, y: number, minDist = 3): boolean =>
+        baseLocations.some(b => Math.abs(b.x - x) + Math.abs(b.y - y) <= minDist);
+
+    const placeMountainTile = (x: number, y: number): boolean => {
+        const t = getTile(x, y);
+        if (!t || t.type !== 'PLAINS' || isNearAnyBase(x, y, 3)) return false;
+        t.type = 'MOUNTAIN';
+        t.height = 2;
+        return true;
+    };
+
+    // Sculpt sweeping, irregular, branching mountain ranges (curved spines + organic massif thickness + rocky spurs)
+    const rangeCount = Math.max(3, numPlayers + 1);
+    const rangeSeeds: { x: number; y: number }[] = [];
+    for (let r = 0; r < rangeCount; r++) {
+        let startX = -1;
+        let startY = -1;
+        for (let attempt = 0; attempt < 28; attempt++) {
+            const cx = 1 + Math.floor(rng() * (size - 2));
+            const cy = 1 + Math.floor(rng() * (size - 2));
+            const cand = getTile(cx, cy);
+            if (!cand || cand.type !== 'PLAINS' || isNearAnyBase(cx, cy, 4)) continue;
+            const farEnough = rangeSeeds.every(s => Math.abs(s.x - cx) + Math.abs(s.y - cy) >= Math.floor(size * 0.28));
+            if (farEnough || attempt >= 18) {
+                startX = cx;
+                startY = cy;
+                break;
+            }
+        }
+        if (startX === -1) continue;
+        rangeSeeds.push({ x: startX, y: startY });
+
+        let fx = startX;
+        let fy = startY;
+        let heading = rng() * Math.PI * 2;
+        const curveBias = (rng() - 0.5) * 0.42;
+        const spineSteps = 5 + Math.floor(rng() * 4); // 5..8 spine segments -> 8..15 tiles with thickness & spurs
+        const spinePoints: { x: number; y: number; heading: number }[] = [];
+
+        for (let s = 0; s < spineSteps; s++) {
+            const rx = Math.round(fx);
+            const ry = Math.round(fy);
+            placeMountainTile(rx, ry);
+            spinePoints.push({ x: rx, y: ry, heading });
+
+            // Swell organically in the middle of the massif while tapering toward the ridge ends
+            const isCore = s >= 1 && s <= spineSteps - 2;
+            const perpX = -Math.sin(heading);
+            const perpY = Math.cos(heading);
+            if (isCore && rng() < 0.68) {
+                const side = rng() < 0.5 ? 1 : -1;
+                placeMountainTile(Math.round(rx + perpX * side), Math.round(ry + perpY * side));
+                if (rng() < 0.34) {
+                    placeMountainTile(Math.round(rx - perpX * side), Math.round(ry - perpY * side));
+                }
+            } else if (!isCore && rng() < 0.28) {
+                const side = rng() < 0.5 ? 1 : -1;
+                placeMountainTile(Math.round(rx + perpX * side), Math.round(ry + perpY * side));
+            }
+
+            heading += curveBias + (rng() - 0.5) * 0.72;
+            const stepLen = 0.95 + rng() * 0.35;
+            fx += Math.cos(heading) * stepLen;
+            fy += Math.sin(heading) * stepLen;
+        }
+
+        // Add 1–2 jagged branching rocky spurs off the main ridge for irregular alpine silhouettes
+        const spurCount = rng() < 0.55 ? 2 : 1;
+        for (let sp = 0; sp < spurCount && spinePoints.length >= 3; sp++) {
+            const anchor = spinePoints[1 + Math.floor(rng() * (spinePoints.length - 2))];
+            const branchSign = sp % 2 === 0 ? (rng() < 0.5 ? 1 : -1) : -1;
+            let sx = anchor.x;
+            let sy = anchor.y;
+            let sHeading = anchor.heading + branchSign * (0.95 + rng() * 0.55);
+            const spurLen = 2 + Math.floor(rng() * 2);
+            for (let k = 0; k < spurLen; k++) {
+                sx += Math.cos(sHeading);
+                sy += Math.sin(sHeading);
+                placeMountainTile(Math.round(sx), Math.round(sy));
+                sHeading += (rng() - 0.5) * 0.6;
+            }
+        }
     }
 
+    // Seed organic woodland forest groves so foliage clusters naturally alongside mountain foothills
+    const groveCount = Math.max(4, numPlayers * 2);
+    for (let g = 0; g < groveCount; g++) {
+        let gx = Math.floor(rng() * size);
+        let gy = Math.floor(rng() * size);
+        const groveSteps = 4 + Math.floor(rng() * 4);
+        for (let s = 0; s < groveSteps; s++) {
+            const t = getTile(gx, gy);
+            if (t && t.type === 'PLAINS') t.type = 'FOREST';
+            gx += Math.floor(rng() * 3) - 1;
+            gy += Math.floor(rng() * 3) - 1;
+        }
+    }
+
+    // Light natural scatter: isolated sniper crags & small woodland copses
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
             const t = getTile(x, y);
             if (!t || t.type !== 'PLAINS') continue;
             const rand = rng();
-            if (rand < 0.12) {
+            if (rand < 0.065) {
                 t.type = 'FOREST';
-            } else if (rand > 0.88) { 
-                t.type = 'MOUNTAIN'; 
-                t.height = 2; 
+            } else if (rand > 0.975 && !isNearAnyBase(x, y, 3)) {
+                t.type = 'MOUNTAIN';
+                t.height = 2;
             }
         }
     }

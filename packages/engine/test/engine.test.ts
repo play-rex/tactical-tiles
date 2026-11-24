@@ -16,7 +16,7 @@ import {
   type GameAction,
   type GameState,
 } from '../src/index';
-import { COMBAT_BONUSES, GOLD_SETTINGS, LAND_MINE_STATS, SHOP_ITEMS } from '../src/constants/Config';
+import { BASE_STATS, COMBAT_BONUSES, GOLD_SETTINGS, LAND_MINE_STATS, SHOP_ITEMS } from '../src/constants/Config';
 import { isWithinEnemyHqExclusion } from '../src/rules/CombatRules';
 import type { GameSettings, Tile, Unit } from '../src/types';
 
@@ -589,6 +589,9 @@ test('eventsFor enforces fog-of-war honesty on declarative FX events (movePath t
     { kind: 'mineBlast' as const, at: { x: 3, y: 2 }, damage: 8, victimDead: false },
     { kind: 'mineBlast' as const, at: { x: 8, y: 8 }, damage: 8, victimDead: true },
     { kind: 'build' as const, tiles: [{ x: 3, y: 2 }, { x: 8, y: 8 }], itemKey: 'BARRIER' as const },
+    { kind: 'capture' as const, at: { x: 3, y: 2 }, owner: 0, subType: 'WATCHTOWER' as const },
+    { kind: 'capture' as const, at: { x: 9, y: 9 }, owner: 1, subType: 'BUNKER' as const },
+    { kind: 'spawn' as const, unitId: 'u_sp1', unitType: 'SOLDIER' as const, owner: 1, at: { x: 9, y: 9 } },
   ];
 
   const filtered = eventsFor(events, true, before, after);
@@ -607,6 +610,8 @@ test('eventsFor enforces fog-of-war honesty on declarative FX events (movePath t
 
   assert.equal(filtered.filter(e => e.kind === 'killed').length, 0, 'unseen kill is hidden under fog');
   assert.equal(filtered.filter(e => e.kind === 'mineBlast').length, 1, 'only visible mine blast passes');
+  assert.equal(filtered.filter(e => e.kind === 'capture').length, 1, 'only visible building capture passes');
+  assert.equal(filtered.filter(e => e.kind === 'spawn').length, 0, 'unseen enemy redeploy is hidden under fog');
 
   const builds = filtered.filter(e => e.kind === 'build');
   assert.equal(builds.length, 1);
@@ -659,4 +664,60 @@ test('applyAction emits declarative animation cues and never leaks LAND_MINE bui
   // Events remain strictly JSON-serializable for Colyseus transport
   const wire = JSON.stringify(atk.events);
   assert.deepEqual(JSON.parse(wire), atk.events);
+});
+
+/** Flat CONQUER state: P0's HQ at full HP with the given P1 raiders parked inside artillery range. */
+function hqSplashState(seed: string, raiderHp: number[]): { state: GameState; placed: Unit[] } {
+  const base = createGeneratedGame(settings({ mapSeed: seed, fogOfWar: false, playerCount: 2, victoryMode: 'CONQUER' }));
+  const hq = base.mapData.find(t => t.type === 'BASE' && t.owner === 0)!;
+  const map = base.mapData.map(t =>
+    t.id === hq.id
+      ? { ...t, hp: BASE_STATS.HP, maxHp: BASE_STATS.HP }
+      : { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined, hp: undefined, maxHp: undefined }
+  );
+  const spots = map
+    .filter(t => t.type === 'PLAINS' && Math.abs(t.x - hq.x) + Math.abs(t.y - hq.y) <= BASE_STATS.RANGE - 1)
+    .slice(0, raiderHp.length);
+  assert.equal(spots.length, raiderHp.length, 'room near HQ for attackers');
+  const templates = base.units.filter(u => u.owner === 1);
+  const placed: Unit[] = raiderHp.map((hp, i) => ({
+    ...templates[i % templates.length],
+    tileId: spots[i].id,
+    hp,
+    maxHp: hp,
+  }));
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [...base.units.filter(u => u.owner === 0), ...placed],
+    currentPlayer: 0,
+  };
+  return { state, placed };
+}
+
+test('base artillery: lone target takes the full shell, extra targets take splash', () => {
+  // Solo attacker — the classic single 3-5 shell
+  {
+    const { state, placed } = hqSplashState('HQSOLO', [20]);
+    const after = applyAction(state, { type: 'END_TURN' });
+    assert.equal(after.rejected, undefined);
+    const dealt = placed[0].hp - after.state.units.find(u => u.id === placed[0].id)!.hp;
+    assert.ok(dealt >= BASE_STATS.MIN_DMG && dealt <= BASE_STATS.MAX_DMG, `solo shell dealt ${dealt}`);
+  }
+
+  // Three attackers — weakest eats the full shell, the other two eat 2-3 splash each
+  {
+    const { state, placed } = hqSplashState('HQTRIO', [10, 30, 30]);
+    const before = new Map(placed.map(u => [u.id, u.hp] as const));
+    const after = applyAction(state, { type: 'END_TURN' });
+    assert.equal(after.rejected, undefined);
+    const dealt = (id: string): number => before.get(id)! - after.state.units.find(u => u.id === id)!.hp;
+    const primary = dealt(placed[0].id);
+    assert.ok(primary >= BASE_STATS.MIN_DMG && primary <= BASE_STATS.MAX_DMG, `primary took ${primary}`);
+    for (const raider of placed.slice(1)) {
+      const splash = dealt(raider.id);
+      assert.ok(splash >= BASE_STATS.SPLASH_MIN_DMG && splash <= BASE_STATS.SPLASH_MAX_DMG, `splash took ${splash}`);
+    }
+    assert.ok(after.state.gameLog.some(l => l.message.includes('Base Artillery')));
+  }
 });

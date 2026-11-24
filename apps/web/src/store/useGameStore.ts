@@ -141,6 +141,7 @@ interface GameStore extends GameState {
   rotateMap: (delta?: 90 | -90) => void;
   setMapRotation: (rot: BoardRotation) => void;
   handleTileClick: (x: number, y: number) => void;
+  clearSelection: () => void;
   setHoveredTile: (tileId: string | null) => void;
   handleGraveyardSelect: (deadUnitId: string) => void;
   selectInventoryItem: (index: number | null) => void;
@@ -760,7 +761,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         } else if (attacker.isRooted && getStepCost(tile, attacker.type, currentPlayer, state.weather, attacker.rank ?? 0) !== null) {
           moveBlocker = 'Rooted in Quicksand — cannot move this turn';
         } else if (attacker.hasMoved && getStepCost(tile, attacker.type, currentPlayer, state.weather, attacker.rank ?? 0) !== null) {
-          moveBlocker = "Can't move — already moved this turn (Attack, Overwatch, or click again to deselect)";
+          moveBlocker = "Can't move — already moved this turn (Attack, Overwatch, or Right-Click to deselect)";
         }
         if (moveBlocker && state.mapFeedback?.tileId !== clickedTileId) {
           get().showMapFeedback(clickedTileId, moveBlocker, 'warn');
@@ -877,6 +878,27 @@ export const useGameStore = create<GameStore>((set, get) => {
     },
 
     cancelPlacement: () => set({ placementMode: null }),
+
+    clearSelection: () => {
+      const st = get();
+      if (st.placementMode?.active) {
+        set({ placementMode: null });
+        SoundFX.play('click');
+        return;
+      }
+      if (st.selectedInventoryItemIndex !== null) {
+        set({ selectedInventoryItemIndex: null });
+        SoundFX.play('click');
+        return;
+      }
+      if (st.selectedUnitId || st.selectedTileId || st.selectedGraveyardUnitId) {
+        set({
+          ...CLEAR_SELECTION,
+          hoveredTileId: st.hoveredTileId,
+        });
+        SoundFX.play('click');
+      }
+    },
 
     showMapFeedback: (tileId, text, tone = 'info') => {
       const id = ++feedbackSeq;

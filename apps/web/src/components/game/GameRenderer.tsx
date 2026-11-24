@@ -8,7 +8,7 @@ import * as PIXI from 'pixi.js';
 import { isUnitVisible } from '@tactical/engine';
 import { useGameStore, viewerSeat } from '../../store/useGameStore';
 import { LandMine, Tile } from '@tactical/engine/types';
-import { TILE_SIZE, UI_COLORS, PLAYER_COLORS, BANK_STATS, BASE_STATS } from '@tactical/engine/constants/Config';
+import { TILE_SIZE, UI_COLORS, PLAYER_COLORS, BANK_STATS, BASE_STATS, UNIT_STATS } from '@tactical/engine/constants/Config';
 import { hexToPixiColor } from '../ui/GeoPrimitives';
 import { preloadTextures, getTexture } from '../../core/graphics/TextureManager';
 import { bakeTacticalReconBoard, bakeSoftFogTexture, computeTerrainSignature } from '../../core/graphics/TacticalReconRenderer';
@@ -16,7 +16,13 @@ import { useViewportContext } from '../../context/ViewportContext';
 import { SelectionCursor } from './renderer/SelectionCursor';
 import { DamageText } from './renderer/DamageText';
 import { ProjectileRenderer } from './renderer/ProjectileRenderer';
+import { CrossfireBeam } from './renderer/CrossfireLayer';
 import { ParticleLayer } from './renderer/ParticleLayer';
+import { DeathGhostLayer } from './renderer/DeathGhostLayer';
+import { TileEffectsLayer } from './renderer/TileEffectsLayer';
+import { WaterShimmerLayer } from './renderer/WaterShimmerLayer';
+import { LivingMapLayer } from './renderer/LivingMapLayer';
+import { DropAndPromoLayer } from './renderer/DropAndPromoLayer';
 import { WeatherSystemMemo as WeatherSystem } from './renderer/WeatherSystem.tsx'; // Explicit .tsx extension
 import { FxMode, subscribeRendererWake, useEffectStore, wakeBattleRenderer } from '../../store/useEffectStore';
 import { fxTimeline } from '../../core/graphics/fxTimeline';
@@ -308,46 +314,6 @@ function useThrottledGraphicsLayer(
 const AnimatedWaterLayer = React.memo<{ waterTiles: Tile[]; animate: boolean }>(({ waterTiles, animate }) => {
     const render = useCallback((g: PIXI.Graphics, phase: number) => renderWaterRipples(g, waterTiles, phase), [waterTiles]);
     const gfxRef = useThrottledGraphicsLayer(render, animate, 0.035, [waterTiles]);
-    return <Graphics ref={gfxRef} eventMode="none" />;
-});
-
-const renderBaseRadar = (
-    g: PIXI.Graphics,
-    baseTiles: Tile[],
-    fogOfWar: boolean,
-    visibleTiles: Set<string>,
-    angle: number
-) => {
-    g.clear();
-    if (baseTiles.length === 0) return;
-
-    g.lineStyle(2, 0xE2E8F0, 0.72);
-    for (let i = 0; i < baseTiles.length; i++) {
-        const b = baseTiles[i];
-        if (fogOfWar && !visibleTiles.has(b.id)) continue;
-        const cx = b.x * TILE_SIZE + TILE_SIZE / 2;
-        const cy = b.y * TILE_SIZE + TILE_SIZE / 2;
-        const ang = angle + b.x * 0.6;
-        const dx = Math.cos(ang) * 7;
-        const dy = Math.sin(ang) * 7;
-        g.moveTo(cx - dx, cy - dy);
-        g.lineTo(cx + dx, cy + dy);
-    }
-    g.lineStyle(0);
-};
-
-// Spinning Tactical Radar Bar on Visible HQ Compounds (renders crisp static bar in ECO idle)
-const AnimatedBaseRadarLayer = React.memo<{ baseTiles: Tile[]; fogOfWar: boolean; visibleTiles: Set<string>; animate: boolean }>(({
-    baseTiles,
-    fogOfWar,
-    visibleTiles,
-    animate,
-}) => {
-    const render = useCallback(
-        (g: PIXI.Graphics, phase: number) => renderBaseRadar(g, baseTiles, fogOfWar, visibleTiles, phase),
-        [baseTiles, fogOfWar, visibleTiles]
-    );
-    const gfxRef = useThrottledGraphicsLayer(render, animate, 0.025, [baseTiles, fogOfWar, visibleTiles]);
     return <Graphics ref={gfxRef} eventMode="none" />;
 });
 
@@ -900,7 +866,55 @@ const HoverOverlayLayer = React.memo<{
     return <Graphics draw={draw} eventMode="none" />;
 });
 
-/** Isolated FX layer so transient projectiles/popups do not re-render the map, units, or viewport. */
+/**
+ * Renders units that were lethally hit in the authoritative state while the lethal shot
+ * or compound Overwatch/Mine march is still in flight, so units never vanish before impact.
+ */
+const PendingDeathsLayer = React.memo<{
+    aliveUnitIds: Set<string>;
+    gridSize: number;
+    mapRotation: BoardRotation;
+}>(({ aliveUnitIds, gridSize, mapRotation }) => {
+    const pendingDeaths = useEffectStore(state => state.pendingDeaths);
+    if (pendingDeaths.length === 0) return null;
+    return (
+        <>
+            {pendingDeaths.map(ghost => {
+                if (aliveUnitIds.has(ghost.unitId)) return null;
+                const baseHp = UNIT_STATS[ghost.unitType].hp;
+                return (
+                    <UnitSprite
+                        key={`pending_${ghost.unitId}`}
+                        unit={{
+                            id: ghost.unitId,
+                            type: ghost.unitType,
+                            owner: ghost.owner,
+                            hp: ghost.displayHp,
+                            maxHp: baseHp,
+                            ammo: 1,
+                            maxAmmo: 1,
+                            rank: ghost.rank,
+                            hasMoved: true,
+                            completed: false,
+                            isOverwatching: false,
+                        }}
+                        gridSize={gridSize}
+                        texture={getTexture(`UNIT_P${ghost.owner}_${ghost.unitType}`)}
+                        x={ghost.endTileX * TILE_SIZE}
+                        y={ghost.endTileY * TILE_SIZE}
+                        tileX={ghost.endTileX}
+                        tileY={ghost.endTileY}
+                        mapRotation={mapRotation}
+                        isSelected={false}
+                        isReadyTurn={false}
+                    />
+                );
+            })}
+        </>
+    );
+});
+
+/** Isolated FX layer so transient projectiles/popups/crossfire do not re-render the map, units, or viewport. */
 const EffectsLayer = React.memo<{
     selectedUnitPos: { x: number; y: number } | null;
     fxMode: FxMode;
@@ -910,15 +924,20 @@ const EffectsLayer = React.memo<{
     ({ selectedUnitPos, fxMode, mapRotation, particlePoolRef }) => {
         const damagePopups = useEffectStore(state => state.damagePopups);
         const projectiles = useEffectStore(state => state.projectiles);
+        const crossfireLocks = useEffectStore(state => state.crossfireLocks);
         return (
             <Container name="effects" eventMode="none">
                 {selectedUnitPos && (
                     <SelectionCursor x={selectedUnitPos.x} y={selectedUnitPos.y} pulse={fxMode === 'LIVE'} />
                 )}
+                {crossfireLocks.map(lock => (
+                    <CrossfireBeam key={lock.id} data={lock} />
+                ))}
                 {projectiles.map(proj => (
-                    <ProjectileRenderer key={proj.id} data={proj} />
+                    <ProjectileRenderer key={proj.id} data={proj} mapRotation={mapRotation} />
                 ))}
                 <ParticleLayer mapRotation={mapRotation} poolRef={particlePoolRef} />
+                <DropAndPromoLayer mapRotation={mapRotation} />
                 {damagePopups.map(popup => (
                     <DamageText key={popup.id} data={popup} mapRotation={mapRotation} />
                 ))}
@@ -939,19 +958,36 @@ const BattleRenderController: React.FC<{
     unitsAnimKey: string;
     sceneRenderDeps: unknown[];
     particlePoolRef: React.MutableRefObject<ParticlePool | null>;
-}> = ({ fxMode, viewport, unitsAnimKey, sceneRenderDeps, particlePoolRef }) => {
+    tileById: Map<string, Tile>;
+}> = ({ fxMode, viewport, unitsAnimKey, sceneRenderDeps, particlePoolRef, tileById }) => {
     const app = useApp();
     const hasProjectiles = useEffectStore(state => state.projectiles.length > 0);
     const hasPopups = useEffectStore(state => state.damagePopups.length > 0);
-    const activeFx = hasProjectiles || hasPopups;
+    const hasCrossfire = useEffectStore(state => state.crossfireLocks.length > 0);
+    const hasPendingDeaths = useEffectStore(state => state.pendingDeaths.length > 0);
+    const hasDeathGhosts = useEffectStore(state => state.deathGhosts.length > 0);
+    const hasTileEffects = useEffectStore(state => state.tileEffects.length > 0);
+    const hasSupplyDrops = useEffectStore(state => state.supplyDrops.length > 0);
+    const hasPromotions = useEffectStore(state => state.promotionBursts.length > 0);
+    const activeFx =
+        hasProjectiles ||
+        hasPopups ||
+        hasCrossfire ||
+        hasPendingDeaths ||
+        hasDeathGhosts ||
+        hasTileEffects ||
+        hasSupplyDrops ||
+        hasPromotions;
 
     const wakeUntilRef = useRef<number>(0);
     const singleRafRef = useRef<number | null>(null);
     const justWokeRef = useRef<boolean>(false);
     const fxModeRef = useRef<FxMode>(fxMode);
     const activeFxRef = useRef<boolean>(activeFx);
+    const tileByIdRef = useRef<Map<string, Tile>>(tileById);
     fxModeRef.current = fxMode;
     activeFxRef.current = activeFx;
+    tileByIdRef.current = tileById;
 
     const scheduleSingleFrame = useCallback(() => {
         if (fxModeRef.current === 'LIVE') return;
@@ -991,11 +1027,12 @@ const BattleRenderController: React.FC<{
         }
     }, [app, scheduleSingleFrame]);
 
-    // Connect pooled particle sink to fxTimeline + clear cleanly on unmount or tab hide
+    // Connect pooled particle sink & terrain lookup to fxTimeline + clear cleanly on unmount or tab hide
     useEffect(() => {
         fxTimeline.configure({
             emitParticles: (req) => particlePoolRef.current?.emit(req),
-            hasActiveParticles: () => Boolean(particlePoolRef.current?.hasActiveParticles()),
+            hasActiveParticles: () => Boolean(particlePoolRef.current?.hasActiveCombatParticles()),
+            getTileTerrain: (tx, ty) => tileByIdRef.current.get(`${tx},${ty}`)?.type,
         });
         const unsubTimelineActive = fxTimeline.subscribeActive((active) => {
             if (active) wake(350);
@@ -1023,6 +1060,7 @@ const BattleRenderController: React.FC<{
             fxTimeline.configure({
                 emitParticles: undefined,
                 hasActiveParticles: undefined,
+                getTileTerrain: undefined,
             });
             fxTimeline.clear();
             particlePoolRef.current?.clear();
@@ -1180,7 +1218,7 @@ export const GameRenderer = () => {
     const selectNextReadyUnit = useGameStore(state => state.selectNextReadyUnit);
     const enterOverwatch = useGameStore(state => state.enterOverwatch);
     const undoLastMove = useGameStore(state => state.undoLastMove);
-    const cancelPlacement = useGameStore(state => state.cancelPlacement);
+    const clearSelection = useGameStore(state => state.clearSelection);
     const mapRotation = useGameStore(state => state.mapRotation);
     const rotateMap = useGameStore(state => state.rotateMap);
 
@@ -1197,7 +1235,6 @@ export const GameRenderer = () => {
     const terrainSig = useMemo(() => computeTerrainSignature(mapData, gridSize, mapRotation), [mapData, gridSize, mapRotation]);
     const bakedBoard = useMemo(() => bakeTacticalReconBoard(mapData, gridSize, mapRotation), [terrainSig]);
     const waterTiles = useMemo(() => mapData.filter(t => t.type === 'WATER'), [terrainSig]);
-    const baseTiles = useMemo(() => mapData.filter(t => t.type === 'BASE'), [terrainSig]);
     const tileById = useMemo(() => {
         const map = new Map<string, Tile>();
         for (let i = 0; i < mapData.length; i++) map.set(mapData[i].id, mapData[i]);
@@ -1241,6 +1278,7 @@ export const GameRenderer = () => {
         () => units.map(u => `${u.id}:${u.tileId}:${u.hp}`).join('|'),
         [units]
     );
+    const aliveUnitIds = useMemo(() => new Set(units.map(u => u.id)), [units]);
 
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
@@ -1260,35 +1298,21 @@ export const GameRenderer = () => {
                 rotateMap(e.shiftKey ? -90 : 90);
             } else if (e.key === 'Escape') {
                 const st = useGameStore.getState();
-                if (st.placementMode?.active) {
+                if (
+                    st.placementMode?.active ||
+                    st.selectedInventoryItemIndex !== null ||
+                    st.selectedUnitId ||
+                    st.selectedTileId ||
+                    st.selectedGraveyardUnitId
+                ) {
                     e.preventDefault();
-                    cancelPlacement();
-                } else if (st.selectedInventoryItemIndex !== null) {
-                    e.preventDefault();
-                    st.selectInventoryItem(null);
-                } else if (st.selectedUnitId || st.selectedTileId || st.selectedGraveyardUnitId) {
-                    e.preventDefault();
-                    useGameStore.setState({
-                        selectedUnitId: null,
-                        selectedTileId: null,
-                        selectedGraveyardUnitId: null,
-                        validMoveCosts: new Map(),
-                        validMoveParents: new Map(),
-                        validMoveTiles: [],
-                        validAttackTargets: [],
-                        validSpawnTiles: [],
-                        validSecureTile: null,
-                        validHeistTile: null,
-                        validSiegeTile: null,
-                        validLootTile: null,
-                        validDemolishTile: null,
-                    });
+                    clearSelection();
                 }
             }
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [selectNextReadyUnit, enterOverwatch, undoLastMove, rotateMap, cancelPlacement]);
+    }, [selectNextReadyUnit, enterOverwatch, undoLastMove, rotateMap, clearSelection]);
 
     // Initial Load (Legacy + New)
     useEffect(() => {
@@ -1414,6 +1438,10 @@ export const GameRenderer = () => {
         <div
             ref={parentRef}
             onPointerMove={(e) => updateHoverFromClient(e.clientX, e.clientY)}
+            onContextMenu={(e) => {
+                e.preventDefault();
+                clearSelection();
+            }}
             onMouseLeave={() => {
                 lastHoverRef.current = null;
                 setHoveredTile(null);
@@ -1433,6 +1461,7 @@ export const GameRenderer = () => {
                     viewport={viewport}
                     unitsAnimKey={unitsAnimKey}
                     particlePoolRef={particlePoolRef}
+                    tileById={tileById}
                     sceneRenderDeps={[
                         dimensions,
                         bakedBoard,
@@ -1477,6 +1506,13 @@ export const GameRenderer = () => {
                         eventMode="none"
                     />
 
+                    {/* 0a-2. MASKED SPECULAR WATER CAUSTICS (screen-upright, pixel-locked to waterMaskTexture in LIVE mode) */}
+                    <WaterShimmerLayer
+                        waterMaskTexture={bakedBoard.waterMaskTexture}
+                        boardSize={totalBoardSize}
+                        animate={fxMode === 'LIVE'}
+                    />
+
                     <Container
                         name="rotated_board"
                         x={totalBoardSize / 2}
@@ -1487,16 +1523,26 @@ export const GameRenderer = () => {
                         {/* 0b. WORLD BOARD INSET FRAME */}
                         <Graphics eventMode="none" draw={drawBoardFrame} />
 
-                        {/* 1. LIVE WATER + BASE RADAR + SINGLE HIT PLANE */}
+                        {/* 1. LIVE WATER + LIVING STRUCTURES (RADAR CONES, BANK BEACONS, BASE SMOKE) + SINGLE HIT PLANE */}
                         <Container name="terrain">
                             <AnimatedWaterLayer waterTiles={waterTiles} animate={fxMode === 'LIVE'} />
-                            <AnimatedBaseRadarLayer baseTiles={baseTiles} fogOfWar={settings.fogOfWar} visibleTiles={visibleTiles} animate={fxMode === 'LIVE'} />
+                            <LivingMapLayer
+                                mapData={mapData}
+                                gridSize={gridSize}
+                                fogOfWar={settings.fogOfWar}
+                                visibleTiles={visibleTiles}
+                                victoryMode={settings.victoryMode}
+                                animate={fxMode === 'LIVE'}
+                                particlePoolRef={particlePoolRef}
+                            />
                             <Graphics
                                 ref={hitPlaneRef}
                                 eventMode="static"
                                 cursor="default"
                                 draw={drawHitPlane}
                                 pointerdown={(e: PIXI.FederatedPointerEvent) => {
+                                    // Right-click (and macOS Ctrl+click) deselects via onContextMenu; ignore non-primary buttons here
+                                    if (e.pointerType === 'mouse' && (e.button !== 0 || e.ctrlKey)) return;
                                     if (!hitPlaneRef.current) return;
                                     const local = e.getLocalPosition(hitPlaneRef.current);
                                     const gx = Math.floor(local.x / TILE_SIZE);
@@ -1546,6 +1592,9 @@ export const GameRenderer = () => {
                             containerRef={parentRef}
                         />
 
+                        {/* 3b. GROUND-PLANE TILE EFFECTS (scorch craters, mine flashes, capture waves, drop beams) */}
+                        <TileEffectsLayer />
+
                         {/* 4. UNITS LAYER (No full-screen bloom filter -> 10x lighter GPU compositing) */}
                         <Container name="units">
                             {units.map(unit => {
@@ -1568,7 +1617,15 @@ export const GameRenderer = () => {
                                     />
                                 );
                             })}
+                            <PendingDeathsLayer
+                                aliveUnitIds={aliveUnitIds}
+                                gridSize={gridSize}
+                                mapRotation={mapRotation}
+                            />
                         </Container>
+
+                        {/* 4a. 550ms UNIT DEATH GHOSTS */}
+                        <DeathGhostLayer />
 
                         {/* 4b. TOP-OF-SPRITE ATTACK TARGETING RETICLES */}
                         <TargetingOverlayLayer

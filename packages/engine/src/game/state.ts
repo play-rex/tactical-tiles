@@ -6,6 +6,7 @@ import { getEffectiveUnitAmmo } from '../rules/CombatRules';
 import { UNIT_STATS } from '../constants/Config';
 import type {
   BankReward,
+  BuildingSubType,
   DeadUnit,
   GameMutators,
   GameSettings,
@@ -155,9 +156,12 @@ export type GameEvent =
       damage: number;
       destroyed: boolean;
       owner?: number | null;
+      attackerOwner?: number;
       delayMs?: number;
     }
   | { kind: 'heist'; at: TilePoint; playerId: number }
+  | { kind: 'capture'; at: TilePoint; owner: number; subType?: BuildingSubType }
+  | { kind: 'spawn'; unitId: string; unitType: UnitType; owner: number; at: TilePoint }
   | { kind: 'promotion'; unitId: string; at: TilePoint; rank: number; label: string }
   | { kind: 'overwatchSet'; unitId: string; at: TilePoint; owner: number }
   | { kind: 'heal'; unitId: string; at: TilePoint; amount: number; item: 'MEDKIT' | 'FIRST_AID' | 'AMMO' | 'RELOAD' }

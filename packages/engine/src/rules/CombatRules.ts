@@ -333,6 +333,14 @@ export const getBaseArtilleryDamage = (): number => {
     return BASE_STATS.MIN_DMG + Math.floor(Math.random() * span);
 };
 
+/**
+ * Rolls Base splash damage dealt to each additional enemy in range beyond the primary target.
+ */
+export const getBaseArtillerySplashDamage = (): number => {
+    const span = BASE_STATS.SPLASH_MAX_DMG - BASE_STATS.SPLASH_MIN_DMG + 1;
+    return BASE_STATS.SPLASH_MIN_DMG + Math.floor(Math.random() * span);
+};
+
 export interface ConstructContext {
     playerId?: number;
     mapData?: Tile[];

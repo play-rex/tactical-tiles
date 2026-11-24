@@ -16,7 +16,7 @@ import {
   UNIT_STATS,
   VETERANCY_CONFIG,
 } from '../constants/Config';
-import type { DeadUnit, LandMine, LogEntry, MatchPlayerStats, PendingDrop, SupplyLootType, TerrainType, Tile, Unit, UnitType } from '../types';
+import type { BuildingSubType, DeadUnit, LandMine, LogEntry, MatchPlayerStats, PendingDrop, SupplyLootType, TerrainType, Tile, Unit, UnitType } from '../types';
 import { getManhattanDistance, getTileByIdFast } from '../grid/Pathfinding';
 import { updateDoomsdayState } from '../grid/DoomsdayManager';
 import {
@@ -28,6 +28,7 @@ import {
   canHoldDrop,
   canUnitEnterOverwatch,
   getBaseArtilleryDamage,
+  getBaseArtillerySplashDamage,
   getEffectiveBankRewards,
   getEffectiveCpRules,
   getEffectiveMaxRespawns,
@@ -172,7 +173,14 @@ class Fx {
       ...(victimDead !== undefined ? { victimDead } : {}),
     });
   }
-  structureHit(at: Tile, structureType: 'BASE' | 'BARRIER', damage: number, destroyed: boolean, owner?: number | null) {
+  structureHit(
+    at: Tile,
+    structureType: 'BASE' | 'BARRIER',
+    damage: number,
+    destroyed: boolean,
+    owner?: number | null,
+    attackerOwner?: number,
+  ) {
     this.events.push({
       kind: 'structureHit',
       at: pt(at),
@@ -180,10 +188,22 @@ class Fx {
       damage,
       destroyed,
       ...(owner !== undefined ? { owner } : {}),
+      ...(attackerOwner !== undefined ? { attackerOwner } : {}),
     });
   }
   heist(at: Tile, playerId: number) {
     this.events.push({ kind: 'heist', at: pt(at), playerId });
+  }
+  capture(at: Tile, owner: number, subType?: BuildingSubType) {
+    this.events.push({
+      kind: 'capture',
+      at: pt(at),
+      owner,
+      ...(subType ? { subType } : {}),
+    });
+  }
+  spawn(unitId: string, unitType: UnitType, owner: number, at: Tile) {
+    this.events.push({ kind: 'spawn', unitId, unitType, owner, at: pt(at) });
   }
   promotion(unitId: string, at: Tile, rank: number, label: string) {
     this.events.push({ kind: 'promotion', unitId, at: pt(at), rank, label });
@@ -463,7 +483,12 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const mineTrig = moveResolution.mineTrigger;
 
       if (moveResolution.path.length >= 2) {
-        const walkedPath = moveResolution.path.slice(0, Math.max(2, moveResolution.finalIndex + 1));
+        const walkedPath =
+          moveResolution.finalIndex >= 1
+            ? moveResolution.path.slice(0, moveResolution.finalIndex + 1)
+            : trig
+              ? [moveResolution.path[0], trig.interceptTile, moveResolution.path[0]]
+              : moveResolution.path.slice(0, 1);
         fx.movePath(mUnit, walkedPath, moveResolution.haltedEarly ? moveResolution.finalIndex : undefined);
       }
 
@@ -725,6 +750,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       if (!alreadyCapturedByPlayer) {
         newUnits = grantUnitXp(newUnits, unit.id, 1, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
       }
+      fx.capture(targetTile, currentPlayer, targetTile.subType);
       fx.sound('capture');
       logEntry = createLog(currentRound, currentPlayer, `Secured a Building`, 'ECONOMY');
       break;
@@ -878,7 +904,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
 
       if (attTile) {
         fx.projectile(attTile, baseTile, 'MISSILE', { weapon: 'SIEGE', attackerId: att.id });
-        fx.structureHit(baseTile, 'BASE', siegeDmg, newHp === 0, baseTile.owner);
+        fx.structureHit(baseTile, 'BASE', siegeDmg, newHp === 0, baseTile.owner, currentPlayer);
         fx.popup(baseTile, `-${siegeDmg}`, '#FF4500', 20);
         fx.shake(newHp === 0 ? 18 : 8, baseTile);
       }
@@ -948,6 +974,9 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         hasMoved: true,
         completed: true,
       }));
+      const spawnTile = getTileByIdFast(newMap, action.tileId, gridSize);
+      if (spawnTile) fx.spawn(action.deadUnitId, unitType, currentPlayer, spawnTile);
+      fx.sound('capture');
       logEntry = createLog(currentRound, currentPlayer, `Redeployed ${UNIT_STATS[unitType].name}`, 'ECONOMY');
       break;
     }
@@ -1175,7 +1204,9 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         }
       }
 
-      // Automated defences fire at the weakest unit in range
+      // Automated defences fire at the weakest unit in range.
+      // When splashRoll is provided (Base artillery), every other enemy in range
+      // also takes a reduced splash hit.
       const fireAutomatedDefense = (
         origin: Tile,
         range: number,
@@ -1184,55 +1215,77 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         sourceLabel: string,
         projType: 'LASER' | 'MISSILE',
         colorHex: string,
+        splashRoll?: () => number,
       ) => {
+        const inRange = (u: Unit): boolean => {
+          const ut = getTileByIdFast(newMap, u.tileId, gridSize);
+          return !!ut && getManhattanDistance(ut, origin) <= range;
+        };
         let target: Unit | null = null;
         for (const u of candidates) {
-          const ut = getTileByIdFast(newMap, u.tileId, gridSize);
-          if (!ut || getManhattanDistance(ut, origin) > range) continue;
+          if (!inRange(u)) continue;
           if (!target || u.hp < target.hp) target = u;
         }
         if (!target) return;
+        const primaryId = target.id;
 
-        const tarTile = getTileByIdFast(newMap, target.tileId, gridSize);
-        const weapon: WeaponVisual = projType === 'LASER' ? 'TURRET' : 'ARTILLERY';
-        const willKill = target.hp - dmg <= 0;
-        if (tarTile) {
-          fx.sound(projType === 'LASER' ? 'sniper' : 'attack');
-          fx.sound('hit');
-          fx.projectile(origin, tarTile, projType, { weapon, targetUnitId: target.id });
-          fx.hit({
-            targetUnitId: target.id,
-            at: tarTile,
-            from: origin,
-            damage: dmg,
-            weapon,
-            isKill: willKill,
-            suppressed: Boolean(target.isOverwatching && dmg > 0 && !willKill),
-          });
-          fx.popup(tarTile, `-${dmg}`, colorHex, 14);
-          fx.shake(willKill ? 10 : 4, tarTile);
-          if (willKill) {
-            fx.killed(target, tarTile, projType === 'LASER' ? 'TURRET' : 'ARTILLERY');
+        const strikeTarget = (victim: Unit, strikeDmg: number): void => {
+          const live = newUnits.find(x => x.id === victim.id);
+          if (!live || live.hp <= 0) return;
+          strikeAutomatedTarget(live, strikeDmg);
+        };
+
+        const strikeAutomatedTarget = (liveTarget: Unit, strikeDmg: number): void => {
+          const tarTile = getTileByIdFast(newMap, liveTarget.tileId, gridSize);
+          const weapon: WeaponVisual = projType === 'LASER' ? 'TURRET' : 'ARTILLERY';
+          const willKill = liveTarget.hp - strikeDmg <= 0;
+          if (tarTile) {
+            fx.sound(projType === 'LASER' ? 'sniper' : 'attack');
+            fx.sound('hit');
+            fx.projectile(origin, tarTile, projType, { weapon, targetUnitId: liveTarget.id });
+            fx.hit({
+              targetUnitId: liveTarget.id,
+              at: tarTile,
+              from: origin,
+              damage: strikeDmg,
+              weapon,
+              isKill: willKill,
+              suppressed: Boolean(liveTarget.isOverwatching && strikeDmg > 0 && !willKill),
+            });
+            fx.popup(tarTile, `-${strikeDmg}`, colorHex, 14);
+            fx.shake(willKill ? 10 : 4, tarTile);
+            if (willKill) {
+              fx.killed(liveTarget, tarTile, projType === 'LASER' ? 'TURRET' : 'ARTILLERY');
+            }
           }
-        }
 
-        extraLogs.push(createLog(currentRound, -1, `${sourceLabel} hit P${target.owner + 1} ${UNIT_STATS[target.type].name} (-${dmg} HP)`, 'COMBAT'));
-        const hit = applyUnitHit({
-          unitsList: newUnits,
-          target,
-          targetTile: tarTile,
-          dmg,
-          suppressLogPlayerId: target.owner,
-          suppressMessage: `${sourceLabel} suppressed ${UNIT_STATS[target.type].name}'s Overwatch!`,
-          graveyard: newGraveyard,
-          round: currentRound,
-          extraLogs,
-          fx,
-        });
-        newUnits = hit.unitsList;
-        if (hit.killed) {
-          if (nextMatchStats[target.owner]) nextMatchStats[target.owner].unitsLost += 1;
-          extraLogs.push(createLog(currentRound, -1, `${sourceLabel} killed P${target.owner + 1} ${UNIT_STATS[target.type].name}`, 'COMBAT'));
+          extraLogs.push(createLog(currentRound, -1, `${sourceLabel} hit P${liveTarget.owner + 1} ${UNIT_STATS[liveTarget.type].name} (-${strikeDmg} HP)`, 'COMBAT'));
+          const hit = applyUnitHit({
+            unitsList: newUnits,
+            target: liveTarget,
+            targetTile: tarTile,
+            dmg: strikeDmg,
+            suppressLogPlayerId: liveTarget.owner,
+            suppressMessage: `${sourceLabel} suppressed ${UNIT_STATS[liveTarget.type].name}'s Overwatch!`,
+            graveyard: newGraveyard,
+            round: currentRound,
+            extraLogs,
+            fx,
+          });
+          newUnits = hit.unitsList;
+          if (hit.killed) {
+            if (nextMatchStats[liveTarget.owner]) nextMatchStats[liveTarget.owner].unitsLost += 1;
+            extraLogs.push(createLog(currentRound, -1, `${sourceLabel} killed P${liveTarget.owner + 1} ${UNIT_STATS[liveTarget.type].name}`, 'COMBAT'));
+          }
+        };
+
+        strikeTarget(target, dmg);
+
+        if (splashRoll) {
+          for (const u of candidates) {
+            if (u.id === primaryId || !inRange(u)) continue;
+            strikeTarget(u, splashRoll());
+          }
         }
       };
 
@@ -1245,7 +1298,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         const myBases = newMap.filter(t => t.type === 'BASE' && t.owner === currentPlayer && (t.hp || 0) > 0);
         myBases.forEach(base => {
           const enemyUnits = newUnits.filter(u => u.owner !== currentPlayer);
-          fireAutomatedDefense(base, BASE_STATS.RANGE, getBaseArtilleryDamage(), enemyUnits, 'Base Artillery', 'MISSILE', '#FF5722');
+          fireAutomatedDefense(base, BASE_STATS.RANGE, getBaseArtilleryDamage(), enemyUnits, 'Base Artillery', 'MISSILE', '#FF5722', getBaseArtillerySplashDamage);
         });
       }
       break;

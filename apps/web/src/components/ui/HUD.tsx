@@ -1013,7 +1013,7 @@ const HoveredTacticalPreview: React.FC<{
     movePreviewWarnings.push(`Inside Bank Turret Range (${BANK_STATS.DAMAGE} DMG/t)`);
   }
   if (enemyBases.some(b => getManhattanDistance(b, hoveredTile) <= BASE_STATS.RANGE)) {
-    movePreviewWarnings.push(`Inside Enemy Base Artillery (${BASE_STATS.MIN_DMG}-${BASE_STATS.MAX_DMG} DMG/t)`);
+    movePreviewWarnings.push(`Inside Enemy Base Artillery (${BASE_STATS.MIN_DMG}-${BASE_STATS.MAX_DMG} DMG/t + ${BASE_STATS.SPLASH_MIN_DMG}-${BASE_STATS.SPLASH_MAX_DMG} splash)`);
   }
   const owCheck = getHoverMoveResolution({
     movingUnit: selectedUnit,

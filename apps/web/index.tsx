@@ -13,6 +13,7 @@ import { ViewportProvider } from './src/context/ViewportContext';
 import { MapControls, PhoneDock } from './src/components/game/ui/MapControls';
 import { MapHoverCard } from './src/components/game/ui/MapHoverCard';
 import { TurnBanner } from './src/components/game/ui/TurnBanner';
+import { TacticalBanner } from './src/components/game/ui/TacticalBanner';
 import { CameraFollow } from './src/components/game/ui/CameraFollow';
 import { useNarrow } from './src/hooks/useNarrow';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME, playerDisplayName } from './src/components/ui/GeoPrimitives';
@@ -157,6 +158,14 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
             >
               ↻ {mapRotation}°
             </GeoButton>
+            <GeoButton
+              onClick={toggleFxMode}
+              variant={fxMode === 'ECO' ? 'softMint' : 'softBlue'}
+              title={fxMode === 'ECO' ? 'Switch to Live Ambient Map FX (water shimmer, radar sweeps, base smoke)' : 'Pause Ambient Map FX (0% idle GPU Eco mode)'}
+              coreStyle={{ padding: '4px 9px' }}
+            >
+              {fxMode === 'ECO' ? 'ECO' : 'LIVE'}
+            </GeoButton>
             <GeoButton onClick={toggleMute} variant={muted ? 'default' : 'softBlue'} coreStyle={{ padding: '4px 9px' }}>
               {muted ? 'MUTED' : 'SOUND'}
             </GeoButton>
@@ -215,7 +224,11 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
           <GeoButton
             onClick={toggleFxMode}
             variant={fxMode === 'ECO' ? 'softMint' : 'softBlue'}
-            title={fxMode === 'ECO' ? 'Eco Graphics: Zero-Idle GPU Mode (Switch to Live 24fps FX)' : 'Live FX: Continuous Water & Weather @ 24fps (Switch to Eco Mode)'}
+            title={
+              fxMode === 'ECO'
+                ? 'Eco Graphics: 0% idle GPU with 60 FPS combat FX (Click for Live Ambient Map)'
+                : 'Live Map FX: Water caustics, radar sweeps, bank beacons & base smoke @ 24 FPS idle (Click to pause ambient FX)'
+            }
             coreStyle={{ padding: '4px 10px' }}
           >
             {fxMode === 'ECO' ? 'FX: ECO' : 'FX: LIVE'}
@@ -252,6 +265,7 @@ const MapFrame: React.FC = () => (
             <GameRenderer />
             <MapHoverCard />
             <TurnBanner />
+            <TacticalBanner />
           </div>
         </div>
       </div>

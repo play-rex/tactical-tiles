@@ -23,6 +23,7 @@ interface ParticleTextures {
 interface ParticleSlot {
   sprite: PIXI.Sprite;
   active: boolean;
+  ambient: boolean;
   ageMs: number;
   lifeMs: number;
   x: number;
@@ -48,6 +49,8 @@ interface ParticleSlot {
 interface SpawnSpec {
   texture: TextureKind;
   additive?: boolean;
+  /** Ambient LIVE-mode particles do not trigger adaptive 60 FPS combat boost. */
+  ambient?: boolean;
   x: number;
   y: number;
   vx: number;
@@ -195,6 +198,7 @@ export class ParticlePool {
   private normalCursor = 0;
   private additiveCursor = 0;
   private activeCount = 0;
+  private combatActiveCount = 0;
   private mapRotation: BoardRotation = 0;
   private destroyed = false;
 
@@ -230,6 +234,7 @@ export class ParticlePool {
       target.push({
         sprite,
         active: false,
+        ambient: false,
         ageMs: 0,
         lifeMs: 1,
         x: 0,
@@ -264,6 +269,11 @@ export class ParticlePool {
     return this.activeCount > 0;
   }
 
+  /** True only when non-ambient combat/action particles are alive (used for ECO sleep & 60 FPS boost). */
+  public hasActiveCombatParticles(): boolean {
+    return this.combatActiveCount > 0;
+  }
+
   private acquireSlot(additive: boolean): ParticleSlot {
     const list = additive ? this.additiveSlots : this.normalSlots;
     const len = list.length;
@@ -284,6 +294,9 @@ export class ParticlePool {
     if (slot.active) {
       slot.active = false;
       this.activeCount = Math.max(0, this.activeCount - 1);
+      if (!slot.ambient) {
+        this.combatActiveCount = Math.max(0, this.combatActiveCount - 1);
+      }
     }
     cursor = (cursor + 1) % len;
     if (additive) this.additiveCursor = cursor;
@@ -295,6 +308,7 @@ export class ParticlePool {
     if (this.destroyed) return;
     const slot = this.acquireSlot(Boolean(spec.additive));
     slot.active = true;
+    slot.ambient = Boolean(spec.ambient);
     slot.ageMs = 0;
     slot.lifeMs = Math.max(40, spec.lifeMs);
     slot.x = spec.x;
@@ -323,6 +337,9 @@ export class ParticlePool {
     sp.visible = true;
 
     this.activeCount++;
+    if (!slot.ambient) {
+      this.combatActiveCount++;
+    }
   }
 
   public emit(req: ParticleEmitRequest): void {
@@ -843,6 +860,109 @@ export class ParticlePool {
         }
         break;
       }
+
+      case 'deathBurst': {
+        // Hot elimination flare
+        this.spawn({
+          texture: 'glow',
+          additive: true,
+          x,
+          y,
+          vx: 0,
+          vy: 0,
+          drag: 3,
+          lifeMs: 210,
+          startScale: 0.65 * s,
+          endScale: 1.35 * s,
+          color: req.color ?? 0xFB7185,
+          alpha: 0.88,
+          fadeInFrac: 0,
+        });
+        // Rising glowing embers
+        const emberCount = Math.round(10 * s);
+        for (let i = 0; i < emberCount; i++) {
+          const upAng = Math.atan2(up.y, up.x) + randRange(-1.45, 1.45);
+          const spd = randRange(55, 165) * s;
+          this.spawn({
+            texture: 'shard',
+            additive: true,
+            x: x + randRange(-8, 8),
+            y: y + randRange(-8, 8),
+            vx: Math.cos(upAng) * spd,
+            vy: Math.sin(upAng) * spd,
+            upAccel: 28,
+            drag: 2.2,
+            lifeMs: randRange(360, 620),
+            startScale: randRange(0.24, 0.42) * s,
+            endScale: 0.05 * s,
+            color: pick([0xFEF08A, 0xFB923C, 0xEF4444]),
+            alpha: 0.96,
+            rotation: randRange(0, Math.PI * 2),
+            vr: randRange(-10, 10),
+          });
+        }
+        // Dark rising smoke plume
+        for (let i = 0; i < 6; i++) {
+          const ang = randRange(0, Math.PI * 2);
+          const spd = randRange(18, 62) * s;
+          this.spawn({
+            texture: 'softPuff',
+            x: x + randRange(-10, 10),
+            y: y + randRange(-10, 10),
+            vx: Math.cos(ang) * spd + up.x * 22,
+            vy: Math.sin(ang) * spd + up.y * 22,
+            upAccel: 58,
+            drag: 2.4,
+            lifeMs: randRange(440, 680),
+            startScale: randRange(0.36, 0.56) * s,
+            endScale: randRange(1.05, 1.45) * s,
+            color: pick([0x334155, 0x1E293B, 0x475569]),
+            alpha: 0.54,
+            fadeInFrac: 0.1,
+          });
+        }
+        break;
+      }
+
+      case 'capturePulse': {
+        const col = req.color ?? 0x38BDF8;
+        this.spawn({
+          texture: 'ring',
+          additive: true,
+          x,
+          y,
+          vx: 0,
+          vy: 0,
+          drag: 0,
+          lifeMs: 420,
+          startScale: 0.25 * s,
+          endScale: 1.25 * s,
+          color: col,
+          alpha: 0.85,
+          fadeInFrac: 0.05,
+        });
+        for (let i = 0; i < 8; i++) {
+          const offset = randRange(-20, 20);
+          const sideX = -up.y * offset;
+          const sideY = up.x * offset;
+          this.spawn({
+            texture: 'glow',
+            additive: true,
+            x: x + sideX,
+            y: y + sideY + randRange(-10, 10),
+            vx: up.x * randRange(45, 105) * s,
+            vy: up.y * randRange(45, 105) * s,
+            upAccel: 28,
+            drag: 2.0,
+            lifeMs: randRange(340, 560),
+            startScale: randRange(0.18, 0.34) * s,
+            endScale: 0.05 * s,
+            color: i % 3 === 0 ? 0xFFFFFF : col,
+            alpha: 0.9,
+          });
+        }
+        break;
+      }
     }
   }
 
@@ -865,6 +985,9 @@ export class ParticlePool {
         p.active = false;
         p.sprite.visible = false;
         this.activeCount = Math.max(0, this.activeCount - 1);
+        if (!p.ambient) {
+          this.combatActiveCount = Math.max(0, this.combatActiveCount - 1);
+        }
         continue;
       }
 
@@ -920,6 +1043,7 @@ export class ParticlePool {
     reset(this.normalSlots);
     reset(this.additiveSlots);
     this.activeCount = 0;
+    this.combatActiveCount = 0;
   }
 
   public destroy(): void {

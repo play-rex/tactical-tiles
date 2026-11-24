@@ -61,6 +61,8 @@ export function eventsFor(events: GameEvent[], fog: boolean, before: Set<string>
       case 'mineBlast':
       case 'structureHit':
       case 'heist':
+      case 'capture':
+      case 'spawn':
       case 'promotion':
       case 'overwatchSet':
       case 'heal':
