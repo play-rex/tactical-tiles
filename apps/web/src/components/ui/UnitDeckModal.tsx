@@ -8,7 +8,7 @@ import { GeoButton, GeoCard, GeoChip, GeoWell } from './GeoPrimitives';
 const ORDER: UnitType[] = ['SOLDIER', 'ASSAULTER', 'SNIPER'];
 
 const UNIT_FLAVOR: Record<UnitType, { accent: string; soft: string; ink: string; tagline: string }> = {
-  SOLDIER: { accent: 'var(--acc-blue)', soft: 'var(--acc-blue-soft)', ink: 'var(--acc-blue-ink)', tagline: 'Fast recon — captures, heists & finishes' },
+      SOLDIER: { accent: 'var(--acc-blue)', soft: 'var(--acc-blue-soft)', ink: 'var(--acc-blue-ink)', tagline: 'Fast recon — captures, breaches & finishes' },
   ASSAULTER: { accent: 'var(--acc-red)', soft: 'var(--acc-red-soft)', ink: 'var(--acc-red-ink)', tagline: 'Heavy frontline — breaks bases & holds ground' },
   SNIPER: { accent: 'var(--acc-violet)', soft: 'var(--acc-violet-soft)', ink: 'var(--acc-violet-ink)', tagline: 'High-ground cannon — deletes from afar' },
 };
@@ -17,10 +17,10 @@ const ALL_DEEDS: string[] = [
   'MOVE then ATTACK — one order per turn',
   'OVERWATCH — ambush the first enemy that steps in',
   'SECURE buildings — +€ income every turn',
-  'HEIST banks — crack the vault for €200',
+      'SIEGE banks — crack 15 HP vaults (€100–300 or intel)',
   'LOOT supply drops on the field',
   'DEMOLISH barriers in the way',
-  'SIEGE the enemy HQ (Conquer mode)',
+      'SIEGE the enemy HQ (Conquer) or a bank vault',
   'RELOAD to refill ammo (5 CP)',
 ];
 

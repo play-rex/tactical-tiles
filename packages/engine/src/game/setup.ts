@@ -1,5 +1,6 @@
 /** Building a new game: generated maps, custom maps and challenge ops. */
 import {
+  BANK_STATS,
   BARRIER_STATS,
   BASE_STATS,
   GOLD_SETTINGS,
@@ -49,63 +50,211 @@ export const generateDynamicMap = (
 
     const centerX = Math.floor(size / 2);
     const centerY = Math.floor(size / 2);
+    const dist = getManhattanDistance;
+    const DIRS_4: ReadonlyArray<readonly [number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    const DIRS_8: ReadonlyArray<readonly [number, number]> = [
+        [-1, -1], [0, -1], [1, -1],
+        [-1, 0],           [1, 0],
+        [-1, 1],  [0, 1],  [1, 1],
+    ];
 
-    const lakeRadius = numPlayers > 2 ? 2 : 1;
-    for (let y = centerY - lakeRadius; y <= centerY + lakeRadius; y++) {
-        for (let x = centerX - lakeRadius; x <= centerX + lakeRadius; x++) {
-             if (Math.sqrt(Math.pow(x-centerX,2) + Math.pow(y-centerY,2)) <= lakeRadius) {
-                 const t = getTile(x, y);
-                 if (t) { t.type = 'WATER'; t.height = 0; }
-             }
+    const shuffle = <T,>(arr: T[]): T[] => {
+        for (let i = arr.length - 1; i > 0; i--) {
+            const j = Math.floor(rng() * (i + 1));
+            [arr[i], arr[j]] = [arr[j], arr[i]];
         }
+        return arr;
+    };
+
+    type MapArchetype = 'RIVER_VALLEY' | 'FORKED_RIVER' | 'FRONTIER_RIVER' | 'CANYON_DIVIDE';
+    const archRoll = rng();
+    const archetype: MapArchetype =
+        archRoll < 0.34 ? 'RIVER_VALLEY' :
+        archRoll < 0.58 ? 'FORKED_RIVER' :
+        archRoll < 0.80 ? 'FRONTIER_RIVER' :
+        'CANYON_DIVIDE';
+
+    const frontierPhase = rng() * Math.PI * 2;
+
+    // 2. Choose symmetrical sector orientation (varied per seed so rivers alternate diagonals & angles naturally)
+    const startAngle = numPlayers === 2
+        ? (rng() < 0.5 ? -Math.PI / 4 : Math.PI / 4) + (rng() - 0.5) * 0.40
+        : -Math.PI / 2 + (rng() < 0.5 ? 0 : Math.PI / 4);
+
+    const baseGroundAt = (x: number, y: number): 'PLAINS' | 'SAND' => {
+        if (archetype === 'CANYON_DIVIDE') return 'SAND';
+        if (archetype === 'FRONTIER_RIVER') {
+            // Split-biome theater aligned gently across the river divide so one flank is lush valley & the other golden frontier
+            const axis = startAngle + Math.PI / 2;
+            const proj = (x - centerX) * Math.cos(axis) + (y - centerY) * Math.sin(axis);
+            const wave = Math.sin((x * 0.38 - y * 0.32) + frontierPhase) * 2.0;
+            return proj + wave > 0.5 ? 'SAND' : 'PLAINS';
+        }
+        return 'PLAINS';
+    };
+
+    // 1. Paint base biome ground (PLAINS or SAND)
+    for (const t of tiles) {
+        t.type = baseGroundAt(t.x, t.y);
+        t.height = 1;
     }
 
-    const startAngle = numPlayers === 2 ? (-Math.PI / 4) : (-Math.PI / 2);
-    
-    for (let i = 0; i < numPlayers; i++) {
-        const riverAngle = startAngle + (i * 2 * Math.PI / numPlayers);
-        
-        let cx = centerX;
-        let cy = centerY;
-        const dx = Math.cos(riverAngle);
-        const dy = Math.sin(riverAngle);
-        const px = -Math.sin(riverAngle);
-        const py = Math.cos(riverAngle);
+    // Helper: carve a 100% continuous organic winding river or canyon channel (zero diagonal gaps!)
+    const carveChannel = (
+        sx: number,
+        sy: number,
+        angle: number,
+        maxDist: number,
+        channelType: 'WATER' | 'CANYON',
+        allowWide: boolean,
+        initialLateral = 0,
+    ) => {
+        let prevX = Math.round(sx);
+        let prevY = Math.round(sy);
+        const dx = Math.cos(angle);
+        const dy = Math.sin(angle);
+        const px = -Math.sin(angle);
+        const py = Math.cos(angle);
+        const paint = (tx: number, ty: number) => {
+            const t = getTile(tx, ty);
+            if (t) {
+                t.type = channelType;
+                t.height = 0;
+            }
+        };
+        paint(prevX, prevY);
 
-        let dist = 0;
-        const maxDist = size * 1.0; 
+        let walked = 0;
+        let lateralOffset = initialLateral;
+        while (walked < maxDist) {
+            lateralOffset = Math.max(-2.6, Math.min(2.6, lateralOffset + (rng() - 0.5) * 0.92));
+            const cx = sx + dx * (walked + 1) + px * lateralOffset;
+            const cy = sy + dy * (walked + 1) + py * lateralOffset;
+            const tx = Math.round(cx);
+            const ty = Math.round(cy);
 
-        while (dist < maxDist) {
-            const wiggle = (rng() - 0.5) * 1.5; 
-            const wx = px * wiggle;
-            const wy = py * wiggle;
+            // Step orthogonally from (prevX, prevY) -> (tx, ty) so the channel NEVER breaks into puddles!
+            let bx = prevX;
+            let by = prevY;
+            let guard = 0;
+            while ((bx !== tx || by !== ty) && guard < 8) {
+                guard++;
+                if (Math.abs(tx - bx) >= Math.abs(ty - by) && bx !== tx) {
+                    bx += tx > bx ? 1 : -1;
+                } else if (by !== ty) {
+                    by += ty > by ? 1 : -1;
+                }
+                paint(bx, by);
+            }
+            prevX = tx;
+            prevY = ty;
 
-            cx += dx + wx;
-            cy += dy + wy;
-            dist += 1;
+            // Occasional gentle 2-tile widening along straight stretches
+            if (allowWide && rng() < 0.22) {
+                paint(tx + Math.round(px), ty + Math.round(py));
+            }
+            walked += 1;
+        }
+    };
 
-            const isWide = rng() < 0.3;
-            let width = isWide ? 3 : (rng() < 0.5 ? 2 : 1);
-            
-            for (let w = -Math.floor(width/2); w <= Math.floor(width/2); w++) {
-                const rx = Math.round(cx + px * w);
-                const ry = Math.round(cy + py * w);
-                const t = getTile(rx, ry);
-                if (t) { t.type = 'WATER'; t.height = 0; }
+    // Helper: connect two points with a 1-tile continuous river/canyon bend (for braided river islands)
+    const carveSegment = (x0: number, y0: number, x1: number, y1: number, channelType: 'WATER' | 'CANYON') => {
+        const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0));
+        let prevX = x0;
+        let prevY = y0;
+        const paint = (tx: number, ty: number) => {
+            const t = getTile(tx, ty);
+            if (t) {
+                t.type = channelType;
+                t.height = 0;
+            }
+        };
+        paint(prevX, prevY);
+        for (let i = 1; i <= steps; i++) {
+            const tx = Math.round(x0 + ((x1 - x0) * i) / steps);
+            const ty = Math.round(y0 + ((y1 - y0) * i) / steps);
+            while (prevX !== tx || prevY !== ty) {
+                if (Math.abs(tx - prevX) >= Math.abs(ty - prevY) && prevX !== tx) {
+                    prevX += tx > prevX ? 1 : -1;
+                } else if (prevY !== ty) {
+                    prevY += ty > prevY ? 1 : -1;
+                }
+                paint(prevX, prevY);
             }
         }
+    };
+
+    // 3. Sculpt macro flowing geography per Battlefield Archetype (100% flowing divides — ZERO isolated pools!)
+    if (archetype === 'RIVER_VALLEY' || archetype === 'FRONTIER_RIVER') {
+        for (let i = 0; i < numPlayers; i++) {
+            const riverAngle = startAngle + (i * 2 * Math.PI / numPlayers);
+            carveChannel(centerX, centerY, riverAngle, size * 0.95, 'WATER', archetype === 'RIVER_VALLEY');
+        }
+    } else if (archetype === 'CANYON_DIVIDE') {
+        for (let i = 0; i < numPlayers; i++) {
+            const gorgeAngle = startAngle + (i * 2 * Math.PI / numPlayers);
+            carveChannel(centerX, centerY, gorgeAngle, size * 0.95, 'CANYON', true);
+        }
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (Math.abs(dx) + Math.abs(dy) <= 1) {
+                    const t = getTile(centerX + dx, centerY + dy);
+                    if (t) { t.type = 'CANYON'; t.height = 0; }
+                }
+            }
+        }
+    } else if (archetype === 'FORKED_RIVER') {
+        // Flowing river that splits around a contested central river island before flowing cleanly to the edges!
+        const islandSpan = numPlayers > 2 ? 3.5 : 3.0;
+        const dx = Math.cos(startAngle);
+        const dy = Math.sin(startAngle);
+        const px = -Math.sin(startAngle);
+        const py = Math.cos(startAngle);
+
+        const forkAX = Math.max(2, Math.min(size - 3, Math.round(centerX + dx * islandSpan)));
+        const forkAY = Math.max(2, Math.min(size - 3, Math.round(centerY + dy * islandSpan)));
+        const forkBX = Math.max(2, Math.min(size - 3, Math.round(centerX - dx * islandSpan)));
+        const forkBY = Math.max(2, Math.min(size - 3, Math.round(centerY - dy * islandSpan)));
+        const bankLX = Math.max(2, Math.min(size - 3, Math.round(centerX + px * islandSpan)));
+        const bankLY = Math.max(2, Math.min(size - 3, Math.round(centerY + py * islandSpan)));
+        const bankRX = Math.max(2, Math.min(size - 3, Math.round(centerX - px * islandSpan)));
+        const bankRY = Math.max(2, Math.min(size - 3, Math.round(centerY - py * islandSpan)));
+
+        // Diamond-shaped twin braided channels hugging the central island
+        carveSegment(forkAX, forkAY, bankLX, bankLY, 'WATER');
+        carveSegment(bankLX, bankLY, forkBX, forkBY, 'WATER');
+        carveSegment(forkAX, forkAY, bankRX, bankRY, 'WATER');
+        carveSegment(bankRX, bankRY, forkBX, forkBY, 'WATER');
+
+        // Continue main river branches cleanly out to every edge
+        carveChannel(forkAX, forkAY, startAngle, size * 0.7, 'WATER', false);
+        carveChannel(forkBX, forkBY, startAngle + Math.PI, size * 0.7, 'WATER', false);
+        if (numPlayers > 2) {
+            carveChannel(bankLX, bankLY, startAngle + Math.PI / 2, size * 0.7, 'WATER', false);
+            carveChannel(bankRX, bankRY, startAngle - Math.PI / 2, size * 0.7, 'WATER', false);
+        }
     }
 
+    // 4. Place Player Bases symmetrically & guarantee clear walkable HQ aprons
     const padding = 3;
-    const baseDist = (size / 2) - padding; 
-
+    const baseDist = (size / 2) - padding;
     for (let i = 0; i < numPlayers; i++) {
-        const riverAngle = startAngle + (i * 2 * Math.PI / numPlayers);
-        const sectorAngle = riverAngle + (Math.PI / numPlayers);
+        const sectorAnchor = startAngle + (i * 2 * Math.PI / numPlayers);
+        const sectorAngle = sectorAnchor + (Math.PI / numPlayers);
+        const bx = Math.max(2, Math.min(size - 3, Math.round(centerX + Math.cos(sectorAngle) * baseDist)));
+        const by = Math.max(2, Math.min(size - 3, Math.round(centerY + Math.sin(sectorAngle) * baseDist)));
 
-        const bx = Math.round(centerX + Math.cos(sectorAngle) * baseDist);
-        const by = Math.round(centerY + Math.sin(sectorAngle) * baseDist);
-
+        // Clear a 2-tile walkable apron around every Base so squads always deploy smoothly
+        for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+                if (Math.abs(dx) + Math.abs(dy) > 2) continue;
+                const nt = getTile(bx + dx, by + dy);
+                if (nt && nt.type !== 'BASE') {
+                    nt.type = baseGroundAt(nt.x, nt.y);
+                    nt.height = 1;
+                }
+            }
+        }
         const t = getTile(bx, by);
         if (t) {
             t.type = 'BASE';
@@ -117,165 +266,397 @@ export const generateDynamicMap = (
 
     const isNearAnyBase = (x: number, y: number, minDist = 3): boolean =>
         baseLocations.some(b => Math.abs(b.x - x) + Math.abs(b.y - y) <= minDist);
+    const isOpenGround = (t: Tile | null): t is Tile =>
+        Boolean(t && (t.type === 'PLAINS' || t.type === 'SAND'));
 
-    const placeMountainTile = (x: number, y: number): boolean => {
+    // 5. Place cleanly spaced strategic Bridges (minimum 3-tile spacing, walkable approaches on both ends!)
+    const placedBridges: Tile[] = [];
+    const bridgeCandidates: Array<{ tile: Tile; bridgeType: 'BRIDGE' | 'BRIDGE_V' }> = [];
+    for (const t of tiles) {
+        if (t.type !== 'WATER' && t.type !== 'CANYON') continue;
+        if (t.x <= 1 || t.x >= size - 2 || t.y <= 1 || t.y >= size - 2) continue;
+        const left = getTile(t.x - 1, t.y);
+        const right = getTile(t.x + 1, t.y);
+        const top = getTile(t.x, t.y - 1);
+        const bottom = getTile(t.x, t.y + 1);
+        if (isOpenGround(left) && isOpenGround(right)) {
+            bridgeCandidates.push({ tile: t, bridgeType: 'BRIDGE' });
+        } else if (isOpenGround(top) && isOpenGround(bottom)) {
+            bridgeCandidates.push({ tile: t, bridgeType: 'BRIDGE_V' });
+        }
+    }
+    shuffle(bridgeCandidates);
+    const targetBridgeCount =
+        archetype === 'FORKED_RIVER'
+            ? (numPlayers === 2 ? 5 : numPlayers * 2 + 2)
+            : (numPlayers === 2 ? 4 : numPlayers * 2);
+    const minBridgeSpacing = 3;
+
+    for (const cand of bridgeCandidates) {
+        if (placedBridges.length >= targetBridgeCount) break;
+        if (cand.tile.type !== 'WATER' && cand.tile.type !== 'CANYON') continue;
+        if (placedBridges.some(b => dist(b, cand.tile) < minBridgeSpacing)) continue;
+        cand.tile.type = cand.bridgeType;
+        cand.tile.height = 1;
+        placedBridges.push(cand.tile);
+    }
+
+    const isNearBridgeApproach = (x: number, y: number): boolean =>
+        placedBridges.some(b => Math.abs(b.x - x) + Math.abs(b.y - y) <= 1);
+
+    // 6. Carve concise tactical supply roads extending outward from primary bridge crossings
+    const paintRoadLine = (x0: number, y0: number, x1: number, y1: number) => {
+        let cx = x0;
+        let cy = y0;
+        let horizontalFirst = rng() < 0.5;
+        let steps = 0;
+        while ((cx !== x1 || cy !== y1) && steps < size * 2) {
+            steps++;
+            let movedH = false;
+            if (horizontalFirst && cx !== x1) {
+                cx += cx < x1 ? 1 : -1;
+                movedH = true;
+            } else if (cy !== y1) {
+                cy += cy < y1 ? 1 : -1;
+            } else if (cx !== x1) {
+                cx += cx < x1 ? 1 : -1;
+                movedH = true;
+            }
+            if (steps % 4 === 0 && rng() < 0.35) horizontalFirst = !horizontalFirst;
+            const stepTile = getTile(cx, cy);
+            if (!stepTile) break;
+            if (stepTile.type === 'WATER' || stepTile.type === 'CANYON' || stepTile.type === 'BASE') break;
+            if (isOpenGround(stepTile) && !isNearAnyBase(stepTile.x, stepTile.y, 1)) {
+                stepTile.type = movedH ? 'ROAD_H' : 'ROAD';
+                stepTile.height = 1;
+            }
+        }
+    };
+
+    if (archetype !== 'CANYON_DIVIDE') {
+        const roadBridges = placedBridges.slice(0, numPlayers === 2 ? 2 : 3);
+        for (const br of roadBridges) {
+            const isH = br.type === 'BRIDGE';
+            const reach = 2 + Math.floor(rng() * 2);
+            if (isH) {
+                paintRoadLine(br.x, br.y, Math.max(2, br.x - reach), br.y);
+                paintRoadLine(br.x, br.y, Math.min(size - 3, br.x + reach), br.y);
+            } else {
+                paintRoadLine(br.x, br.y, br.x, Math.max(2, br.y - reach));
+                paintRoadLine(br.x, br.y, br.x, Math.min(size - 3, br.y + reach));
+            }
+        }
+    }
+
+    // 7. Spread 4–5 Medium/Small Irregular Mountain Ranges in 20x20 (7–8 in 25x25), strictly capped <= 6 tiles!
+    const mountainClusterOwner = new Int16Array(size * size).fill(-1);
+    const hasForeignMountainNeighbor = (x: number, y: number, myClusterId: number): boolean => {
+        for (const [dx, dy] of DIRS_8) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+            const owner = mountainClusterOwner[ny * size + nx];
+            if (owner !== -1 && owner !== myClusterId) return true;
+        }
+        return false;
+    };
+
+    const canPlaceMountain = (x: number, y: number, myClusterId: number): boolean => {
         const t = getTile(x, y);
-        if (!t || t.type !== 'PLAINS' || isNearAnyBase(x, y, 3)) return false;
-        t.type = 'MOUNTAIN';
-        t.height = 2;
+        if (!isOpenGround(t)) return false;
+        if (isNearAnyBase(x, y, 3) || isNearBridgeApproach(x, y)) return false;
+        if (hasForeignMountainNeighbor(x, y, myClusterId)) return false;
         return true;
     };
 
-    // Sculpt sweeping, irregular, branching mountain ranges (curved spines + organic massif thickness + rocky spurs)
-    const rangeCount = Math.max(3, numPlayers + 1);
-    const rangeSeeds: { x: number; y: number }[] = [];
-    for (let r = 0; r < rangeCount; r++) {
-        let startX = -1;
-        let startY = -1;
-        for (let attempt = 0; attempt < 28; attempt++) {
+    // Tactical flanking geometry:
+    // - 20x20: 5 spread mountain ranges (1–2 larger 7–9 tile flanking barriers + 3 medium/small ridges) + 1–2 tile outcrops
+    // - 25x25: 8 spread mountain ranges (2–3 larger 8–12 tile flanking massifs + 5 medium/small ridges) + 1–2 tile outcrops
+    // Every cluster enforces 8-way non-merging so crisp 1–3 tile flanking passes always stay open between ranges!
+    const plannedRangeSizes: number[] =
+        numPlayers === 2
+            ? [
+                7 + Math.floor(rng() * 3),                       // 1st hero flanking range (7–9 tiles)
+                rng() < 0.6 ? 7 + Math.floor(rng() * 2) : 5,     // 2nd large/medium range (7–8 or 5 tiles)
+                4 + Math.floor(rng() * 2),                       // medium ridge (4–5 tiles)
+                3 + Math.floor(rng() * 2),                       // compact ridge (3–4 tiles)
+                3,                                               // tactical spur (3 tiles)
+              ]
+            : numPlayers <= 4
+                ? [
+                    9 + Math.floor(rng() * 4),                   // sweeping hero massif (9–12 tiles)
+                    8 + Math.floor(rng() * 3),                   // large flanking range (8–10 tiles)
+                    7 + Math.floor(rng() * 3),                   // large-medium range (7–9 tiles)
+                    5 + Math.floor(rng() * 2),                   // medium ridge (5–6 tiles)
+                    4 + Math.floor(rng() * 2),                   // medium ridge (4–5 tiles)
+                    4,                                           // tactical ridge (4 tiles)
+                    3 + Math.floor(rng() * 2),                   // compact ridge (3–4 tiles)
+                    3,                                           // flanking spur (3 tiles)
+                  ]
+                : [12, 10, 9, 8, 6, 5, 5, 4, 4, 3];
+
+    const rangeAnchors: { x: number; y: number }[] = [];
+    let nextMtnClusterId = 0;
+
+    for (const targetSize of plannedRangeSizes) {
+        const cid = nextMtnClusterId++;
+        let sx = -1;
+        let sy = -1;
+        for (let attempt = 0; attempt < 55; attempt++) {
             const cx = 1 + Math.floor(rng() * (size - 2));
             const cy = 1 + Math.floor(rng() * (size - 2));
-            const cand = getTile(cx, cy);
-            if (!cand || cand.type !== 'PLAINS' || isNearAnyBase(cx, cy, 4)) continue;
-            const farEnough = rangeSeeds.every(s => Math.abs(s.x - cx) + Math.abs(s.y - cy) >= Math.floor(size * 0.28));
-            if (farEnough || attempt >= 18) {
-                startX = cx;
-                startY = cy;
+            if (!canPlaceMountain(cx, cy, cid)) continue;
+            const spread = attempt < 28 ? Math.floor(size * 0.22) : Math.floor(size * 0.13);
+            if (rangeAnchors.every(a => Math.abs(a.x - cx) + Math.abs(a.y - cy) >= spread)) {
+                sx = cx;
+                sy = cy;
                 break;
             }
         }
-        if (startX === -1) continue;
-        rangeSeeds.push({ x: startX, y: startY });
+        if (sx === -1) continue;
 
-        let fx = startX;
-        let fy = startY;
+        const placed: Array<{ x: number; y: number }> = [{ x: sx, y: sy }];
+        const seedTile = getTile(sx, sy)!;
+        seedTile.type = 'MOUNTAIN';
+        seedTile.height = 2;
+        mountainClusterOwner[sy * size + sx] = cid;
+        rangeAnchors.push({ x: sx, y: sy });
+
+        // Grow organically with curved spines + occasional core branching for realistic irregular flanking silhouettes
         let heading = rng() * Math.PI * 2;
-        const curveBias = (rng() - 0.5) * 0.42;
-        const spineSteps = 5 + Math.floor(rng() * 4); // 5..8 spine segments -> 8..15 tiles with thickness & spurs
-        const spinePoints: { x: number; y: number; heading: number }[] = [];
-
-        for (let s = 0; s < spineSteps; s++) {
-            const rx = Math.round(fx);
-            const ry = Math.round(fy);
-            placeMountainTile(rx, ry);
-            spinePoints.push({ x: rx, y: ry, heading });
-
-            // Swell organically in the middle of the massif while tapering toward the ridge ends
-            const isCore = s >= 1 && s <= spineSteps - 2;
-            const perpX = -Math.sin(heading);
-            const perpY = Math.cos(heading);
-            if (isCore && rng() < 0.68) {
-                const side = rng() < 0.5 ? 1 : -1;
-                placeMountainTile(Math.round(rx + perpX * side), Math.round(ry + perpY * side));
-                if (rng() < 0.34) {
-                    placeMountainTile(Math.round(rx - perpX * side), Math.round(ry - perpY * side));
-                }
-            } else if (!isCore && rng() < 0.28) {
-                const side = rng() < 0.5 ? 1 : -1;
-                placeMountainTile(Math.round(rx + perpX * side), Math.round(ry + perpY * side));
-            }
-
-            heading += curveBias + (rng() - 0.5) * 0.72;
-            const stepLen = 0.95 + rng() * 0.35;
-            fx += Math.cos(heading) * stepLen;
-            fy += Math.sin(heading) * stepLen;
-        }
-
-        // Add 1–2 jagged branching rocky spurs off the main ridge for irregular alpine silhouettes
-        const spurCount = rng() < 0.55 ? 2 : 1;
-        for (let sp = 0; sp < spurCount && spinePoints.length >= 3; sp++) {
-            const anchor = spinePoints[1 + Math.floor(rng() * (spinePoints.length - 2))];
-            const branchSign = sp % 2 === 0 ? (rng() < 0.5 ? 1 : -1) : -1;
-            let sx = anchor.x;
-            let sy = anchor.y;
-            let sHeading = anchor.heading + branchSign * (0.95 + rng() * 0.55);
-            const spurLen = 2 + Math.floor(rng() * 2);
-            for (let k = 0; k < spurLen; k++) {
-                sx += Math.cos(sHeading);
-                sy += Math.sin(sHeading);
-                placeMountainTile(Math.round(sx), Math.round(sy));
-                sHeading += (rng() - 0.5) * 0.6;
-            }
+        const curve = (rng() - 0.5) * 0.58;
+        let guard = 0;
+        while (placed.length < targetSize && guard < 48) {
+            guard++;
+            const anchor =
+                rng() < 0.68
+                    ? placed[placed.length - 1]
+                    : placed[Math.floor(rng() * placed.length)];
+            heading += curve + (rng() - 0.5) * 1.1;
+            const dx = Math.round(Math.cos(heading));
+            const dy = Math.round(Math.sin(heading));
+            if (dx === 0 && dy === 0) continue;
+            const nx = anchor.x + dx;
+            const ny = anchor.y + dy;
+            if (nx < 1 || nx >= size - 1 || ny < 1 || ny >= size - 1) continue;
+            if (!canPlaceMountain(nx, ny, cid)) continue;
+            const nt = getTile(nx, ny)!;
+            nt.type = 'MOUNTAIN';
+            nt.height = 2;
+            mountainClusterOwner[ny * size + nx] = cid;
+            placed.push({ x: nx, y: ny });
         }
     }
 
-    // Seed organic woodland forest groves so foliage clusters naturally alongside mountain foothills
-    const groveCount = Math.max(4, numPlayers * 2);
-    for (let g = 0; g < groveCount; g++) {
-        let gx = Math.floor(rng() * size);
-        let gy = Math.floor(rng() * size);
-        const groveSteps = 4 + Math.floor(rng() * 4);
-        for (let s = 0; s < groveSteps; s++) {
-            const t = getTile(gx, gy);
-            if (t && t.type === 'PLAINS') t.type = 'FOREST';
-            gx += Math.floor(rng() * 3) - 1;
-            gy += Math.floor(rng() * 3) - 1;
-        }
-    }
-
-    // Light natural scatter: isolated sniper crags & small woodland copses
-    for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-            const t = getTile(x, y);
-            if (!t || t.type !== 'PLAINS') continue;
-            const rand = rng();
-            if (rand < 0.065) {
-                t.type = 'FOREST';
-            } else if (rand > 0.975 && !isNearAnyBase(x, y, 3)) {
-                t.type = 'MOUNTAIN';
-                t.height = 2;
+    // Add compact 2-tile rocky pillars + isolated 1-tile sniper crags for crisp LOS pockets & tactical flanking cover
+    const twoTileOutcropTarget = numPlayers === 2 ? 3 : numPlayers <= 4 ? 5 : 6;
+    let twoTilePlaced = 0;
+    for (let attempt = 0; attempt < 75 && twoTilePlaced < twoTileOutcropTarget; attempt++) {
+        const cid = nextMtnClusterId++;
+        const cx = 1 + Math.floor(rng() * (size - 2));
+        const cy = 1 + Math.floor(rng() * (size - 2));
+        if (!canPlaceMountain(cx, cy, cid)) continue;
+        const dirs = shuffle([...DIRS_8]);
+        let pairTile: Tile | null = null;
+        for (const [dx, dy] of dirs) {
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (nx < 1 || nx >= size - 1 || ny < 1 || ny >= size - 1) continue;
+            if (canPlaceMountain(nx, ny, cid)) {
+                pairTile = getTile(nx, ny);
+                break;
             }
         }
+        if (!pairTile) continue;
+        const t1 = getTile(cx, cy)!;
+        t1.type = 'MOUNTAIN';
+        t1.height = 2;
+        mountainClusterOwner[cy * size + cx] = cid;
+        pairTile.type = 'MOUNTAIN';
+        pairTile.height = 2;
+        mountainClusterOwner[pairTile.y * size + pairTile.x] = cid;
+        twoTilePlaced++;
     }
 
-    const bridgeCandidatesH: Tile[] = [];
-    const bridgeCandidatesV: Tile[] = [];
+    const loneCragTarget = numPlayers === 2 ? 4 : numPlayers <= 4 ? 6 : 8;
+    let loneCragsPlaced = 0;
+    for (let attempt = 0; attempt < 85 && loneCragsPlaced < loneCragTarget; attempt++) {
+        const cid = nextMtnClusterId++;
+        const cx = 1 + Math.floor(rng() * (size - 2));
+        const cy = 1 + Math.floor(rng() * (size - 2));
+        if (!canPlaceMountain(cx, cy, cid)) continue;
+        const t = getTile(cx, cy)!;
+        t.type = 'MOUNTAIN';
+        t.height = 2;
+        mountainClusterOwner[cy * size + cx] = cid;
+        loneCragsPlaced++;
+    }
 
-    tiles.forEach(t => {
-        if (t.type === 'WATER') {
-            const left = getTile(t.x - 1, t.y);
-            const right = getTile(t.x + 1, t.y);
-            const top = getTile(t.x, t.y - 1);
-            const bottom = getTile(t.x, t.y + 1);
-
-            const isLand = (n: Tile | null) => n && n.type !== 'WATER' && n.type !== 'BRIDGE' && n.type !== 'BRIDGE_V' && n.type !== 'CANYON';
-
-            if (isLand(left) && isLand(right)) bridgeCandidatesH.push(t);
-            if (isLand(top) && isLand(bottom)) bridgeCandidatesV.push(t);
+    // 8. Desert Sculpted Dunes & Quicksand Traps on sand/desert zones
+    if (archetype === 'CANYON_DIVIDE' || archetype === 'FRONTIER_RIVER') {
+        const sandTiles = tiles.filter(t => t.type === 'SAND' && !isNearAnyBase(t.x, t.y, 3) && !isNearBridgeApproach(t.x, t.y));
+        shuffle(sandTiles);
+        const duneTarget = archetype === 'CANYON_DIVIDE' ? Math.round(size * 0.65) : Math.round(size * 0.34);
+        const placedDunes: Tile[] = [];
+        for (const st of sandTiles) {
+            if (placedDunes.length >= duneTarget) break;
+            if (placedDunes.some(d => dist(d, st) < 2)) continue;
+            st.type = 'DUNES';
+            st.height = 2;
+            placedDunes.push(st);
         }
-    });
-
-    const neededBridges = numPlayers * 3; 
-    const shuffle = (arr: any[]) => {
-        for (let i = arr.length - 1; i > 0; i--) {
-            const j = Math.floor(rng() * (i + 1));
-            [arr[i], arr[j]] = [arr[j], arr[i]];
+        const qsTarget = archetype === 'CANYON_DIVIDE' ? 3 : 1;
+        let qsPlaced = 0;
+        for (const st of sandTiles) {
+            if (qsPlaced >= qsTarget) break;
+            if (st.type !== 'SAND') continue;
+            if (st.x <= 2 || st.x >= size - 3 || st.y <= 2 || st.y >= size - 3) continue;
+            st.type = 'QUICKSAND';
+            st.height = 1;
+            qsPlaced++;
         }
-        return arr;
+    }
+
+    // 9. Scaled Cohesive Forest Groves + Richly Scattered Individual Trees:
+    // - 20x20: strictly 2 groves (1 larger 6–8 tile ambush forest + 1 classic 5–6 tile grove) + 38–44 solo trees
+    // - 25x25: 3 larger groves (7–10 tiles each) + 64–74 solo trees
+    // - 30x30: 4 groves (7–10 tiles each) + 86–96 solo trees
+    const forestClusterOwner = new Int16Array(size * size).fill(-1);
+    const plannedGroveSizes: number[] =
+        numPlayers === 2
+            ? [
+                6 + Math.floor(rng() * 3), // 1 larger hero forest (6–8 tiles)
+                5 + Math.floor(rng() * 2), // 1 classic forest grove (5–6 tiles)
+              ]
+            : numPlayers <= 4
+                ? [
+                    8 + Math.floor(rng() * 3), // 8–10 tiles
+                    7 + Math.floor(rng() * 3), // 7–9 tiles
+                    6 + Math.floor(rng() * 2), // 6–7 tiles
+                  ]
+                : [9, 8, 8, 7];
+    const GROVE_ID_LIMIT = plannedGroveSizes.length;
+
+    const hasForeignForestNeighbor8 = (x: number, y: number, myId: number): boolean => {
+        for (const [dx, dy] of DIRS_8) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+            const owner = forestClusterOwner[ny * size + nx];
+            if (owner !== -1 && owner !== myId) return true;
+        }
+        return false;
     };
-    shuffle(bridgeCandidatesH);
-    shuffle(bridgeCandidatesV);
 
-    for(let i=0; i<Math.min(neededBridges, bridgeCandidatesH.length); i++) {
-        const t = bridgeCandidatesH[i];
-        if (t.type === 'WATER') {
-            t.type = 'BRIDGE';
-            t.height = 1;
+    const touchesGroveOrOrthoTree = (x: number, y: number): boolean => {
+        // Strictly 8-way clear of all main groves so no lone tree ever merges onto a grove
+        for (const [dx, dy] of DIRS_8) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+            const owner = forestClusterOwner[ny * size + nx];
+            if (owner >= 0 && owner < GROVE_ID_LIMIT) return true;
+        }
+        // Strictly 4-way clear of all other individual trees so no unintended clump ever forms
+        for (const [dx, dy] of DIRS_4) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+            if (forestClusterOwner[ny * size + nx] !== -1) return true;
+        }
+        return false;
+    };
+
+    const canPlaceGroveTile = (x: number, y: number, gid: number): boolean => {
+        const t = getTile(x, y);
+        if (!isOpenGround(t)) return false;
+        if (isNearAnyBase(x, y, 2) || isNearBridgeApproach(x, y)) return false;
+        if (hasForeignForestNeighbor8(x, y, gid)) return false;
+        return true;
+    };
+
+    const groveAnchors: { x: number; y: number }[] = [];
+    let nextForestId = 0;
+
+    for (const targetGroveSize of plannedGroveSizes) {
+        const gid = nextForestId++;
+        let sx = -1;
+        let sy = -1;
+        for (let attempt = 0; attempt < 60; attempt++) {
+            const cx = 2 + Math.floor(rng() * (size - 4));
+            const cy = 2 + Math.floor(rng() * (size - 4));
+            if (!canPlaceGroveTile(cx, cy, gid)) continue;
+            const spread = attempt < 35 ? Math.floor(size * 0.30) : Math.floor(size * 0.20);
+            if (groveAnchors.every(a => Math.abs(a.x - cx) + Math.abs(a.y - cy) >= spread)) {
+                sx = cx;
+                sy = cy;
+                break;
+            }
+        }
+        if (sx === -1) continue;
+
+        const groveTiles: Array<{ x: number; y: number }> = [{ x: sx, y: sy }];
+        getTile(sx, sy)!.type = 'FOREST';
+        forestClusterOwner[sy * size + sx] = gid;
+        groveAnchors.push({ x: sx, y: sy });
+
+        let guard = 0;
+        while (groveTiles.length < targetGroveSize && guard < 55) {
+            guard++;
+            const anchor = groveTiles[Math.floor(rng() * groveTiles.length)];
+            const dirs = shuffle([...DIRS_4]);
+            for (const [dx, dy] of dirs) {
+                const nx = anchor.x + dx;
+                const ny = anchor.y + dy;
+                if (nx < 1 || nx >= size - 1 || ny < 1 || ny >= size - 1) continue;
+                if (!canPlaceGroveTile(nx, ny, gid)) continue;
+                getTile(nx, ny)!.type = 'FOREST';
+                forestClusterOwner[ny * size + nx] = gid;
+                groveTiles.push({ x: nx, y: ny });
+                break;
+            }
         }
     }
-    for(let i=0; i<Math.min(neededBridges, bridgeCandidatesV.length); i++) {
-        const t = bridgeCandidatesV[i];
-        if (t.type === 'WATER') {
-            t.type = 'BRIDGE_V';
-            t.height = 1;
-        }
+
+    // Generously scatter individual standalone colorful trees across open meadows, foothills & riverbanks!
+    const loneTreeTarget =
+        numPlayers === 2
+            ? 38 + Math.floor(rng() * 7) // 38–44 individual trees on 20x20!
+            : numPlayers <= 4
+                ? 64 + Math.floor(rng() * 10) // 64–73 on 25x25
+                : 86 + Math.floor(rng() * 10);
+    const openCandidates = tiles.filter(
+        t => isOpenGround(t) && !isNearAnyBase(t.x, t.y, 2) && !isNearBridgeApproach(t.x, t.y),
+    );
+    shuffle(openCandidates);
+    let loneTreesPlaced = 0;
+
+    // Pass A: 8-way isolated trees first for airy organic spread
+    const passATarget = Math.round(loneTreeTarget * 0.65);
+    for (const cand of openCandidates) {
+        if (loneTreesPlaced >= passATarget) break;
+        if (!isOpenGround(cand)) continue;
+        const tid = nextForestId++;
+        if (hasForeignForestNeighbor8(cand.x, cand.y, tid)) continue;
+        cand.type = 'FOREST';
+        forestClusterOwner[cand.y * size + cand.x] = tid;
+        loneTreesPlaced++;
+    }
+    // Pass B: fill lush individual trees keeping strict 4-way separation (and 8-way clear of the 2 main groves!)
+    for (const cand of openCandidates) {
+        if (loneTreesPlaced >= loneTreeTarget) break;
+        if (!isOpenGround(cand)) continue;
+        if (touchesGroveOrOrthoTree(cand.x, cand.y)) continue;
+        const tid = nextForestId++;
+        cand.type = 'FOREST';
+        forestClusterOwner[cand.y * size + cand.x] = tid;
+        loneTreesPlaced++;
     }
 
-    const dist = getManhattanDistance;
+    // 10. Partition open buildable ground into player sectors for fair Banks, Watchtowers, & Bunkers
     const zoneTiles: Tile[][] = Array.from({ length: numPlayers }, () => []);
-    
     tiles.forEach(t => {
-        if (t.type !== 'PLAINS' && t.type !== 'FOREST') return;
+        if (t.type !== 'PLAINS' && t.type !== 'SAND') return;
         let closestOwner = -1;
         let minD = Infinity;
         baseLocations.forEach(base => {
@@ -292,91 +673,121 @@ export const generateDynamicMap = (
     const placedBuildings: Tile[] = [];
     const mapCenter = { x: centerX, y: centerY };
 
+    // Place Banks in contested interior sectors (inset >= 2 tiles from map edges so vaults never hide in corners!)
+    const idealCenterDist = Math.round(size * 0.24);
     for (let i = 0; i < numPlayers; i++) {
-        const candidates = zoneTiles[i];
+        const candidates = zoneTiles[i].filter(t => !isNearBridgeApproach(t.x, t.y));
         const base = baseLocations[i];
         const scored = candidates.map(t => {
             const dBase = dist(t, base);
             const dCenter = dist(t, mapCenter);
-            const score = (dBase * 2) - dCenter;
+            const inset = t.x >= 2 && t.x <= size - 3 && t.y >= 2 && t.y <= size - 3 ? 8 : -20;
+            const score = inset - Math.abs(dCenter - idealCenterDist) * 1.4 + Math.min(dBase, size * 0.48) * 0.65 + rng() * 1.5;
             return { tile: t, score, dBase };
         }).sort((a, b) => b.score - a.score);
 
         let placed = false;
-        const constraints = [15, 10, 5];
-        
-        for (const minBankDist of constraints) {
+        const constraints = [
+            { minBankDist: 10, minBaseDist: 7 },
+            { minBankDist: 7, minBaseDist: 6 },
+            { minBankDist: 4, minBaseDist: 5 },
+        ];
+        for (const { minBankDist, minBaseDist } of constraints) {
             if (placed) break;
             for (const cand of scored) {
-                if (cand.dBase < 8) continue;
-                const conflict = placedBanks.some(b => dist(cand.tile, b) < minBankDist);
-                if (!conflict) {
-                    cand.tile.type = 'BANK';
-                    cand.tile.hackProgress = 0;
-                    cand.tile.height = 1;
-                    placedBanks.push(cand.tile);
-                    placed = true;
-                    break;
-                }
+                if (cand.dBase < minBaseDist) continue;
+                if (placedBanks.some(b => dist(cand.tile, b) < minBankDist)) continue;
+                cand.tile.type = 'BANK';
+                cand.tile.hackProgress = 0;
+                cand.tile.height = 1;
+                placedBanks.push(cand.tile);
+                placed = true;
+                break;
             }
         }
     }
 
     const bridges = tiles.filter(t => t.type === 'BRIDGE' || t.type === 'BRIDGE_V');
 
+    // Place Watchtower (overlooking crossings/center) & Bunker (mid-lane anchor) per player sector with clean fallback
     for (let i = 0; i < numPlayers; i++) {
-        const validTiles = zoneTiles[i].filter(t => t.type === 'PLAINS' || t.type === 'FOREST'); 
+        const validTiles = zoneTiles[i].filter(t => isOpenGround(t));
         const base = baseLocations[i];
+        const allAssets = [...placedBanks, ...placedBuildings];
 
         const outpostCandidates = validTiles.map(t => {
-            let minBridgeDist = Infinity;
+            let minBridgeDist = bridges.length > 0 ? Infinity : dist(t, mapCenter);
             bridges.forEach(b => {
                 const d = dist(t, b);
                 if (d < minBridgeDist) minBridgeDist = d;
             });
-            return { tile: t, score: -minBridgeDist + rng() }; 
+            const borderPenalty = t.x <= 1 || t.x >= size - 2 || t.y <= 1 || t.y >= size - 2 ? -6 : 0;
+            return { tile: t, score: -minBridgeDist + borderPenalty + rng() };
         }).sort((a, b) => b.score - a.score);
 
-        const allAssets = [...placedBanks, ...placedBuildings];
-
-        for (const cand of outpostCandidates) {
-            const t = cand.tile;
-            if (dist(t, base) < 4) continue;
-            if (allAssets.some(a => dist(t, a) < 3)) continue;
-
-            t.type = 'BUILDING';
-            t.subType = 'WATCHTOWER';
-            t.height = 1;
-            placedBuildings.push(t);
-            allAssets.push(t); 
-            break; 
+        for (const minAssetGap of [3, 2, 1]) {
+            let wtPlaced = false;
+            for (const cand of outpostCandidates) {
+                const t = cand.tile;
+                if (dist(t, base) < 4) continue;
+                if (allAssets.some(a => dist(t, a) < minAssetGap)) continue;
+                t.type = 'BUILDING';
+                t.subType = 'WATCHTOWER';
+                t.height = 1;
+                placedBuildings.push(t);
+                allAssets.push(t);
+                wtPlaced = true;
+                break;
+            }
+            if (wtPlaced) break;
         }
 
-        const midX = Math.round((base.x + centerX) / 2);
-        const midY = Math.round((base.y + centerY) / 2);
-        const midPoint = { x: midX, y: midY };
-
+        const midPoint = { x: Math.round((base.x + centerX) / 2), y: Math.round((base.y + centerY) / 2) };
         const bunkerCandidates = zoneTiles[i]
-            .filter(t => t.type === 'PLAINS' || t.type === 'FOREST')
-            .map(t => {
-                const dMid = dist(t, midPoint);
-                return { tile: t, score: -dMid + rng() };
-            }).sort((a, b) => b.score - a.score);
+            .filter(t => isOpenGround(t))
+            .map(t => ({ tile: t, score: -dist(t, midPoint) + rng() }))
+            .sort((a, b) => b.score - a.score);
 
-        for (const cand of bunkerCandidates) {
-            const t = cand.tile;
-            if (allAssets.some(a => dist(t, a) < 3)) continue;
-            if (dist(t, base) < 3) continue;
-
-            t.type = 'BUILDING';
-            t.subType = 'BUNKER';
-            t.height = 1;
-            placedBuildings.push(t);
-            break;
+        for (const minAssetGap of [3, 2, 1]) {
+            let bkPlaced = false;
+            for (const cand of bunkerCandidates) {
+                const t = cand.tile;
+                if (dist(t, base) < 3) continue;
+                if (allAssets.some(a => dist(t, a) < minAssetGap)) continue;
+                t.type = 'BUILDING';
+                t.subType = 'BUNKER';
+                t.height = 1;
+                placedBuildings.push(t);
+                bkPlaced = true;
+                break;
+            }
+            if (bkPlaced) break;
         }
     }
 
-    // Ensure every base is reachable by ground path from baseLocations[0] (bridge wide rivers if needed)
+    // Add 1 (20x20) or 2 (25x25+) contested mid-map neutral tactical strongholds near central crossings
+    {
+        const centerOutpostTarget = numPlayers > 2 ? 2 : 1;
+        const allAssets = [...placedBanks, ...placedBuildings];
+        const centerCandidates = tiles
+            .filter(t => isOpenGround(t) && !isNearAnyBase(t.x, t.y, 5) && !isNearBridgeApproach(t.x, t.y))
+            .map(t => ({ tile: t, dCenter: dist(t, mapCenter) }))
+            .filter(c => c.dCenter <= (numPlayers > 2 ? 7 : 5))
+            .sort((a, b) => a.dCenter - b.dCenter);
+        let placedCenter = 0;
+        for (const cand of centerCandidates) {
+            if (placedCenter >= centerOutpostTarget) break;
+            if (allAssets.some(a => dist(cand.tile, a) < 3)) continue;
+            cand.tile.type = 'BUILDING';
+            cand.tile.subType = placedCenter % 2 === 0 ? 'BUNKER' : 'WATCHTOWER';
+            cand.tile.height = 1;
+            placedBuildings.push(cand.tile);
+            allAssets.push(cand.tile);
+            placedCenter++;
+        }
+    }
+
+    // 11. Ensure every base is reachable by ground path from baseLocations[0] (bridge wide rivers/canyons if needed)
     if (baseLocations.length >= 2) {
         const origin = getTile(baseLocations[0].x, baseLocations[0].y);
         if (origin) {
@@ -396,8 +807,7 @@ export const generateDynamicMap = (
                         reached = true;
                         break;
                     }
-                    const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0]];
-                    for (const [dx, dy] of dirs) {
+                    for (const [dx, dy] of DIRS_4) {
                         const nt = getTile(cur.x + dx, cur.y + dy);
                         if (!nt || visited.has(nt.id) || isGroundBlocked(nt)) continue;
                         visited.add(nt.id);
@@ -406,15 +816,19 @@ export const generateDynamicMap = (
                 }
 
                 if (!reached) {
-                    // Carve a bridge/corridor along Manhattan path so no match starts unwinnable for ground squads
                     let cx = origin.x;
                     let cy = origin.y;
                     while (cx !== targetBase.x || cy !== targetBase.y) {
+                        const prevX = cx;
                         if (cx !== targetBase.x) cx += cx < targetBase.x ? 1 : -1;
                         else if (cy !== targetBase.y) cy += cy < targetBase.y ? 1 : -1;
+                        const movedH = cx !== prevX;
                         const stepTile = getTile(cx, cy);
                         if (stepTile && isGroundBlocked(stepTile)) {
-                            stepTile.type = stepTile.type === 'WATER' ? 'BRIDGE' : 'PLAINS';
+                            stepTile.type =
+                                stepTile.type === 'WATER' || stepTile.type === 'CANYON'
+                                    ? (movedH ? 'BRIDGE' : 'BRIDGE_V')
+                                    : baseGroundAt(stepTile.x, stepTile.y);
                             stepTile.subType = undefined;
                             stepTile.owner = undefined;
                             stepTile.height = 1;
@@ -518,6 +932,27 @@ const initStructureHp = (map: Tile[], settings: GameSettings, clearBaseHp: boole
     });
 };
 
+/**
+ * Gives every Bank 15 HP and rolls its vault (seeded, so retries replay identically):
+ * 70% cash vaults holding €100-300, 30% dry intel caches (0 gold, +12 CP).
+ * Maps with explicit editor-set rewards keep them.
+ */
+export const initBankVaults = (map: Tile[], rng: () => number) => {
+    map.forEach(t => {
+        if (t.type !== 'BANK') return;
+        t.hp = BANK_STATS.HP;
+        t.maxHp = BANK_STATS.HP;
+        if (t.bankGoldReward === undefined && t.bankCpReward === undefined) {
+            if (rng() < 0.3) {
+                t.bankGoldReward = 0;
+                t.bankCpReward = 12;
+            } else {
+                t.bankGoldReward = 100 + Math.floor(rng() * 21) * 10;
+            }
+        }
+    });
+};
+
 const freshGame = (
     settings: GameSettings,
     mapData: Tile[],
@@ -544,6 +979,7 @@ export const createGeneratedGame = (settings: GameSettings): GameState => {
     const units = spawnUnitsForPlayers(zonedMap, settings.unitCounts, baseLocations, settings.mutators);
     const players = startingPlayers(settings, weatherRng);
     initStructureHp(zonedMap, settings, false);
+    initBankVaults(zonedMap, mapRng);
     return freshGame(settings, zonedMap, size, units, activeSeed, players);
 };
 
@@ -614,6 +1050,7 @@ export const createCustomMapGame = (settings: GameSettings, customMap: Tile[]): 
     const hasCustomZones = zonedMap.some(t => t.zone !== undefined);
     const finalMap = hasCustomZones ? zonedMap : assignVoronoiZones(zonedMap, baseLocations);
     initStructureHp(finalMap, settings, true);
+    initBankVaults(finalMap, createSeededRng(`${seedUsed}_vaults`));
 
     const units = spawnUnitsForPlayers(finalMap, settings.unitCounts, baseLocations, settings.mutators);
     const players = startingPlayers(settings, weatherRng);
@@ -729,6 +1166,7 @@ export const createChallengeGame = (current: GameSettings, challengeId: string):
     const settings = settingsForMission(current, mission);
 
     const finalMap = mission.buildMap();
+    initBankVaults(finalMap, createSeededRng(`${mission.seed}_vaults`));
     const units: Unit[] = mission.placements.map((p, idx) => {
         let unit = createUnit({
             id: `chal_${idx}`,

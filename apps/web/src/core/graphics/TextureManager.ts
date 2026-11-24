@@ -7,7 +7,7 @@ import { createReconTileTexture, createReconUnitTexture } from './TacticalReconR
 
 const TERRAIN_KEYS = [
   'PLAINS', 'FOREST', 'MOUNTAIN', 'WATER', 'BASE',
-  'ROAD', 'ROAD_H', 'BRIDGE', 'BRIDGE_V', 'BANK', 'BANK_EMPTY',
+  'ROAD', 'ROAD_H', 'BRIDGE', 'BRIDGE_V', 'TUNNEL', 'BANK', 'BANK_EMPTY',
   'BUILDING', 'BARRIER', 'SAND', 'DUNES', 'QUICKSAND', 'CANYON',
 ];
 

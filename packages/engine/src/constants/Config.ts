@@ -18,7 +18,8 @@ export const BASE_STATS = {
 
 export const BANK_STATS = {
   RANGE: 2,
-  DAMAGE: 4 // Flat damage for bank defense
+  DAMAGE: 4, // Flat damage for bank defense
+  HP: 15 // Vault integrity: breached by siege, never by Snipers
 };
 
 export const BARRIER_STATS = {
@@ -78,6 +79,7 @@ export const SHOP_ITEMS = {
   LAND_MINE: { cost: 75, name: 'Land Mine', type: 'CONSTRUCT' },
   BARRIER: { cost: 150, name: 'Deploy Barrier (x3)', type: 'CONSTRUCT' },
   BRIDGE: { cost: 100, name: 'Deploy Bridge', type: 'CONSTRUCT' }, // Consolidated
+  TUNNEL: { cost: 125, name: 'Mountain Tunnel', type: 'CONSTRUCT' },
 };
 
 // Fallback colors if sprites fail to load
@@ -91,6 +93,7 @@ export const TERRAIN_COLORS: Record<string, string> = {
   ROAD_H: '#9E9E9E',
   BRIDGE: '#8D6E63',
   BRIDGE_V: '#8D6E63',
+  TUNNEL: '#4E443E',
   BANK: '#FFD700',
   BUILDING: '#546E7A',
   BARRIER: '#263238',
@@ -114,6 +117,7 @@ export const TERRAIN_COSTS: Record<string, number> = {
   ROAD_H: 1,   
   BRIDGE: 1,
   BRIDGE_V: 1,
+  TUNNEL: 1,
   FOREST: 2, 
   MOUNTAIN: 3, // Cost 3 means walkable but expensive
   WATER: 99, 
@@ -134,6 +138,7 @@ export const TERRAIN_DEFENSE: Record<string, number> = {
   ROAD_H: 0,
   BRIDGE: 0,
   BRIDGE_V: 0,
+  TUNNEL: 0,
   FOREST: 0.4, // 40% Defense
   MOUNTAIN: 0.4, // Also provides Evasion logic
   WATER: 0,

@@ -232,7 +232,7 @@ test('Preset Maps: Bridges and Bases remain intact and navigable', () => {
     assert.equal(delta.data.filter(t => t.type === 'BASE').length, 4);
 });
 
-test('Store: AI Bank Heist auto-resolves without softlocking player turn', () => {
+test('Store: AI bank breach auto-resolves without softlocking player turn', () => {
     const map = makeGrid(8);
     map[0].type = 'BASE';
     map[0].owner = 0;
@@ -247,6 +247,8 @@ test('Store: AI Bank Heist auto-resolves without softlocking player turn', () =>
     const bank = map[2 * 8 + 2];
     bank.type = 'BANK';
     bank.hackProgress = 0;
+    bank.hp = 4;
+    bank.maxHp = 15;
     bank.bankGoldReward = 200;
     bank.bankCpReward = 10;
 
@@ -292,10 +294,10 @@ test('Store: AI Bank Heist auto-resolves without softlocking player turn', () =>
     });
 
     useGameStore.getState().executeAiAction({
-        type: 'HEIST',
+        type: 'SIEGE',
         unitId: 'ai_1',
         tileId: bank.id,
-        cost: 4
+        cost: 3
     });
 
     let state = useGameStore.getState();
@@ -1305,19 +1307,23 @@ test('Challenge Ops: All 5 missions initialize validly and trigger surviveTurns,
     assert.equal(st.matchSummary?.challengeId, 'iron_bridge_holdout');
     assert.equal(st.matchSummary?.challengeMedal, 'S');
 
-    // 3. requiredHeists (Vault Zero Fog Heist): 2nd Heist wins immediately without blocking on Bank modal
+    // 3. requiredHeists (Vault Zero Fog Heist): 2nd vault breach wins immediately without blocking on Bank modal
     useGameStore.getState().startChallenge('vault_zero_fog_heist');
     st = useGameStore.getState();
+    const vaultBank = st.mapData.find(t => t.id === '7,4')!;
+    assert.equal(vaultBank.type, 'BANK');
+    assert.equal(vaultBank.hp, 15);
     const p0Unit = st.units.find(u => u.owner === 0)!;
     useGameStore.setState({
-        units: st.units.map(u => u.id === p0Unit.id ? { ...u, tileId: '7,4' } : u),
+        mapData: st.mapData.map(t => t.id === '7,4' ? { ...t, hp: 1 } : t),
+        units: st.units.map(u => u.id === p0Unit.id ? { ...u, tileId: '6,4' } : u),
         matchStats: {
             0: { kills: 0, unitsLost: 0, damageDealt: 0, heists: 1, buildingsSecured: 0, acesPromoted: 0 },
             1: { kills: 0, unitsLost: 0, damageDealt: 0, heists: 0, buildingsSecured: 0, acesPromoted: 0 }
         },
         playerCp: { 0: 15, 1: 20 }
     });
-    useGameStore.getState().executeAiAction({ type: 'HEIST', unitId: p0Unit.id, tileId: '7,4', cost: 4 });
+    useGameStore.getState().executeAiAction({ type: 'SIEGE', unitId: p0Unit.id, tileId: '7,4', cost: 3 });
     st = useGameStore.getState();
     assert.equal(st.winner, 0);
     assert.equal(st.bankRewardPending, null);

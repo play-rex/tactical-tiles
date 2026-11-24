@@ -68,7 +68,6 @@ export type GameAction =
   | { type: 'OVERWATCH'; unitId: string; cost: number }
   | { type: 'RELOAD'; unitId: string; cost: number }
   | { type: 'SECURE'; unitId: string; tileId: string; cost: number }
-  | { type: 'HEIST'; unitId: string; tileId: string; cost: number }
   | { type: 'SIEGE'; unitId: string; tileId: string; cost: number }
   | { type: 'DEMOLISH'; unitId: string; tileId: string; cost: number }
   | { type: 'LOOT'; unitId: string; tileId: string; cost: number }
@@ -152,7 +151,7 @@ export type GameEvent =
   | {
       kind: 'structureHit';
       at: TilePoint;
-      structureType: 'BASE' | 'BARRIER';
+      structureType: 'BASE' | 'BARRIER' | 'BANK';
       damage: number;
       destroyed: boolean;
       owner?: number | null;
@@ -165,7 +164,7 @@ export type GameEvent =
   | { kind: 'promotion'; unitId: string; at: TilePoint; rank: number; label: string }
   | { kind: 'overwatchSet'; unitId: string; at: TilePoint; owner: number }
   | { kind: 'heal'; unitId: string; at: TilePoint; amount: number; item: 'MEDKIT' | 'FIRST_AID' | 'AMMO' | 'RELOAD' }
-  | { kind: 'build'; tiles: TilePoint[]; itemKey: 'BARRIER' | 'BRIDGE' }
+  | { kind: 'build'; tiles: TilePoint[]; itemKey: 'BARRIER' | 'BRIDGE' | 'TUNNEL' }
   | { kind: 'supplyLanded'; at: TilePoint; item: SupplyLootType };
 
 // ── Logs ─────────────────────────────────────────────────────────

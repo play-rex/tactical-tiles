@@ -242,6 +242,116 @@ export function drawBridges(
   }
 }
 
+/** Pass C3: Blasted Mountain TUNNEL cuttings — excavated floor, rock walls, railed drive with dark portals. */
+export function drawTunnels(
+  ctx: CanvasRenderingContext2D,
+  grid: (Tile | undefined)[][],
+  canonicalGrid: (Tile | undefined)[][],
+  gridSize: number,
+  rotation: BoardRotation = 0,
+): void {
+  const swapTunnelAxes = rotation === 90 || rotation === 270;
+  const isWall = (x: number, y: number): boolean => {
+    const n = y >= 0 && y < gridSize && x >= 0 && x < gridSize ? canonicalGrid[y][x] : undefined;
+    return !n || n.type === 'MOUNTAIN';
+  };
+  for (let y = 0; y < gridSize; y++) {
+    for (let x = 0; x < gridSize; x++) {
+      const t = grid[y]?.[x];
+      if (!t || t.type !== 'TUNNEL') continue;
+      const px = x * TILE_SIZE;
+      const py = y * TILE_SIZE;
+      // Portal axis comes from the canonical (unrotated) neighbors — like the bridge
+      // type — then axis-swaps for 90/270 rotations, so portals stay glued to the gap.
+      const openH = !isWall(t.x - 1, t.y) || !isWall(t.x + 1, t.y);
+      const openV = !isWall(t.x, t.y - 1) || !isWall(t.x, t.y + 1);
+      const vertical = swapTunnelAxes ? openH && !openV : openV && !openH;
+      ctx.save();
+      if (vertical) {
+        ctx.translate(px + 32, py + 32);
+        ctx.rotate(Math.PI / 2);
+        ctx.translate(-32, -32);
+      } else {
+        ctx.translate(px, py);
+      }
+      // Excavated rock floor
+      ctx.fillStyle = '#453B34';
+      ctx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+      // Blasted speckles (stable per tile)
+      for (let i = 0; i < 42; i++) {
+        const sx = Math.floor(hash3(t.x * 7 + i, t.y * 13 + i, 77) * 60) + 2;
+        const sy = Math.floor(hash3(t.x * 11 + i, t.y * 5 + i, 78) * 60) + 2;
+        ctx.fillStyle = i % 2 === 0 ? '#52463D' : '#332B26';
+        ctx.fillRect(sx, sy, 2, 2);
+      }
+      // Rock walls top & bottom with sunlit inner rims
+      ctx.fillStyle = '#2B2420';
+      ctx.fillRect(0, 0, TILE_SIZE, 13);
+      ctx.fillRect(0, 51, TILE_SIZE, 13);
+      ctx.fillStyle = '#5A4E44';
+      ctx.fillRect(0, 12, TILE_SIZE, 2);
+      ctx.fillRect(0, 50, TILE_SIZE, 2);
+      // Rock cracks on the walls
+      ctx.strokeStyle = '#1B1512';
+      ctx.lineWidth = 1.4;
+      for (let i = 0; i < 3; i++) {
+        const cx = 8 + Math.floor(hash3(t.x * 3 + i, t.y * 9 + i, 79) * 48);
+        ctx.beginPath();
+        ctx.moveTo(cx, 2);
+        ctx.lineTo(cx + 3, 7);
+        ctx.lineTo(cx - 2, 11);
+        ctx.stroke();
+        const bx = 8 + Math.floor(hash3(t.x * 5 + i, t.y * 2 + i, 80) * 48);
+        ctx.beginPath();
+        ctx.moveTo(bx, 62);
+        ctx.lineTo(bx + 3, 57);
+        ctx.lineTo(bx - 2, 53);
+        ctx.stroke();
+      }
+      // Mine-cart rails along the drive with timber sleepers
+      ctx.fillStyle = '#4A3826';
+      for (let sx = 4; sx < TILE_SIZE; sx += 9) {
+        ctx.fillRect(sx, 24, 4, 18);
+      }
+      ctx.fillStyle = '#8A93A0';
+      ctx.fillRect(0, 27, TILE_SIZE, 2.4);
+      ctx.fillRect(0, 36, TILE_SIZE, 2.4);
+      ctx.fillStyle = '#C7CEDA';
+      ctx.fillRect(0, 27, TILE_SIZE, 1);
+      ctx.fillRect(0, 36, TILE_SIZE, 1);
+      // Dark portal mouths left & right (tunnel continues into the rock)
+      ctx.fillStyle = '#0A0C10';
+      ctx.fillRect(0, 14, 8, 38);
+      ctx.fillRect(TILE_SIZE - 8, 14, 8, 38);
+      // Timber portal frames
+      ctx.fillStyle = '#6B4A2F';
+      ctx.fillRect(8, 14, 3, 38);
+      ctx.fillRect(TILE_SIZE - 11, 14, 3, 38);
+      ctx.fillRect(8, 12, TILE_SIZE - 16, 3);
+      ctx.fillRect(8, 51, TILE_SIZE - 16, 3);
+      ctx.fillStyle = '#9C7043';
+      ctx.fillRect(8, 12, TILE_SIZE - 16, 1.2);
+      // Amber work lamps on both rock walls with soft glow
+      const lamp = (lx: number, ly: number): void => {
+        const g = ctx.createRadialGradient(lx, ly, 0.5, lx, ly, 9);
+        g.addColorStop(0, 'rgba(245, 185, 66, 0.85)');
+        g.addColorStop(1, 'rgba(245, 185, 66, 0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(lx - 9, ly - 9, 18, 18);
+        ctx.fillStyle = '#F5B942';
+        ctx.beginPath();
+        ctx.arc(lx, ly, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      };
+      lamp(20, 7);
+      lamp(44, 7);
+      lamp(20, 57);
+      lamp(44, 57);
+      ctx.restore();
+    }
+  }
+}
+
 /** Draws one of 4 distinct architectural Bank Vault styles (intact + breached/looted states). */
 function drawBankVariant(
   ctx: CanvasRenderingContext2D,

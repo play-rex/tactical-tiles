@@ -1,14 +1,17 @@
 import { Tile } from '@tactical/engine/types';
 import { TILE_SIZE } from '@tactical/engine/constants/Config';
 import {
+  classifyForestClusters,
   DESERT_TYPES,
   findMountainClusters,
   ForestVariant,
+  GroveTheme,
   hash2,
   hash3,
   isCanyonLike,
   isDesertNeighborhood,
   isWaterLike,
+  isWaterNeighborhood,
   MountainCluster,
   MountainNode,
   pickDuneVariant,
@@ -28,10 +31,10 @@ export const NATURE_PALETTE = {
   waterDeep: '#134766',
   bankSand: '#B59E72',
   bankMoss: '#788C57',
-  canyonRimLit: '#A56D4A',
-  canyonMid: '#73422D',
-  canyonWall: '#49251C',
-  canyonFloor: '#221310',
+  canyonRimLit: '#B87A4E',
+  canyonMid: '#8C4E31',
+  canyonWall: '#5E2E1D',
+  canyonFloor: '#3A1D15',
   rockDark: '#36404F',
   rockMid: '#647082',
   rockLit: '#ABB6C6',
@@ -68,26 +71,66 @@ function drawPineCrown(
   ctx.fill();
 }
 
-/** Helper: draw a scalloped multi-lobed broadleaf tree crown. */
-function drawScallopedCrown(
+/** Helper: draw a rich organic foliage crown built from asymmetric scalloped leaf tufts (never a flat candy orb). */
+function drawFoliageCrown(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
   r: number,
   seed: number,
-  fill: string,
+  dark: string,
+  mid: string,
+  lit: string,
+  tip: string,
 ): void {
-  ctx.fillStyle = fill;
+  // Base dark silhouette with 7 organic leaf lobes
+  ctx.fillStyle = dark;
   ctx.beginPath();
-  ctx.arc(cx, cy, r * 0.78, 0, Math.PI * 2);
-  const lobes = 5;
-  for (let i = 0; i < lobes; i++) {
-    const a = seed * Math.PI * 2 + (i * Math.PI * 2) / lobes;
-    const lx = cx + Math.cos(a) * r * 0.42;
-    const ly = cy + Math.sin(a) * r * 0.42;
-    ctx.moveTo(lx + r * 0.56, ly);
-    ctx.arc(lx, ly, r * 0.56, 0, Math.PI * 2);
+  ctx.arc(cx, cy, r * 0.68, 0, Math.PI * 2);
+  for (let i = 0; i < 7; i++) {
+    const a = seed * Math.PI * 2 + (i * Math.PI * 2) / 7 + (i % 2 === 0 ? 0.14 : -0.11);
+    const dist = r * (0.42 + (i % 3) * 0.08);
+    const lr = r * (0.42 + ((i + 1) % 2) * 0.09);
+    const lx = cx + Math.cos(a) * dist;
+    const ly = cy + Math.sin(a) * dist;
+    ctx.moveTo(lx + lr, ly);
+    ctx.arc(lx, ly, lr, 0, Math.PI * 2);
   }
+  ctx.fill();
+
+  // Midtone sunlit bough clusters offset slightly NW
+  ctx.fillStyle = mid;
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = seed * Math.PI * 2 + 0.35 + (i * Math.PI * 2) / 6;
+    const dist = r * (0.28 + (i % 2) * 0.14);
+    const lr = r * (0.36 + (i % 3) * 0.05);
+    const lx = cx - 1.4 + Math.cos(a) * dist;
+    const ly = cy - 1.4 + Math.sin(a) * dist;
+    ctx.moveTo(lx + lr, ly);
+    ctx.arc(lx, ly, lr, 0, Math.PI * 2);
+  }
+  ctx.fill();
+
+  // Upper dappled sunlit leaf tufts on the NW crown
+  ctx.fillStyle = lit;
+  ctx.beginPath();
+  for (let i = 0; i < 4; i++) {
+    const a = -Math.PI * 0.85 + i * 0.55 + (seed - 0.5) * 0.4;
+    const dist = r * (0.22 + (i % 2) * 0.16);
+    const lr = r * (0.22 + (i === 1 ? 0.07 : 0));
+    const lx = cx - 1.8 + Math.cos(a) * dist;
+    const ly = cy - 1.8 + Math.sin(a) * dist;
+    ctx.moveTo(lx + lr, ly);
+    ctx.arc(lx, ly, lr, 0, Math.PI * 2);
+  }
+  ctx.fill();
+
+  // Subtle top highlight leaf flecks
+  ctx.fillStyle = tip;
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.28, cy - r * 0.26, r * 0.13, 0, Math.PI * 2);
+  ctx.arc(cx - r * 0.06, cy - r * 0.36, r * 0.10, 0, Math.PI * 2);
   ctx.fill();
 }
 
@@ -960,8 +1003,9 @@ function drawMassifSummit(
     const downStretch = Math.sin(ang) > 0 ? 1.14 : 0.88;
     const fx = cx + Math.cos(ang) * rad;
     const fy = cy + 4 + Math.sin(ang) * rad * downStretch;
-    const snowReach = 0.32 + elevation * 0.24 + (hash3(tile.x, tile.y + k * 7, 622) - 0.4) * 0.16;
-    feet.push({ x: fx, y: fy, angle: ang, snowReach });
+    // Sleek, realistic alpine snowline (crisp high peaks rather than puffy blobs)
+    const snowReach = 0.21 + (elevation - 0.5) * 0.26 + (hash3(tile.x, tile.y + k * 7, 622) - 0.45) * 0.14;
+    feet.push({ x: fx, y: fy, angle: ang, snowReach: Math.max(0.14, Math.min(0.44, snowReach)) });
   }
 
   // Paint each triangular slope facet with true NW directional lighting
@@ -1043,7 +1087,7 @@ function drawMassifSummit(
       ctx.lineWidth = 1.1;
       ctx.stroke();
     }
-  } else if (elevation >= 0.53) {
+  } else if (isHeroSummit || elevation >= 0.67) {
     for (let k = 0; k < ribCount; k++) {
       const f1 = feet[k];
       const f2 = feet[(k + 1) % ribCount];
@@ -1056,12 +1100,12 @@ function drawMassifSummit(
       const s1y = peakY + (f1.y - peakY) * f1.snowReach;
       const s2x = peakX + (f2.x - peakX) * f2.snowReach;
       const s2y = peakY + (f2.y - peakY) * f2.snowReach;
-      // Glacial snow dips slightly deeper into the concave gully between two ribs
-      const gullyReach = Math.min(0.68, (f1.snowReach + f2.snowReach) * 0.55);
+      // Glacial snow dips narrowly into concave couloirs between rock ribs
+      const gullyReach = Math.min(0.48, (f1.snowReach + f2.snowReach) * 0.58);
       const gx = peakX + ((f1.x + f2.x) * 0.5 - peakX) * gullyReach;
       const gy = peakY + ((f1.y + f2.y) * 0.5 - peakY) * gullyReach;
 
-      ctx.fillStyle = litDot > 0.05 ? '#EFF5FB' : litDot > -0.3 ? '#D1DFEE' : '#ACBFD6';
+      ctx.fillStyle = litDot > 0.08 ? '#EEF5FC' : litDot > -0.28 ? '#C9D9EB' : '#9EB4CE';
       ctx.beginPath();
       ctx.moveTo(peakX, peakY);
       ctx.lineTo(s1x, s1y);
@@ -1069,6 +1113,22 @@ function drawMassifSummit(
       ctx.lineTo(s2x, s2y);
       ctx.closePath();
       ctx.fill();
+    }
+  } else if (elevation >= 0.52) {
+    // Lower shoulder peaks show raw chiseled granite with thin frost ridge streaks
+    ctx.strokeStyle = 'rgba(232, 241, 250, 0.72)';
+    ctx.lineWidth = 1.6;
+    for (let k = 0; k < ribCount; k++) {
+      const f = feet[k];
+      const dx = f.x - peakX;
+      const dy = f.y - peakY;
+      const len = Math.hypot(dx, dy) || 1;
+      if ((dx / len) * SUN_DIR_X + (dy / len) * SUN_DIR_Y > 0.1) {
+        ctx.beginPath();
+        ctx.moveTo(peakX, peakY);
+        ctx.lineTo(peakX + dx * 0.28, peakY + dy * 0.28);
+        ctx.stroke();
+      }
     }
   }
 
@@ -1200,28 +1260,28 @@ function drawUnifiedMountainRange(
     ctx.lineTo(s.midX + darkNX * flankWidth * 0.78, s.midY + 5 + darkNY * flankWidth * 0.78);
     ctx.stroke();
 
-    // Connected glacial snow ridge cornice across high alpine saddles
-    if (!isDesert && Math.min(s.a.elevation, s.b.elevation) >= 0.58) {
-      const snowW = 5 + avgElev * 4;
+    // Slender glacial snow ridge cornice ONLY across the highest alpine saddles
+    if (!isDesert && Math.min(s.a.elevation, s.b.elevation) >= 0.68) {
+      const snowW = 3.2 + avgElev * 2.8;
       ctx.fillStyle = '#E6EFF8';
       ctx.beginPath();
       ctx.moveTo(s.a.peakX, s.a.peakY);
       ctx.lineTo(s.midX, s.midY);
       ctx.lineTo(s.b.peakX, s.b.peakY);
       ctx.lineTo(s.b.peakX + litNX * snowW, s.b.peakY + litNY * snowW);
-      ctx.lineTo(s.midX + litNX * (snowW + 2), s.midY + litNY * (snowW + 2));
+      ctx.lineTo(s.midX + litNX * (snowW + 1.2), s.midY + litNY * (snowW + 1.2));
       ctx.lineTo(s.a.peakX + litNX * snowW, s.a.peakY + litNY * snowW);
       ctx.closePath();
       ctx.fill();
 
-      ctx.fillStyle = '#B5C7DD';
+      ctx.fillStyle = '#ADC2DA';
       ctx.beginPath();
       ctx.moveTo(s.a.peakX, s.a.peakY);
       ctx.lineTo(s.midX, s.midY);
       ctx.lineTo(s.b.peakX, s.b.peakY);
-      ctx.lineTo(s.b.peakX + darkNX * snowW * 0.72, s.b.peakY + darkNY * snowW * 0.72);
-      ctx.lineTo(s.midX + darkNX * (snowW * 0.8), s.midY + darkNY * (snowW * 0.8));
-      ctx.lineTo(s.a.peakX + darkNX * snowW * 0.72, s.a.peakY + darkNY * snowW * 0.72);
+      ctx.lineTo(s.b.peakX + darkNX * snowW * 0.65, s.b.peakY + darkNY * snowW * 0.65);
+      ctx.lineTo(s.midX + darkNX * (snowW * 0.72), s.midY + darkNY * (snowW * 0.72));
+      ctx.lineTo(s.a.peakX + darkNX * snowW * 0.65, s.a.peakY + darkNY * snowW * 0.65);
       ctx.closePath();
       ctx.fill();
     }
@@ -1535,15 +1595,94 @@ interface TreeDrawItem {
   variant: ForestVariant;
   seed: number;
   colorPick: number;
+  isStandalone: boolean;
 }
 
-/** Pass D3: 5 Multi-Canopy FOREST Variations (Conifer Pine, Broadleaf Oak, Autumn Mix, Old Growth, Desert Oasis). */
+/** Helper: draw a draping silvery-teal weeping willow crown. */
+function drawWillowCrown(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  seed: number,
+): void {
+  const fronds = 10;
+  ctx.fillStyle = '#1E524B';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.82, 0, Math.PI * 2);
+  ctx.fill();
+
+  for (let i = 0; i < fronds; i++) {
+    const a = seed * Math.PI * 2 + (i * Math.PI * 2) / fronds;
+    const len = r * (0.94 + (i % 2) * 0.14);
+    const tx = cx + Math.cos(a) * len;
+    const ty = cy + Math.sin(a) * len;
+    const isLit = Math.cos(a + Math.PI * 0.75) > -0.1;
+    ctx.strokeStyle = isLit ? '#6BC2B0' : '#337A6F';
+    ctx.lineWidth = r * 0.24;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.quadraticCurveTo(cx + Math.cos(a + 0.18) * len * 0.55, cy + Math.sin(a + 0.18) * len * 0.55, tx, ty);
+    ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
+  ctx.fillStyle = '#B5EDE1';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.18, cy - r * 0.18, r * 0.30, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/** Helper: draw a desert savanna umbrella acacia canopy (alternate to oasis palms). */
+function drawAcaciaTree(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  seed: number,
+): void {
+  drawFoliageCrown(ctx, cx, cy, r * 0.96, seed, '#3D5A27', '#628738', '#8EB049', '#BED46C');
+}
+
+/** Picks a harmonious tree species for an individual tree inside a themed 4–6 tile Forest Grove. */
+function pickTreeSpeciesInGrove(theme: GroveTheme, roll: number): ForestVariant {
+  if (theme === 'DESERT_OASIS') return 'DESERT_OASIS';
+  if (theme === 'AUTUMN_RESERVE') {
+    if (roll < 0.34) return 'GOLDEN_BIRCH';
+    if (roll < 0.64) return 'CRIMSON_MAPLE';
+    if (roll < 0.86) return 'BROADLEAF_OAK';
+    return 'CONIFER_PINE';
+  }
+  if (theme === 'ALPINE_TIMBER') {
+    if (roll < 0.58) return 'CONIFER_PINE';
+    if (roll < 0.78) return 'BROADLEAF_OAK';
+    if (roll < 0.92) return 'GOLDEN_BIRCH';
+    return 'RIVERSIDE_WILLOW';
+  }
+  if (theme === 'SPRING_GLADE') {
+    if (roll < 0.42) return 'BROADLEAF_OAK';
+    if (roll < 0.72) return 'SAKURA_BLOSSOM';
+    if (roll < 0.88) return 'GOLDEN_BIRCH';
+    return 'RIVERSIDE_WILLOW';
+  }
+  // EMERALD_DEEPWOOD
+  if (roll < 0.52) return 'BROADLEAF_OAK';
+  if (roll < 0.78) return 'CONIFER_PINE';
+  if (roll < 0.90) return 'GOLDEN_BIRCH';
+  return 'CRIMSON_MAPLE';
+}
+
+/**
+ * Pass D3: 7-Species Multi-Color Trees with Distinct 4–6 Tile Cohesive Forest Groves vs.
+ * Sculptural Individual Standalone Specimen Trees.
+ */
 export function drawForests(
   ctx: CanvasRenderingContext2D,
   grid: (Tile | undefined)[][],
   canonicalGrid: (Tile | undefined)[][],
   gridSize: number,
 ): void {
+  const clusters = classifyForestClusters(grid, canonicalGrid, gridSize);
   const trees: TreeDrawItem[] = [];
 
   for (let y = 0; y < gridSize; y++) {
@@ -1552,180 +1691,194 @@ export function drawForests(
       if (!fTile || fTile.type !== 'FOREST') continue;
       const px = x * TILE_SIZE;
       const py = y * TILE_SIZE;
-      const isDesert = isDesertNeighborhood(fTile, canonicalGrid, gridSize);
-      const variant = pickForestVariant(fTile, isDesert, gridSize);
+      const cluster = clusters.get(fTile.id);
+      const isGrove = Boolean(cluster && cluster.size >= 3);
+      const isDesert = cluster ? cluster.isDesert : isDesertNeighborhood(fTile, canonicalGrid, gridSize);
+      const isNearWater = isWaterNeighborhood(fTile, canonicalGrid, gridSize);
 
-      // Soft forest undergrowth / oasis soil bed (extends toward adjacent forest tiles)
-      const fN = grid[y - 1]?.[x]?.type === 'FOREST';
-      const fS = grid[y + 1]?.[x]?.type === 'FOREST';
-      const fW = grid[y]?.[x - 1]?.type === 'FOREST';
-      const fE = grid[y]?.[x + 1]?.type === 'FOREST';
+      if (isGrove && cluster) {
+        // Cohesive 4–6 tile Forest Grove: rich connected mossy woodland floor bridging all tiles
+        const fN = grid[y - 1]?.[x]?.type === 'FOREST';
+        const fS = grid[y + 1]?.[x]?.type === 'FOREST';
+        const fW = grid[y]?.[x - 1]?.type === 'FOREST';
+        const fE = grid[y]?.[x + 1]?.type === 'FOREST';
 
-      ctx.fillStyle =
-        variant === 'DESERT_OASIS'
-          ? 'rgba(84, 112, 54, 0.34)'
-          : variant === 'AUTUMN_MIX'
-            ? 'rgba(46, 54, 22, 0.34)'
-            : 'rgba(18, 42, 18, 0.36)';
-      ctx.beginPath();
-      ctx.arc(px + 32, py + 32, 30, 0, Math.PI * 2);
-      if (fE) ctx.arc(px + 54, py + 32, 22, 0, Math.PI * 2);
-      if (fS) ctx.arc(px + 32, py + 54, 22, 0, Math.PI * 2);
-      if (fW) ctx.arc(px + 10, py + 32, 22, 0, Math.PI * 2);
-      if (fN) ctx.arc(px + 32, py + 10, 22, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Old-growth subtle fallen log detail peeking beneath canopies
-      if (variant === 'OLD_GROWTH' && hash3(fTile.x, fTile.y, 260) > 0.35) {
-        const lx = px + 18 + hash3(fTile.x, fTile.y, 261) * 24;
-        const ly = py + 22 + hash3(fTile.x, fTile.y, 262) * 20;
-        const la = (hash3(fTile.x, fTile.y, 263) - 0.5) * 1.4;
-        ctx.save();
-        ctx.translate(lx, ly);
-        ctx.rotate(la);
-        ctx.fillStyle = '#5C432D';
+        ctx.fillStyle =
+          cluster.theme === 'DESERT_OASIS'
+            ? 'rgba(78, 126, 58, 0.40)'
+            : cluster.theme === 'AUTUMN_RESERVE'
+              ? 'rgba(72, 54, 24, 0.36)'
+              : cluster.theme === 'SPRING_GLADE'
+                ? 'rgba(42, 74, 38, 0.34)'
+                : 'rgba(18, 46, 22, 0.42)';
         ctx.beginPath();
-        ctx.roundRect(-10, -2.2, 20, 4.4, 2);
+        ctx.arc(px + 32, py + 32, 33, 0, Math.PI * 2);
+        if (fE) ctx.arc(px + 58, py + 32, 26, 0, Math.PI * 2);
+        if (fS) ctx.arc(px + 32, py + 58, 26, 0, Math.PI * 2);
+        if (fW) ctx.arc(px + 6, py + 32, 26, 0, Math.PI * 2);
+        if (fN) ctx.arc(px + 32, py + 6, 26, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = '#876646';
-        ctx.fillRect(-8, -1.6, 16, 1.5);
-        ctx.restore();
-      }
 
-      // Populate species-tailored canopy counts & radii
-      if (variant === 'OLD_GROWTH') {
-        // 2 massive ancient crowns + 3 understory trees
-        for (let i = 0; i < 5; i++) {
+        // Subtle desert oasis water glint or woodland fallen mossy log inside deep groves
+        if (cluster.theme === 'DESERT_OASIS' && hash3(fTile.x, fTile.y, 265) > 0.55) {
+          ctx.fillStyle = 'rgba(43, 148, 168, 0.52)';
+          ctx.beginPath();
+          ctx.ellipse(px + 32, py + 34, 15, 10, hash3(fTile.x, fTile.y, 266) * Math.PI, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (cluster.theme !== 'DESERT_OASIS' && hash3(fTile.x, fTile.y, 260) > 0.52) {
+          const lx = px + 18 + hash3(fTile.x, fTile.y, 261) * 26;
+          const ly = py + 22 + hash3(fTile.x, fTile.y, 262) * 20;
+          const la = (hash3(fTile.x, fTile.y, 263) - 0.5) * 1.4;
+          ctx.save();
+          ctx.translate(lx, ly);
+          ctx.rotate(la);
+          ctx.fillStyle = '#583E28';
+          ctx.beginPath();
+          ctx.roundRect(-10, -2.2, 20, 4.4, 2);
+          ctx.fill();
+          ctx.fillStyle = '#856444';
+          ctx.fillRect(-8, -1.5, 16, 1.4);
+          ctx.restore();
+        }
+
+        // Dense overlapping multi-species forest canopies (5–6 crowns per tile -> true deep forest feel!)
+        const count = cluster.theme === 'DESERT_OASIS' ? 4 : 5;
+        for (let i = 0; i < count; i++) {
           const rx = hash3(fTile.x * 7 + i, fTile.y * 13, 270);
           const ry = hash3(fTile.x * 19, fTile.y * 5 + i, 271);
-          const big = i < 2;
+          const speciesRoll = hash3(fTile.x * 5 + i * 3, fTile.y * 11 + i, 274);
+          const species = pickTreeSpeciesInGrove(cluster.theme, speciesRoll);
+          const big = i === 0;
           trees.push({
-            cx: px + (big ? 16 + i * 26 + (rx - 0.5) * 12 : 10 + rx * 44),
-            cy: py + (big ? 18 + (i === 0 ? 4 : 20) + (ry - 0.5) * 12 : 10 + ry * 44),
-            r: big ? 16 + rx * 4 : 9 + ry * 4.5,
-            variant,
-            seed: hash3(fTile.x + i, fTile.y + i, 272),
+            cx: px + (big ? 24 + rx * 16 : 6 + rx * 52),
+            cy: py + (big ? 24 + ry * 16 : 6 + ry * 52),
+            r: big ? 15.5 + rx * 4.2 : 10.5 + ry * 5.8,
+            variant: species,
+            seed: hash3(fTile.x + i * 3, fTile.y + i * 7, 272),
             colorPick: hash3(fTile.x * 3 + i, fTile.y * 7, 273),
-          });
-        }
-      } else if (variant === 'DESERT_OASIS') {
-        // 3–4 dramatic oasis palms
-        const palmCount = 3 + (hash3(fTile.x, fTile.y, 275) > 0.5 ? 1 : 0);
-        for (let i = 0; i < palmCount; i++) {
-          const rx = hash3(fTile.x * 11 + i, fTile.y * 7, 276);
-          const ry = hash3(fTile.x * 5, fTile.y * 13 + i, 277);
-          trees.push({
-            cx: px + 13 + rx * 38,
-            cy: py + 13 + ry * 38,
-            r: 12.5 + hash3(i + fTile.x, fTile.y + i, 278) * 5.5,
-            variant,
-            seed: hash3(fTile.x + i * 5, fTile.y, 279),
-            colorPick: rx,
+            isStandalone: false,
           });
         }
       } else {
-        const count = variant === 'CONIFER_PINE' ? 6 : 5;
-        for (let i = 0; i < count; i++) {
-          const rx = hash3(fTile.x * 7 + i, fTile.y * 13, 280);
-          const ry = hash3(fTile.x * 19, fTile.y * 5 + i, 281);
+        // Individual Standalone Specimen Tree: crisp organic grass base + 1 hero sculptural tree (+ occasional sapling!)
+        const variant = pickForestVariant(fTile, isDesert, gridSize, isNearWater);
+        const ox = (hash3(fTile.x, fTile.y, 286) - 0.5) * 10;
+        const oy = (hash3(fTile.x, fTile.y, 287) - 0.5) * 10;
+        const heroX = px + 32 + ox;
+        const heroY = py + 31 + oy;
+
+        // Subtle soft ground shade ring beneath the standalone tree
+        ctx.fillStyle = isDesert ? 'rgba(92, 108, 52, 0.24)' : 'rgba(22, 46, 20, 0.22)';
+        ctx.beginPath();
+        ctx.ellipse(heroX, heroY + 2, 22, 18, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Peeking warm tree trunk anchor at base
+        ctx.fillStyle = '#5C3D24';
+        ctx.beginPath();
+        ctx.ellipse(heroX + 2.5, heroY + 11, 3.6, 5.2, -0.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        const heroR = variant === 'DESERT_OASIS' ? 19 : 17.5 + hash3(fTile.x, fTile.y, 288) * 3.5;
+        trees.push({
+          cx: heroX,
+          cy: heroY,
+          r: heroR,
+          variant,
+          seed: hash3(fTile.x * 5, fTile.y * 7, 289),
+          colorPick: hash3(fTile.x * 9, fTile.y * 3, 290),
+          isStandalone: true,
+        });
+
+        // 42% of standalone tiles pair the hero tree with 1 charming smaller companion sapling
+        if (hash3(fTile.x, fTile.y, 291) > 0.58 && gridSize > 1) {
+          const sa = hash3(fTile.x, fTile.y, 292) * Math.PI * 2;
+          const sx = Math.max(px + 12, Math.min(px + 52, heroX + Math.cos(sa) * 18));
+          const sy = Math.max(py + 12, Math.min(py + 52, heroY + Math.sin(sa) * 16));
           trees.push({
-            cx: px + 10 + rx * 44,
-            cy: py + 10 + ry * 44,
-            r:
-              variant === 'CONIFER_PINE'
-                ? 10.5 + hash3(i + fTile.x, fTile.y + i, 282) * 6.5
-                : 11 + hash3(i + fTile.x, fTile.y + i, 282) * 6.5,
+            cx: sx,
+            cy: sy,
+            r: 8.5 + hash3(fTile.x, fTile.y, 293) * 3.0,
             variant,
-            seed: hash3(fTile.x + i * 3, fTile.y + i * 7, 283),
-            colorPick: hash3(fTile.x * 5 + i, fTile.y * 11 + i, 284),
+            seed: hash3(fTile.x + 3, fTile.y + 5, 294),
+            colorPick: hash3(fTile.x + 7, fTile.y + 1, 295),
+            isStandalone: true,
           });
         }
       }
     }
   }
 
-  // Pass 1: Unified SE cast shadows beneath all trees
-  ctx.fillStyle = 'rgba(12, 22, 16, 0.36)';
+  // Pass 1: Unified SE cast shadows beneath all canopies
   for (const tr of trees) {
+    const shX = tr.isStandalone ? 7.5 : 6.2;
+    const shY = tr.isStandalone ? 8.5 : 7.2;
     if (tr.variant === 'CONIFER_PINE') {
-      drawPineCrown(ctx, tr.cx + 6.5, tr.cy + 7.5, tr.r * 0.94, tr.seed * Math.PI, 8, 'rgba(10, 20, 15, 0.38)');
+      drawPineCrown(ctx, tr.cx + shX, tr.cy + shY, tr.r * 0.94, tr.seed * Math.PI, 8, 'rgba(10, 20, 15, 0.36)');
     } else if (tr.variant === 'DESERT_OASIS') {
       ctx.fillStyle = 'rgba(42, 34, 18, 0.28)';
       ctx.beginPath();
-      ctx.ellipse(tr.cx + 6, tr.cy + 7, tr.r * 0.85, tr.r * 0.72, tr.seed, 0, Math.PI * 2);
+      ctx.ellipse(tr.cx + shX, tr.cy + shY, tr.r * 0.86, tr.r * 0.72, tr.seed, 0, Math.PI * 2);
       ctx.fill();
     } else {
-      ctx.fillStyle = 'rgba(12, 22, 16, 0.36)';
+      ctx.fillStyle = 'rgba(12, 22, 16, 0.34)';
       ctx.beginPath();
-      ctx.arc(tr.cx + 6.5, tr.cy + 7.5, tr.r * 0.94, 0, Math.PI * 2);
+      ctx.arc(tr.cx + shX, tr.cy + shY, tr.r * 0.92, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // Pass 2: Layered species canopies
+  // Pass 2: Layered 7-species colorful canopies (sorted slightly by radius so big crowns overlap saplings nicely)
   for (const tr of trees) {
     if (tr.variant === 'CONIFER_PINE') {
+      // Blue-Spruce / Alpine Pine Conifer
       const rot = tr.seed * Math.PI * 2;
-      drawPineCrown(ctx, tr.cx, tr.cy, tr.r, rot, 8, '#143522');
-      drawPineCrown(ctx, tr.cx - 1.2, tr.cy - 1.2, tr.r * 0.74, rot + 0.35, 7, '#225937');
-      drawPineCrown(ctx, tr.cx - 2.3, tr.cy - 2.3, tr.r * 0.44, rot + 0.7, 6, '#3D824E');
-      ctx.fillStyle = '#75B87B';
+      const isBlueSpruce = tr.colorPick > 0.45;
+      drawPineCrown(ctx, tr.cx, tr.cy, tr.r, rot, 8, isBlueSpruce ? '#113A2F' : '#143822');
+      drawPineCrown(ctx, tr.cx - 1.3, tr.cy - 1.3, tr.r * 0.75, rot + 0.35, 7, isBlueSpruce ? '#1F6351' : '#236339');
+      drawPineCrown(ctx, tr.cx - 2.4, tr.cy - 2.4, tr.r * 0.46, rot + 0.7, 6, isBlueSpruce ? '#3E967B' : '#459457');
+      ctx.fillStyle = isBlueSpruce ? '#88D8BC' : '#82CB89';
       ctx.beginPath();
-      ctx.arc(tr.cx - 2.6, tr.cy - 2.6, tr.r * 0.14, 0, Math.PI * 2);
+      ctx.arc(tr.cx - 2.8, tr.cy - 2.8, tr.r * 0.15, 0, Math.PI * 2);
       ctx.fill();
     } else if (tr.variant === 'DESERT_OASIS') {
-      drawPalmTree(ctx, tr.cx, tr.cy, tr.r, tr.seed);
-    } else if (tr.variant === 'AUTUMN_MIX') {
-      // Blend emerald/olive woodland crowns with warm amber, ochre & russet foliage!
-      let dark = '#1E4625';
-      let mid = '#306B36';
-      let lit = '#549746';
-      if (tr.colorPick < 0.26) {
-        // Golden amber birch
-        dark = '#7B4E17';
-        mid = '#B97A1F';
-        lit = '#E5AD3B';
-      } else if (tr.colorPick < 0.46) {
-        // Warm russet maple
-        dark = '#6E2F1A';
-        mid = '#A64A25';
-        lit = '#D67338';
-      } else if (tr.colorPick < 0.62) {
-        // Olive-gold crown
-        dark = '#3F521E';
-        mid = '#667E2B';
-        lit = '#95AC42';
+      if (tr.colorPick > 0.65) {
+        drawAcaciaTree(ctx, tr.cx, tr.cy, tr.r, tr.seed);
+      } else {
+        drawPalmTree(ctx, tr.cx, tr.cy, tr.r, tr.seed);
       }
-      drawScallopedCrown(ctx, tr.cx, tr.cy, tr.r, tr.seed, dark);
-      drawScallopedCrown(ctx, tr.cx - 1.4, tr.cy - 1.4, tr.r * 0.76, tr.seed + 0.2, mid);
-      ctx.fillStyle = lit;
-      ctx.beginPath();
-      ctx.arc(tr.cx - 3.2, tr.cy - 3.2, tr.r * 0.38, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (tr.variant === 'OLD_GROWTH') {
-      // Rich deep emerald ancient crowns with dappled multi-spot sunlit leaves
-      drawScallopedCrown(ctx, tr.cx, tr.cy, tr.r, tr.seed, '#163A1F');
-      drawScallopedCrown(ctx, tr.cx - 1.6, tr.cy - 1.6, tr.r * 0.78, tr.seed + 0.15, '#255B2D');
-      ctx.fillStyle = '#42843E';
-      ctx.beginPath();
-      ctx.arc(tr.cx - 3.5, tr.cy - 3.5, tr.r * 0.38, 0, Math.PI * 2);
-      ctx.arc(tr.cx + tr.r * 0.14, tr.cy - tr.r * 0.28, tr.r * 0.24, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#6FB058';
-      ctx.beginPath();
-      ctx.arc(tr.cx - 4.2, tr.cy - 4.2, tr.r * 0.18, 0, Math.PI * 2);
-      ctx.fill();
+    } else if (tr.variant === 'RIVERSIDE_WILLOW') {
+      drawWillowCrown(ctx, tr.cx, tr.cy, tr.r, tr.seed);
+    } else if (tr.variant === 'GOLDEN_BIRCH') {
+      // Natural Warm Golden-Ochre Birch (earthy honey-amber foliage, zero neon!)
+      drawFoliageCrown(ctx, tr.cx, tr.cy, tr.r, tr.seed, '#6F4A16', '#A87922', '#D9AA3C', '#F2D679');
+    } else if (tr.variant === 'CRIMSON_MAPLE') {
+      // Natural Autumn Russet & Scarlet Maple
+      drawFoliageCrown(ctx, tr.cx, tr.cy, tr.r, tr.seed, '#5D2419', '#993C24', '#CC5C30', '#E8925A');
+    } else if (tr.variant === 'SAKURA_BLOSSOM') {
+      // Natural Dusty-Rose Spring Cherry Blossom
+      drawFoliageCrown(ctx, tr.cx, tr.cy, tr.r, tr.seed, '#733B53', '#B0617F', '#DE93B0', '#F7D5E4');
+      if (tr.isStandalone && tr.r > 13) {
+        ctx.fillStyle = 'rgba(247, 213, 228, 0.72)';
+        ctx.beginPath();
+        ctx.arc(tr.cx + tr.r * 0.85, tr.cy + tr.r * 0.65, 1.4, 0, Math.PI * 2);
+        ctx.arc(tr.cx - tr.r * 0.72, tr.cy + tr.r * 0.78, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
     } else {
-      // BROADLEAF_OAK: Lush scalloped oak/beech foliage
-      const dark = tr.colorPick > 0.5 ? '#1D4724' : '#224F26';
-      const mid = tr.colorPick > 0.5 ? '#2E6B33' : '#377738';
-      const lit = tr.colorPick > 0.5 ? '#529647' : '#65AB50';
-      drawScallopedCrown(ctx, tr.cx, tr.cy, tr.r, tr.seed, dark);
-      drawScallopedCrown(ctx, tr.cx - 1.4, tr.cy - 1.4, tr.r * 0.76, tr.seed + 0.25, mid);
-      ctx.fillStyle = lit;
-      ctx.beginPath();
-      ctx.arc(tr.cx - 3.2, tr.cy - 3.2, tr.r * 0.40, 0, Math.PI * 2);
-      ctx.fill();
+      // BROADLEAF_OAK: Vibrant Emerald / Spring-Lime Woodland Oak
+      const isSpringLime = tr.colorPick > 0.52;
+      drawFoliageCrown(
+        ctx,
+        tr.cx,
+        tr.cy,
+        tr.r,
+        tr.seed,
+        isSpringLime ? '#245824' : '#1A4722',
+        isSpringLime ? '#438A38' : '#2E6E35',
+        isSpringLime ? '#74BA50' : '#509547',
+        isSpringLime ? '#AEE078' : '#85C464',
+      );
     }
   }
 }

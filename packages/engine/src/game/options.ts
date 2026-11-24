@@ -59,7 +59,7 @@ export const moveCostsFor = (state: GameState, unit: Unit): Map<string, number> 
 export interface AttackOptions {
   /** Enemy units in range and sight. */
   attackTargets: string[];
-  /** Enemy bases in range (Conquer mode). */
+  /** Enemy bases (Conquer mode) and unbreached bank vaults in range. */
   siegeTiles: string[];
   /** Barriers in range. */
   demolishTiles: string[];
@@ -92,24 +92,25 @@ export const attackOptionsFor = (state: GameState, unit: Unit, visible: Set<stri
     else if (settings.victoryMode === 'CONQUER' && t.type === 'BASE' && t.owner !== currentPlayer && inReach(t)) {
       out.siegeTiles.push(t.id);
     }
+    else if (t.type === 'BANK' && (t.hackProgress || 0) < 100 && unit.type !== 'SNIPER' && inReach(t)) {
+      out.siegeTiles.push(t.id);
+    }
   }
   return out;
 };
 
 export interface InteractOptions {
-  /** Buildings, banks and supply drops on or beside the unit. */
+  /** Buildings and supply drops on or beside the unit. Banks are breached by siege, not interaction. */
   secureTiles: string[];
-  heistTiles: string[];
   lootTiles: string[];
 }
 
 export const interactOptionsFor = (state: GameState, unit: Unit): InteractOptions => {
-  const out: InteractOptions = { secureTiles: [], heistTiles: [], lootTiles: [] };
+  const out: InteractOptions = { secureTiles: [], lootTiles: [] };
   const tile = tileOf(state, unit.tileId);
   if (!tile || cpOf(state) < INTERACT_COST) return out;
   for (const t of [tile, ...getNeighbors(tile, state.mapData, state.gridSize)]) {
     if (t.type === 'BUILDING' && t.owner !== state.currentPlayer) out.secureTiles.push(t.id);
-    if (t.type === 'BANK' && (t.hackProgress || 0) < 100) out.heistTiles.push(t.id);
     if (t.loot !== null && t.loot !== undefined) out.lootTiles.push(t.id);
   }
   return out;

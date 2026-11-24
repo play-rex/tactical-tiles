@@ -1,4 +1,4 @@
-import { GameMutators, LandMine, Tile, Unit, UnitRank, UnitType, WeatherState } from '../types';
+import { GameMutators, LandMine, TerrainType, Tile, Unit, UnitRank, UnitType, WeatherState } from '../types';
 import { BUILDING_STATS, TERRAIN_DEFENSE, UNIT_STATS, BASE_STATS, LAND_MINE_STATS, VETERANCY_CONFIG, OVERWATCH_STATS, MUTATOR_CONFIG, CP_SYSTEM, MAX_RESPAWNS, GOLD_SETTINGS } from '../constants/Config';
 
 /**
@@ -46,8 +46,8 @@ export const getEffectiveBankRewards = (
     tile?: Tile,
     mutators?: GameMutators
 ): { gold: number; cp: number } => {
-    const baseGold = tile?.bankGoldReward || GOLD_SETTINGS.HEIST_REWARD_GOLD;
-    const baseCp = tile?.bankCpReward || GOLD_SETTINGS.HEIST_REWARD_CP;
+    const baseGold = tile?.bankGoldReward ?? GOLD_SETTINGS.HEIST_REWARD_GOLD;
+    const baseCp = tile?.bankCpReward ?? GOLD_SETTINGS.HEIST_REWARD_CP;
     if (!mutators?.scarcity) return { gold: baseGold, cp: baseCp };
     return {
         gold: Math.round(baseGold * MUTATOR_CONFIG.SCARCITY.BANK_REWARD_MULT),
@@ -291,10 +291,10 @@ export const calculateOverwatchOutcome = (
 };
 
 /**
- * Computes damage dealt to an enemy Base during a Siege action.
- * Scales with unit attack power (and Watchtower boost) against Base armor (bypassed by Ace Breacher).
+ * Computes damage dealt to an enemy Base — or a Bank vault — during a Siege action.
+ * Scales with unit attack power (and Watchtower boost) against the target's armor (bypassed by Ace Breacher).
  */
-export const calculateSiegeDamage = (attacker: Unit, attTile: Tile | undefined): number => {
+export const calculateSiegeDamage = (attacker: Unit, attTile: Tile | undefined, targetType: TerrainType = 'BASE'): number => {
     let dmg = getUnitBaseDamage(attacker);
     if (
         attTile &&
@@ -305,8 +305,8 @@ export const calculateSiegeDamage = (attacker: Unit, attTile: Tile | undefined):
         dmg *= BUILDING_STATS.WATCHTOWER.damageBonus;
     }
     const isAceBreacher = attacker.type === 'ASSAULTER' && (attacker.rank ?? 0) >= 3;
-    const baseDefense = isAceBreacher ? 0 : (TERRAIN_DEFENSE.BASE || 0);
-    return Math.max(1, Math.floor(dmg * (1 - baseDefense)));
+    const targetDefense = isAceBreacher ? 0 : (TERRAIN_DEFENSE[targetType] || 0);
+    return Math.max(1, Math.floor(dmg * (1 - targetDefense)));
 };
 
 /**
@@ -365,7 +365,7 @@ export const isWithinEnemyHqExclusion = (
     );
 
 /**
- * Checks whether a shop construction item (BARRIER, LAND_MINE, or BRIDGE) can be placed on a tile.
+ * Checks whether a shop construction item (BARRIER, LAND_MINE, BRIDGE, or TUNNEL) can be placed on a tile.
  */
 export const canConstructOnTile = (
     itemKey: string,
@@ -404,6 +404,10 @@ export const canConstructOnTile = (
 
     if (itemKey === 'BRIDGE') {
         return tile.type === 'WATER' || tile.type === 'CANYON';
+    }
+
+    if (itemKey === 'TUNNEL') {
+        return tile.type === 'MOUNTAIN';
     }
 
     return false;

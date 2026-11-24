@@ -14,8 +14,17 @@ export type MountainVariant =
 export type ForestVariant =
   | 'CONIFER_PINE'
   | 'BROADLEAF_OAK'
-  | 'AUTUMN_MIX'
-  | 'OLD_GROWTH'
+  | 'GOLDEN_BIRCH'
+  | 'CRIMSON_MAPLE'
+  | 'SAKURA_BLOSSOM'
+  | 'RIVERSIDE_WILLOW'
+  | 'DESERT_OASIS';
+
+export type GroveTheme =
+  | 'EMERALD_DEEPWOOD'
+  | 'AUTUMN_RESERVE'
+  | 'ALPINE_TIMBER'
+  | 'SPRING_GLADE'
   | 'DESERT_OASIS';
 
 export type BankVariant =
@@ -174,24 +183,141 @@ export function pickMountainVariant(
 }
 
 /**
- * Picks a deterministic, rotation-invariant forest biome/species variation.
- * Uses smooth spatial clustering so neighboring forest tiles form cohesive groves
- * (pine ridges, oak woods, autumn stands) while still varying organically across the map.
+ * Checks whether a tile sits adjacent (8-way) to water so shoreline trees naturally favor willows.
+ */
+export function isWaterNeighborhood(
+  tile: Tile,
+  canonicalGrid: (Tile | undefined)[][],
+  gridSize: number,
+): boolean {
+  if (gridSize <= 1) return false;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const nx = tile.x + dx;
+      const ny = tile.y + dy;
+      if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
+      if (canonicalGrid[ny]?.[nx]?.type === 'WATER') return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Picks a deterministic, rotation-invariant tree species & color palette.
+ * Produces vibrant natural diversity across emerald oaks, blue-spruce pines, golden birches,
+ * crimson maples, delicate sakura blossoms, riverside willows, and desert oasis palms.
  */
 export function pickForestVariant(
   tile: Tile,
   isDesertContext: boolean,
   gridSize: number,
+  isNearWater = false,
 ): ForestVariant {
   if (gridSize <= 1) return 'BROADLEAF_OAK';
   if (isDesertContext) return 'DESERT_OASIS';
-  const regional = smoothNoise(tile.x * 0.32 + 4.1, tile.y * 0.32 + 1.7);
-  const local = hash3(tile.x, tile.y, 202);
-  const blend = regional * 0.65 + local * 0.35;
-  if (blend < 0.30) return 'CONIFER_PINE';
-  if (blend < 0.58) return 'BROADLEAF_OAK';
-  if (blend < 0.79) return 'OLD_GROWTH';
-  return 'AUTUMN_MIX';
+  const r = hash3(tile.x, tile.y, 202);
+  if (isNearWater && r < 0.60) return 'RIVERSIDE_WILLOW';
+  if (r < 0.30) return 'BROADLEAF_OAK';
+  if (r < 0.54) return 'CONIFER_PINE';
+  if (r < 0.69) return 'GOLDEN_BIRCH';
+  if (r < 0.81) return 'CRIMSON_MAPLE';
+  if (r < 0.90) return 'SAKURA_BLOSSOM';
+  return 'RIVERSIDE_WILLOW';
+}
+
+/** Picks a cohesive multi-species theme for a 4–6 tile Forest Grove. */
+export function pickGroveTheme(
+  seedTile: Tile,
+  isDesertGrove: boolean,
+): GroveTheme {
+  if (isDesertGrove) return 'DESERT_OASIS';
+  const r = hash3(seedTile.x * 3, seedTile.y * 5, 244);
+  if (r < 0.28) return 'AUTUMN_RESERVE';
+  if (r < 0.54) return 'ALPINE_TIMBER';
+  if (r < 0.76) return 'EMERALD_DEEPWOOD';
+  return 'SPRING_GLADE';
+}
+
+export interface ForestClusterInfo {
+  id: number;
+  size: number;
+  theme: GroveTheme;
+  isDesert: boolean;
+}
+
+const DIRS_4: ReadonlyArray<readonly [number, number]> = [
+  [0, -1],
+  [-1, 0],
+  [1, 0],
+  [0, 1],
+];
+
+/**
+ * Flood-fills 4-way (orthogonally) connected FOREST tiles so 4–6 tile groves render as cohesive deep
+ * woodlands while scattered individual trees (including diagonally staggered ones) render as crisp
+ * standalone specimen trees.
+ */
+export function classifyForestClusters(
+  grid: (Tile | undefined)[][],
+  canonicalGrid: (Tile | undefined)[][],
+  gridSize: number,
+): Map<string, ForestClusterInfo> {
+  const result = new Map<string, ForestClusterInfo>();
+  const visited = new Uint8Array(gridSize * gridSize);
+  let nextId = 0;
+
+  for (let y = 0; y < gridSize; y++) {
+    for (let x = 0; x < gridSize; x++) {
+      const start = grid[y]?.[x];
+      if (!start || start.type !== 'FOREST') continue;
+      const sk = y * gridSize + x;
+      if (visited[sk]) continue;
+
+      const members: Tile[] = [];
+      const q: Array<{ x: number; y: number }> = [{ x, y }];
+      visited[sk] = 1;
+      let desertVotes = 0;
+
+      while (q.length > 0) {
+        const cur = q.shift()!;
+        const tile = grid[cur.y]?.[cur.x];
+        if (!tile) continue;
+        members.push(tile);
+        if (isDesertNeighborhood(tile, canonicalGrid, gridSize)) desertVotes++;
+
+        for (const [dx, dy] of DIRS_4) {
+          const nx = cur.x + dx;
+          const ny = cur.y + dy;
+          if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
+          const nk = ny * gridSize + nx;
+          if (visited[nk]) continue;
+          if (grid[ny]?.[nx]?.type === 'FOREST') {
+            visited[nk] = 1;
+            q.push({ x: nx, y: ny });
+          }
+        }
+      }
+
+      // Canonical minimum tile anchors the grove theme identically across 0/90/180/270° board rotations
+      let anchor = members[0];
+      for (const m of members) {
+        if (m.y < anchor.y || (m.y === anchor.y && m.x < anchor.x)) anchor = m;
+      }
+      const isDesert = desertVotes * 2 >= members.length;
+      const info: ForestClusterInfo = {
+        id: nextId++,
+        size: members.length,
+        theme: pickGroveTheme(anchor, isDesert),
+        isDesert,
+      };
+      for (const m of members) {
+        result.set(m.id, info);
+      }
+    }
+  }
+
+  return result;
 }
 
 /**

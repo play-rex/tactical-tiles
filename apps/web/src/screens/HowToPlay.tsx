@@ -123,7 +123,7 @@ export const HowToPlay: React.FC = () => {
                     ['🚀 DEPLOY', 'var(--acc-mint-ink)', 'Spawn units from your HQ using Euros.'],
                     ['🏃 MANEUVER', 'var(--acc-blue-ink)', 'Spend CP to move. Terrain affects cost.'],
                     ['🎯 ENGAGE', 'var(--acc-red-ink)', 'Attack enemies or siege bases with LOS.'],
-                    ['💰 ECONOMY', 'var(--acc-amber-ink)', 'Heist Banks and secure Buildings.'],
+                    ['💰 ECONOMY', 'var(--acc-amber-ink)', 'Crack Bank vaults and secure Buildings.'],
                   ].map(([title, col, desc]) => (
                     <GeoWell key={title} coreStyle={{ padding: '14px', textAlign: 'center' }}>
                       <div style={{ fontWeight: 900, fontSize: '14px', color: col, marginBottom: '6px' }}>{title}</div>
@@ -157,7 +157,7 @@ export const HowToPlay: React.FC = () => {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '12px' }}>
                   <GeoWell coreStyle={{ padding: '14px' }}>
                     <div style={{ fontWeight: 900, fontSize: '14px', color: 'var(--acc-amber-ink)', marginBottom: '6px' }}>BANK VAULT</div>
-                    <div style={{ fontSize: '13px', marginBottom: '6px' }}>Contains Euros/CP loot. Action: <strong>HEIST (4 CP)</strong>.</div>
+                    <div style={{ fontSize: '13px', marginBottom: '6px' }}>A 15 HP structure. Action: <strong>SIEGE</strong> it with Scouts or Breachers — <strong>Snipers can't crack vaults</strong>. Cash vaults hold €100–300 (take gold or +10 CP); dry vaults hold intel (+12 CP instantly).</div>
                     <div style={{ fontSize: '12px', color: 'var(--acc-red-ink)', fontWeight: 700 }}>
                       Proximity Turret: {BANK_STATS.RANGE} Tile Range • {BANK_STATS.DAMAGE} DMG/turn until looted.
                     </div>
@@ -197,7 +197,7 @@ export const HowToPlay: React.FC = () => {
                 <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
                   <li><strong>Ammo Drop (50€) / First Aid Kit (100€) / Medkit (200€):</strong> First Aid restores 50% max HP; Medkit heals to full. Delivered via Drop Pod.</li>
                   <li><strong>Land Mine (75€):</strong> Hidden trap (visible only to you) dealing 8 DMG and halting enemy movement. Cannot be placed within 5 tiles of an enemy HQ.</li>
-                  <li><strong>Barrier x3 (150€) / Bridge (100€):</strong> Click up to 3 tiles to build 10 HP waist-high cover walls, or place water/canyon bridges.</li>
+                  <li><strong>Barrier x3 (150€) / Bridge (100€) / Tunnel (125€):</strong> Click up to 3 tiles to build 10 HP waist-high cover walls, place water/canyon bridges, or blast a tunnel through a mountain for 1-CP travel (no cover inside).</li>
                   <li><strong>Field Reload (5 CP):</strong> Emergency unit action restoring 50% max ammo immediately (ends unit turn).</li>
                   <li><strong>Retrieval Protocol:</strong> Move adjacent to or onto a supply pod and spend <strong>4 CP</strong> (RETRIEVE SUPPLY).</li>
                 </ul>
@@ -205,7 +205,7 @@ export const HowToPlay: React.FC = () => {
 
               <Section title="6. UNIT VETERANCY & SECTOR SEEDS">
                 <p style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.6, marginTop: 0 }}>
-                  Units earn XP from attacks (+1 XP), kills (+2 XP, +3 vs Elite/Ace), Bank Heists (+2 XP), Base Destruction (+2 XP), and first Building captures (+1 XP). Respawned units reset to Recruit.
+                  Units earn XP from attacks (+1 XP), kills (+2 XP, +3 vs Elite/Ace), Bank breaches (+2 XP), Base Destruction (+2 XP), and first Building captures (+1 XP). Respawned units reset to Recruit.
                 </p>
                 <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
                   <li><strong>★ Veteran ({VETERANCY_CONFIG.XP_THRESHOLDS[1]} XP):</strong> +20% Max HP (heals gained HP) and +2 Max Ammo (Scout/Breacher) or +1 Max Ammo (Sniper).</li>
@@ -224,7 +224,7 @@ export const HowToPlay: React.FC = () => {
               <Section title="8. TACTICAL OPS & SETUP MUTATORS">
                 <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
                   <li><strong>Blitz CP:</strong> 30 MAX CP battery with +15 CP/turn regeneration (22 CP opening turn).</li>
-                  <li><strong>Scarcity:</strong> Cuts unit starting &amp; max ammo by 50% while boosting Bank Heist rewards +50%.</li>
+                  <li><strong>Scarcity:</strong> Cuts unit starting &amp; max ammo by 50% while boosting Bank vault rewards +50%.</li>
                   <li><strong>Ironman:</strong> Sets graveyard respawns to 0 — every loss is permanent.</li>
                 </ul>
               </Section>
@@ -299,6 +299,7 @@ export const HowToPlay: React.FC = () => {
                               {key === 'BUILDING' && 'Blocks neutral/enemy passage. Capture adjacent (+5€/t); Bunkers house infantry, Watchtowers seat Snipers.'}
                               {key === 'WATER' && 'Impassable without Bridge.'}
                               {key === 'BARRIER' && 'Blocks movement; 80% defensive cover.'}
+                              {key === 'TUNNEL' && 'Blasted passage: 1-CP travel through mountains, no cover.'}
                               {key === 'BASE' && 'Headquarters (+20% Defense).'}
                               {key === 'BANK' && 'Lootable Vault (+20% Defense).'}
                             </td>

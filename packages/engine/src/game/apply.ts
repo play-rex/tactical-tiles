@@ -175,7 +175,7 @@ class Fx {
   }
   structureHit(
     at: Tile,
-    structureType: 'BASE' | 'BARRIER',
+    structureType: 'BASE' | 'BARRIER' | 'BANK',
     damage: number,
     destroyed: boolean,
     owner?: number | null,
@@ -214,7 +214,7 @@ class Fx {
   heal(unitId: string, at: Tile, amount: number, item: 'MEDKIT' | 'FIRST_AID' | 'AMMO' | 'RELOAD') {
     this.events.push({ kind: 'heal', unitId, at: pt(at), amount, item });
   }
-  build(tiles: Tile[], itemKey: 'BARRIER' | 'BRIDGE') {
+      build(tiles: Tile[], itemKey: 'BARRIER' | 'BRIDGE' | 'TUNNEL') {
     if (tiles.length === 0) return;
     this.events.push({ kind: 'build', tiles: tiles.map(pt), itemKey });
   }
@@ -755,36 +755,6 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       logEntry = createLog(currentRound, currentPlayer, `Secured a Building`, 'ECONOMY');
       break;
     }
-    case 'HEIST': {
-      const unit = newUnits.find(u => u.id === action.unitId);
-      if (!unit) return reject('Unit not found');
-      spendCp(actionCost(action));
-      const bankTile = getTileByIdFast(newMap, action.tileId, gridSize);
-      newUnits = newUnits.map(u => u.id === action.unitId ? { ...u, completed: true } : u);
-      newMap = newMap.map(t => t.id === action.tileId ? { ...t, hackProgress: 100 } : t);
-      if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].heists += 1;
-      newUnits = grantUnitXp(newUnits, unit.id, 2, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
-      if (bankTile) fx.heist(bankTile, currentPlayer);
-      fx.sound('heist');
-
-      if (options.autoBankReward) {
-        const { gold: goldReward, cp: cpReward } = getEffectiveBankRewards(bankTile, settings.mutators);
-        const hasOtherActiveUnits = newUnits.some(u => u.owner === currentPlayer && !u.completed);
-        const chooseCp = nextPlayerCp[currentPlayer] < 8 && hasOtherActiveUnits;
-        if (chooseCp) {
-          nextPlayerCp[currentPlayer] += cpReward;
-          logEntry = createLog(currentRound, currentPlayer, `Heist Successful! AI claimed +${cpReward} CP`, 'ECONOMY');
-        } else {
-          nextPlayerGold[currentPlayer] += goldReward;
-          logEntry = createLog(currentRound, currentPlayer, `Heist Successful! AI claimed +€${goldReward} Euros`, 'ECONOMY');
-        }
-        newBankReward = null;
-      } else {
-        newBankReward = { tileId: action.tileId, playerId: currentPlayer };
-        logEntry = createLog(currentRound, currentPlayer, `Heist Successful! Bank Vault Breached`, 'ECONOMY');
-      }
-      break;
-    }
     case 'BANK_REWARD': {
       if (!bankRewardPending) return reject('No vault to claim');
       spendCp(actionCost(action));
@@ -887,13 +857,16 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     }
     case 'SIEGE': {
       const att = newUnits.find(u => u.id === action.unitId);
-      const baseTile = getTileByIdFast(newMap, action.tileId, gridSize);
-      if (!att || !baseTile || baseTile.hp === undefined) return reject('Invalid siege target');
+      const targetTile = getTileByIdFast(newMap, action.tileId, gridSize);
+      if (!att || !targetTile || targetTile.hp === undefined) return reject('Invalid siege target');
+      const isBank = targetTile.type === 'BANK';
       spendCp(actionCost(action));
       const attTile = getTileByIdFast(mapData, att.tileId, gridSize);
-      const siegeDmg = calculateSiegeDamage(att, attTile);
-      const newHp = Math.max(0, baseTile.hp - siegeDmg);
-      newMap = newMap.map(t => t.id === action.tileId ? { ...t, hp: newHp } : t);
+      const siegeDmg = calculateSiegeDamage(att, attTile, isBank ? 'BANK' : 'BASE');
+      const newHp = Math.max(0, targetTile.hp - siegeDmg);
+      newMap = newMap.map(t => t.id === action.tileId
+        ? { ...t, hp: newHp, ...(isBank && newHp === 0 ? { hackProgress: 100 } : {}) }
+        : t);
       if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].damageDealt += siegeDmg;
       newUnits = newUnits.map(u => u.id === att.id ? {
         ...u,
@@ -903,17 +876,47 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       } : u);
 
       if (attTile) {
-        fx.projectile(attTile, baseTile, 'MISSILE', { weapon: 'SIEGE', attackerId: att.id });
-        fx.structureHit(baseTile, 'BASE', siegeDmg, newHp === 0, baseTile.owner, currentPlayer);
-        fx.popup(baseTile, `-${siegeDmg}`, '#FF4500', 20);
-        fx.shake(newHp === 0 ? 18 : 8, baseTile);
+        fx.projectile(attTile, targetTile, 'MISSILE', { weapon: 'SIEGE', attackerId: att.id });
+        fx.structureHit(targetTile, isBank ? 'BANK' : 'BASE', siegeDmg, newHp === 0, targetTile.owner, currentPlayer);
+        fx.popup(targetTile, `-${siegeDmg}`, '#FF4500', 20);
+        fx.shake(newHp === 0 ? 18 : 8, targetTile);
       }
       fx.sound(newHp === 0 ? 'explosion' : 'attack');
       if (newHp > 0) fx.sound('hit');
 
       let msg = `${UNIT_STATS[att.type].name} sieged Base (-${siegeDmg} HP)`;
-      if (newHp === 0) {
-        const eliminatedId = baseTile.owner!;
+      let logKind: 'COMBAT' | 'ECONOMY' = 'COMBAT';
+      if (isBank) {
+        msg = `${UNIT_STATS[att.type].name} shelled Bank Vault (-${siegeDmg} HP)`;
+        if (newHp === 0) {
+          if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].heists += 1;
+          newUnits = grantUnitXp(newUnits, att.id, 2, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
+          fx.heist(targetTile, currentPlayer);
+          fx.sound('heist');
+          const { gold: goldReward, cp: cpReward } = getEffectiveBankRewards(targetTile, settings.mutators);
+          if (goldReward > 0) {
+            if (options.autoBankReward) {
+              const hasOtherActiveUnits = newUnits.some(u => u.owner === currentPlayer && !u.completed);
+              if (nextPlayerCp[currentPlayer] < 8 && hasOtherActiveUnits) {
+                nextPlayerCp[currentPlayer] += cpReward;
+                msg = `Vault Breached! AI claimed +${cpReward} CP`;
+              } else {
+                nextPlayerGold[currentPlayer] += goldReward;
+                msg = `Vault Breached! AI claimed +€${goldReward} Euros`;
+              }
+              newBankReward = null;
+            } else {
+              newBankReward = { tileId: action.tileId, playerId: currentPlayer };
+              msg = `Vault Breached! Choose the loot`;
+            }
+          } else {
+            nextPlayerCp[currentPlayer] += cpReward;
+            msg = `Vault came up dry — seized intel +${cpReward} CP`;
+          }
+          logKind = 'ECONOMY';
+        }
+      } else if (newHp === 0) {
+        const eliminatedId = targetTile.owner!;
         nextPlayerStatus[eliminatedId] = 'ELIMINATED';
         const wipedCount = newUnits.filter(u => u.owner === eliminatedId).length;
         if (nextMatchStats[eliminatedId]) nextMatchStats[eliminatedId].unitsLost += wipedCount;
@@ -921,7 +924,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         newUnits = grantUnitXp(newUnits, att.id, 2, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
         msg += ' - BASE DESTROYED';
       }
-      logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
+      logEntry = createLog(currentRound, currentPlayer, msg, logKind);
       break;
     }
     case 'DEMOLISH': {
@@ -1098,6 +1101,18 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           fx.sound('click');
         }
         logEntry = createLog(currentRound, currentPlayer, `Planted Land Mine at (${tile.x},${tile.y})`, 'ECONOMY');
+        break;
+      }
+
+      if (action.itemKey === 'TUNNEL') {
+        const tunnelTile = getTileByIdFast(newMap, action.tileId, gridSize);
+        if (!tunnelTile || !canConstructOnTile('TUNNEL', tunnelTile, newUnits, ctx)) return reject("Can't build there");
+        spendCp(actionCost(action));
+        spendGold(item.cost);
+        newMap = newMap.map(t => t.id === tunnelTile.id ? { ...t, type: 'TUNNEL' as const, height: 1, hp: undefined, maxHp: undefined } : t);
+        fx.build([tunnelTile], 'TUNNEL');
+        fx.sound('capture');
+        logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at (${tunnelTile.x},${tunnelTile.y})`, 'ECONOMY');
         break;
       }
 

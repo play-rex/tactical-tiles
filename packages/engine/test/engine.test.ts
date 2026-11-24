@@ -16,8 +16,10 @@ import {
   type GameAction,
   type GameState,
 } from '../src/index';
-import { BASE_STATS, COMBAT_BONUSES, GOLD_SETTINGS, LAND_MINE_STATS, SHOP_ITEMS } from '../src/constants/Config';
-import { isWithinEnemyHqExclusion } from '../src/rules/CombatRules';
+import { BANK_STATS, BASE_STATS, COMBAT_BONUSES, GOLD_SETTINGS, LAND_MINE_STATS, SHOP_ITEMS } from '../src/constants/Config';
+import { getUnitAttackCost, isWithinEnemyHqExclusion } from '../src/rules/CombatRules';
+import { initBankVaults } from '../src/game/setup';
+import { getStepCost } from '../src/grid/Pathfinding';
 import type { GameSettings, Tile, Unit } from '../src/types';
 
 const settings = (over: Partial<GameSettings> = {}): GameSettings => ({ ...DEFAULT_GAME_SETTINGS, ...over });
@@ -720,4 +722,161 @@ test('base artillery: lone target takes the full shell, extra targets take splas
     }
     assert.ok(after.state.gameLog.some(l => l.message.includes('Base Artillery')));
   }
+});
+
+test('mountain tunnel: blasts a mountain into a 1-CP passage for every unit type', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'TUNNEL1', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => {
+    if (t.id === '5,5') return { ...t, type: 'MOUNTAIN' as const, height: 2 };
+    return { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined };
+  });
+  const breacher = { ...base.units.find(u => u.owner === 0 && u.type === 'ASSAULTER')!, tileId: '4,5', completed: false, hasMoved: false };
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [breacher],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerGold: { 0: 500, 1: 500 },
+    mines: [],
+  };
+
+  assert.equal(SHOP_ITEMS.TUNNEL.cost, 125);
+
+  // Refused anywhere but on a mountain
+  assert.equal(prepareAction(state, 0, { type: 'BUILD', itemKey: 'TUNNEL', tileId: '6,5' }).ok, false);
+
+  // Blast the tunnel through the mountain at 5,5
+  const prep = prepareAction(state, 0, { type: 'BUILD', itemKey: 'TUNNEL', tileId: '5,5' });
+  assert.ok(prep.ok);
+  const after = applyAction(state, prep.action);
+  assert.equal(after.rejected, undefined);
+  assert.equal(after.state.playerGold[0], 500 - SHOP_ITEMS.TUNNEL.cost);
+  const tunnel = after.state.mapData.find(t => t.id === '5,5')!;
+  assert.equal(tunnel.type, 'TUNNEL');
+  assert.equal(tunnel.height, 1);
+  assert.ok(after.state.gameLog.some(l => l.message.includes('Mountain Tunnel')));
+
+  // HARD AI buys its own tunnel when a ridge walls its breacher off from the enemy
+  {
+    const aiBase = createGeneratedGame(settings({ mapSeed: 'AITUN1', fogOfWar: false, playerCount: 2 }));
+    const wallMap: Tile[] = aiBase.mapData.map(t =>
+      t.x === 8
+        ? { ...t, type: 'MOUNTAIN' as const, height: 2, subType: undefined, owner: undefined, hazardState: undefined }
+        : { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined }
+    );
+    const aiBreacher = { ...aiBase.units.find(u => u.owner === 1 && u.type === 'ASSAULTER')!, tileId: '7,7', completed: false, hasMoved: false };
+    const enemyScout = { ...aiBase.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '9,7', completed: false, hasMoved: false };
+    const aiState: GameState = {
+      ...aiBase,
+      mapData: wallMap,
+      units: [aiBreacher, enemyScout],
+      currentPlayer: 1,
+      playerCp: { 0: 20, 1: 20 },
+      playerGold: { 0: 500, 1: 500 },
+      mines: [
+        { id: 'm1', tileId: '7,6', owner: 1 },
+        { id: 'm2', tileId: '6,7', owner: 1 },
+      ],
+    };
+    const aiAction = botAction(aiState, 'HARD');
+    assert.equal(aiAction.type, 'BUILD');
+    assert.equal((aiAction as { itemKey: string }).itemKey, 'TUNNEL');
+    assert.equal((aiAction as { tileId: string }).tileId, '8,7');
+    const aiPrep = prepareAction(aiState, 1, aiAction);
+    assert.ok(aiPrep.ok, 'AI tunnel order passes the same validation as a human build');
+    const aiAfter = applyAction(aiState, aiPrep.action);
+    assert.equal(aiAfter.rejected, undefined);
+    assert.equal(aiAfter.state.mapData.find(t => t.id === '8,7')!.type, 'TUNNEL');
+    assert.equal(aiAfter.state.playerGold[1], 500 - SHOP_ITEMS.TUNNEL.cost);
+  }
+
+  // A breacher (who could never enter mountains) now walks through for 1 CP step cost
+  const step = getStepCost(tunnel, 'ASSAULTER', 0, after.state.weather, 0);
+  assert.equal(step, 2, 'breacher pays 1 CP x 2 moveCost per tunnel tile');
+  const movePrep = prepareAction(after.state, 0, { type: 'MOVE', unitId: breacher.id, targetTileId: '5,5', cost: 0 });
+  assert.ok(movePrep.ok, 'non-sniper can enter the tunnel');
+  const moved = applyAction(after.state, movePrep.action);
+  assert.equal(moved.rejected, undefined);
+  assert.equal(moved.state.units.find(u => u.id === breacher.id)!.tileId, '5,5');
+});
+
+test('bank raids: 15 HP vaults breached by siege, snipers barred, vaults randomized', () => {
+  assert.equal(BANK_STATS.HP, 15);
+
+  // Seeded vault rolls: cash €200–300 in €10 steps, or a dry intel cache; editor rewards kept
+  const rollMap = createGeneratedGame(settings({ mapSeed: 'VAULTROLL', fogOfWar: false, playerCount: 2 })).mapData;
+  const cashBank: Tile = { ...rollMap[0], type: 'BANK' as const };
+  const keptBank: Tile = { ...rollMap[1], type: 'BANK' as const, bankGoldReward: 300, bankCpReward: 0 };
+  initBankVaults([cashBank, keptBank], () => 0.5);
+  assert.equal(cashBank.hp, 15);
+  assert.equal(cashBank.maxHp, 15);
+  assert.equal(cashBank.bankGoldReward, 200, 'seeded roll 0.5 lands on €200');
+  assert.equal(keptBank.bankGoldReward, 300, 'explicit editor rewards are kept');
+  const dryBank: Tile = { ...rollMap[2], type: 'BANK' as const };
+  initBankVaults([dryBank], () => 0.1);
+  assert.equal(dryBank.bankGoldReward, 0);
+  assert.equal(dryBank.bankCpReward, 12);
+
+  // Live breach: breacher shells a 250€ vault, scout pops a dry cache, sniper is barred
+  const base = createGeneratedGame(settings({ mapSeed: 'VAULTB1', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => {
+    if (t.id === '5,5') return { ...t, type: 'BANK' as const, height: 1, hp: 15, maxHp: 15, hackProgress: 0, bankGoldReward: 250, bankCpReward: 10 };
+    if (t.id === '2,2') return { ...t, type: 'BANK' as const, height: 1, hp: 4, maxHp: 15, hackProgress: 0, bankGoldReward: 0, bankCpReward: 12 };
+    if (t.id === '5,6') return { ...t, type: 'DUNES' as const, height: 2 };
+    return { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined };
+  });
+  const raider = { ...base.units.find(u => u.owner === 0 && u.type === 'ASSAULTER')!, tileId: '5,4', completed: false, hasMoved: false };
+  const sniper = { ...base.units.find(u => u.owner === 0 && u.type === 'SNIPER')!, tileId: '5,6', completed: false, hasMoved: false };
+  const scout = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '2,3', completed: false, hasMoved: false };
+  const live: GameState = {
+    ...base,
+    mapData: map,
+    units: [raider, sniper, scout],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerGold: { 0: 500, 1: 500 },
+    mines: [],
+  };
+
+  // Snipers can't crack vaults, even from high ground in range
+  const snipePrep = prepareAction(live, 0, { type: 'SIEGE', unitId: sniper.id, tileId: '5,5', cost: getUnitAttackCost(sniper) });
+  assert.equal(snipePrep.ok, false);
+  assert.match((snipePrep as { error: string }).error, /vault/i);
+
+  // First breacher shell chips the vault (8 DMG vs 20% armor) without breaching
+  const prep1 = prepareAction(live, 0, { type: 'SIEGE', unitId: raider.id, tileId: '5,5', cost: getUnitAttackCost(raider) });
+  assert.ok(prep1.ok);
+  const s1 = applyAction(live, prep1.action);
+  assert.equal(s1.rejected, undefined);
+  assert.equal(s1.state.mapData.find(t => t.id === '5,5')!.hp, 7);
+  assert.equal(s1.state.bankRewardPending, null);
+  assert.equal(s1.state.matchStats[0].heists, 0);
+
+  // Second shell breaches: heist counted, vault choice pending, gold claimed
+  const readyAgain: GameState = {
+    ...s1.state,
+    units: s1.state.units.map(u => u.id === raider.id ? { ...u, completed: false } : u),
+  };
+  const prep2 = prepareAction(readyAgain, 0, { type: 'SIEGE', unitId: raider.id, tileId: '5,5', cost: getUnitAttackCost(raider) });
+  assert.ok(prep2.ok);
+  const s2 = applyAction(readyAgain, prep2.action);
+  assert.equal(s2.rejected, undefined);
+  const breached = s2.state.mapData.find(t => t.id === '5,5')!;
+  assert.equal(breached.hp, 0);
+  assert.equal(breached.hackProgress, 100);
+  assert.equal(s2.state.matchStats[0].heists, 1);
+  assert.deepEqual(s2.state.bankRewardPending, { tileId: '5,5', playerId: 0 });
+  const claim = applyAction(s2.state, { type: 'BANK_REWARD', choice: 'GOLD' });
+  assert.equal(claim.rejected, undefined);
+  assert.equal(claim.state.playerGold[0], 500 + 250);
+
+  // Dry cache: scout breach pays +12 CP instantly with no pending choice
+  const dryPrep = prepareAction(live, 0, { type: 'SIEGE', unitId: scout.id, tileId: '2,2', cost: getUnitAttackCost(scout) });
+  assert.ok(dryPrep.ok);
+  const dry = applyAction(live, dryPrep.action);
+  assert.equal(dry.rejected, undefined);
+  assert.equal(dry.state.mapData.find(t => t.id === '2,2')!.hackProgress, 100);
+  assert.equal(dry.state.bankRewardPending, null);
+  assert.equal(dry.state.playerCp[0], 20 - getUnitAttackCost(scout) + 12);
 });

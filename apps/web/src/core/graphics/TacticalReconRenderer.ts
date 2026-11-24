@@ -13,7 +13,7 @@ import {
   drawWaterBasins,
   NATURE_PALETTE,
 } from './terrain/drawNature';
-import { drawBridges, drawRoads, drawStructures } from './terrain/drawStructures';
+import { drawBridges, drawRoads, drawStructures, drawTunnels } from './terrain/drawStructures';
 
 /** Stable signature capturing visual terrain topology without flickering on unit/UI selection changes. */
 export function computeTerrainSignature(mapData: Tile[], gridSize: number, rotation: BoardRotation = 0): string {
@@ -32,12 +32,33 @@ let cachedEarthKey = '';
 let cachedEarthCanvas: HTMLCanvasElement | null = null;
 
 function getOrBakeEarthField(grid: (Tile | undefined)[][], gridSize: number): HTMLCanvasElement {
+  // Classify each cell's underlying ground biome so oasis palms, desert mesas, bunkers & banks
+  // placed inside a desert sit seamlessly on golden sand instead of square green grass patches!
+  const isDesertCell = new Uint8Array(gridSize * gridSize);
   const desertMaskParts: string[] = [String(gridSize)];
   for (let y = 0; y < gridSize; y++) {
     let rowBits = '';
     for (let x = 0; x < gridSize; x++) {
       const t = grid[y]?.[x];
-      rowBits += t && DESERT_TYPES.has(t.type) ? '1' : '0';
+      let desert = false;
+      if (t && DESERT_TYPES.has(t.type)) {
+        desert = true;
+      } else if (t && t.type !== 'PLAINS' && gridSize > 1) {
+        let dCount = 0;
+        let pCount = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nb = grid[y + dy]?.[x + dx];
+            if (!nb) continue;
+            if (DESERT_TYPES.has(nb.type)) dCount++;
+            else if (nb.type === 'PLAINS') pCount++;
+          }
+        }
+        desert = dCount >= 2 && dCount >= pCount;
+      }
+      isDesertCell[y * gridSize + x] = desert ? 1 : 0;
+      rowBits += desert ? '1' : '0';
     }
     desertMaskParts.push(rowBits);
   }
@@ -70,13 +91,12 @@ function getOrBakeEarthField(grid: (Tile | undefined)[][], gridSize: number): HT
       const tx = Math.min(gridSize - 1, Math.floor(px / subTS));
       const fx = (px % subTS) / subTS;
       const wx = px * scaleDiv;
-      const tile = grid[ty]?.[tx];
 
-      let desertWeight = tile && DESERT_TYPES.has(tile.type) ? 1 : 0;
-      const nLeft = tx > 0 && DESERT_TYPES.has(grid[ty]?.[tx - 1]?.type || 'PLAINS') ? 1 : 0;
-      const nRight = tx < gridSize - 1 && DESERT_TYPES.has(grid[ty]?.[tx + 1]?.type || 'PLAINS') ? 1 : 0;
-      const nTop = ty > 0 && DESERT_TYPES.has(grid[ty - 1]?.[tx]?.type || 'PLAINS') ? 1 : 0;
-      const nBot = ty < gridSize - 1 && DESERT_TYPES.has(grid[ty + 1]?.[tx]?.type || 'PLAINS') ? 1 : 0;
+      let desertWeight = isDesertCell[ty * gridSize + tx];
+      const nLeft = tx > 0 ? isDesertCell[ty * gridSize + (tx - 1)] : desertWeight;
+      const nRight = tx < gridSize - 1 ? isDesertCell[ty * gridSize + (tx + 1)] : desertWeight;
+      const nTop = ty > 0 ? isDesertCell[(ty - 1) * gridSize + tx] : desertWeight;
+      const nBot = ty < gridSize - 1 ? isDesertCell[(ty + 1) * gridSize + tx] : desertWeight;
 
       if (fx < 0.25 && nLeft !== desertWeight) desertWeight = desertWeight * (fx / 0.25) + nLeft * (1 - fx / 0.25);
       if (fx > 0.75 && nRight !== desertWeight) desertWeight = desertWeight * ((1 - fx) / 0.25) + nRight * (1 - (1 - fx) / 0.25);
@@ -180,6 +200,7 @@ export function renderTacticalReconCanvases(
   // Pass C1–C2: Auto-Connecting Roads & Dual-Style Bridges
   drawRoads(ctx, grid, gridSize);
   drawBridges(ctx, grid, gridSize, rotation);
+  drawTunnels(ctx, grid, canonicalGrid, gridSize, rotation);
 
   // Pass D1–D3: Varied Sculpted Dunes, Biome-Aware Mountain Ranges, & Multi-Species Forests
   drawDunes(ctx, grid, gridSize);

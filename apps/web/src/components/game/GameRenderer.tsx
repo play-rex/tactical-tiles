@@ -123,7 +123,7 @@ const OverlayLayer = React.memo(({
     selectedUnit, currentPlayer,
     validMoveTiles, validAttackTargets, validSpawnTiles,
     selectedTileId, placementMode,
-    validSecureTile, validHeistTile, validSiegeTile, validDemolishTile, validLootTile,
+    validSecureTile, validSiegeTile, validDemolishTile, validLootTile,
     gridSize
 }: any) => {
     const draw = useCallback((g: PIXI.Graphics) => {
@@ -207,7 +207,6 @@ const OverlayLayer = React.memo(({
 
         // Action Highlights
         if (validSecureTile) drawHighlight(validSecureTile, UI_COLORS.ACTION_HIGHLIGHT, 0.2, true);
-        if (validHeistTile) drawHighlight(validHeistTile, '#F44336', 0.2, true);
         if (validSiegeTile) drawHighlight(validSiegeTile, '#D32F2F', 0.35, true);
         if (validDemolishTile) drawHighlight(validDemolishTile, '#D32F2F', 0.35, true);
         if (validLootTile) drawHighlight(validLootTile, '#4CAF50', 0.2, true);
@@ -250,7 +249,7 @@ const OverlayLayer = React.memo(({
         }
         g.lineStyle(0);
 
-    }, [mapData, tileById, units, viewer, settings, weather, visibleTiles, selectedUnit, currentPlayer, validMoveTiles, validAttackTargets, validSpawnTiles, selectedTileId, placementMode, validSecureTile, validHeistTile, validSiegeTile, validDemolishTile, validLootTile, gridSize]);
+    }, [mapData, tileById, units, viewer, settings, weather, visibleTiles, selectedUnit, currentPlayer, validMoveTiles, validAttackTargets, validSpawnTiles, selectedTileId, placementMode, validSecureTile, validSiegeTile, validDemolishTile, validLootTile, gridSize]);
 
     return <Graphics draw={draw} eventMode="none" />;
 });
@@ -1224,7 +1223,6 @@ export const GameRenderer = () => {
 
     // Actions
     const validSecureTile = useGameStore(state => state.validSecureTile);
-    const validHeistTile = useGameStore(state => state.validHeistTile);
     const validSiegeTile = useGameStore(state => state.validSiegeTile);
     const validDemolishTile = useGameStore(state => state.validDemolishTile);
 
@@ -1476,7 +1474,6 @@ export const GameRenderer = () => {
                         validSpawnTiles,
                         placementMode,
                         validSecureTile,
-                        validHeistTile,
                         validSiegeTile,
                         validDemolishTile,
                         validLootTile,
@@ -1580,7 +1577,6 @@ export const GameRenderer = () => {
                             selectedTileId={selectedTileId}
                             placementMode={placementMode}
                             validSecureTile={validSecureTile}
-                            validHeistTile={validHeistTile}
                             validSiegeTile={validSiegeTile}
                             validDemolishTile={validDemolishTile}
                             validLootTile={validLootTile}

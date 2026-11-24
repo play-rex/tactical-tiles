@@ -25,7 +25,6 @@ export type AIAction =
   | { type: 'OVERWATCH'; unitId: string; cost: number }
   | { type: 'RELOAD'; unitId: string; cost: number }
   | { type: 'SECURE'; unitId: string; tileId: string; cost: number }
-  | { type: 'HEIST'; unitId: string; tileId: string; cost: number }
   | { type: 'SIEGE'; unitId: string; tileId: string; cost: number }
   | { type: 'DEMOLISH'; unitId: string; tileId: string; cost: number }
   | { type: 'LOOT'; unitId: string; tileId: string; cost: number }
@@ -294,7 +293,7 @@ const checkShop = (gameState: GameStateProxy, myUnits: Unit[], visibleUnits: Uni
             const adj = getNeighbors(tile, mapData, gridSize);
             const sortedAdj = [...adj].sort((a, b) => {
                 const scoreTile = (t: Tile) =>
-                    t.type === 'BRIDGE' || t.type === 'BRIDGE_V' ? 3 : t.type === 'ROAD' || t.type === 'ROAD_H' ? 2 : 1;
+                    t.type === 'BRIDGE' || t.type === 'BRIDGE_V' || t.type === 'TUNNEL' ? 3 : t.type === 'ROAD' || t.type === 'ROAD_H' ? 2 : 1;
                 return scoreTile(b) - scoreTile(a);
             });
             const mineTile = sortedAdj.find(t =>
@@ -302,6 +301,42 @@ const checkShop = (gameState: GameStateProxy, myUnits: Unit[], visibleUnits: Uni
             );
             if (mineTile) {
                 return { type: 'BUILD', itemKey: 'LAND_MINE', tileId: mineTile.id, cost: 0 };
+            }
+        }
+    }
+
+    // HARD-only: blast a Mountain Tunnel when a ridge separates a ground unit from an
+    // objective (enemy, enemy HQ, bank, or capturable building). Human rules are untouched:
+    // the BUILD still passes the same validation and pays the same 125€ shop price.
+    if (difficulty === 'HARD' && playerGold >= SHOP_ITEMS.TUNNEL.cost + 100 && myUnits.length > 0) {
+        if (mapData.filter(t => t.type === 'TUNNEL').length >= 2) return null;
+        const enemyBaseTiles = mapData.filter(t => t.type === 'BASE' && t.owner !== currentPlayer && (t.hp || 0) > 0);
+        const bankTiles = mapData.filter(t => t.type === 'BANK' && (t.hackProgress || 0) < 100);
+        const capturableTiles = mapData.filter(t => t.type === 'BUILDING' && t.owner !== currentPlayer);
+        const enemyTiles = visibleUnits
+            .filter(u => u.owner !== currentPlayer)
+            .map(u => getTileByIdFast(mapData, u.tileId, gridSize))
+            .filter((t): t is Tile => Boolean(t));
+        const objectives = [...enemyTiles, ...enemyBaseTiles, ...bankTiles, ...capturableTiles];
+        if (objectives.length === 0) return null;
+        const buildCtx = { playerId: currentPlayer, mapData, mines };
+        for (const unit of myUnits) {
+            if (unit.type === 'SNIPER') continue; // Snipers already cross mountains
+            const uTile = getTileByIdFast(mapData, unit.tileId, gridSize);
+            if (!uTile) continue;
+            for (const ridge of getNeighbors(uTile, mapData, gridSize)) {
+                if (ridge.type !== 'MOUNTAIN') continue;
+                if (!canConstructOnTile('TUNNEL', ridge, visibleUnits, buildCtx)) continue;
+                // Objective on the far side of this ridge (beyond it, not beside the unit)?
+                const target = objectives.find(o =>
+                    getManhattanDistance(o, ridge) <= 2 && getManhattanDistance(o, uTile) > 1
+                );
+                if (!target) continue;
+                // Only blast when walking around is impossible or a long (>6 tile) detour.
+                const field = computePathDistanceField([target], mapData, gridSize, false);
+                const dist = field ? field[uTile.y * gridSize + uTile.x] : -1;
+                if (dist !== -1 && dist <= 6) continue;
+                return { type: 'BUILD', itemKey: 'TUNNEL', tileId: ridge.id, cost: 0 };
             }
         }
     }
@@ -487,7 +522,8 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         }
     }
 
-    // C. Secure Buildings / Heist Banks (Avoid flipping building back and forth under active close threat)
+    // C. Secure Buildings (Avoid flipping building back and forth under active close threat)
+    // Banks are breached by siege now (see E2 below), not by interaction.
     if (playerCp >= 4) {
         const nearbyThreat = hasTileWithinRange(uTile, enemyTiles, 3);
 
@@ -497,15 +533,6 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
             if (secureScore > bestScore) {
                 bestScore = secureScore;
                 bestAction = { type: 'SECURE', unitId: unit.id, tileId: b.id, cost: 4 };
-            }
-        }
-
-        const bank = adj.find(t => t.type === 'BANK' && (t.hackProgress || 0) < 100);
-        if (bank && (difficulty !== 'EASY' || Math.random() < 0.5)) {
-            const heistScore = 115;
-            if (heistScore > bestScore) {
-                bestScore = heistScore;
-                bestAction = { type: 'HEIST', unitId: unit.id, tileId: bank.id, cost: 4 };
             }
         }
     }
@@ -542,6 +569,22 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
                  }
              }
          }
+    }
+
+    // E2. Siege unbreached Bank vaults (breaching runs for Scouts & Breachers — Snipers can't crack vaults)
+    if (unit.type !== 'SNIPER' && playerCp >= attackCost && unit.ammo > 0 && canAttackFromHere) {
+        const vault = activeBanks
+            .filter(b => (!aiVisibleSet || aiVisibleSet.has(b.id)) && getManhattanDistance(uTile, b) <= effectiveRange && hasLineOfSight(uTile, b, mapData, unit.type, weather, gridSize))
+            .sort((a, c) => getManhattanDistance(uTile, a) - getManhattanDistance(uTile, c))[0];
+        if (vault) {
+            const vaultDmg = calculateSiegeDamage(unit, uTile, 'BANK');
+            let vaultScore = difficulty === 'EASY' ? 45 : 100;
+            if ((vault.hp || BANK_STATS.HP) <= vaultDmg) vaultScore = difficulty === 'EASY' ? 85 : 9999;
+            if (vaultScore > bestScore) {
+                bestScore = vaultScore;
+                bestAction = { type: 'SIEGE', unitId: unit.id, tileId: vault.id, cost: attackCost };
+            }
+        }
     }
 
     // F. Demolish Barriers

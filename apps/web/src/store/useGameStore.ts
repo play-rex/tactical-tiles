@@ -113,7 +113,6 @@ interface GameStore extends GameState {
   validAttackTargets: string[];
   validSpawnTiles: string[];
   validSecureTile: string | null;
-  validHeistTile: string | null;
   validSiegeTile: string | null;
   validLootTile: string | null;
   validDemolishTile: string | null;
@@ -153,7 +152,6 @@ interface GameStore extends GameState {
   retryCurrentMatch: () => void;
 
   secureBuilding: () => void;
-  heistBank: () => void;
   siegeBase: () => void;
   demolishBarrier: () => void;
   lootSupply: () => void;
@@ -189,7 +187,6 @@ const CLEAR_SELECTION = {
   validAttackTargets: [] as string[],
   validSpawnTiles: [] as string[],
   validSecureTile: null,
-  validHeistTile: null,
   validSiegeTile: null,
   validLootTile: null,
   validDemolishTile: null,
@@ -389,7 +386,6 @@ const optionsSelectionFor = (game: GameState, unit: Unit, visibleTiles: Set<stri
     validMoveTiles: Array.from(opts.moveCosts.keys()),
     validAttackTargets: opts.attackTargets,
     validSecureTile: opts.secureTiles[0] ?? null,
-    validHeistTile: opts.heistTiles[0] ?? null,
     validSiegeTile: opts.siegeTiles[0] ?? null,
     validLootTile: opts.lootTiles[0] ?? null,
     validDemolishTile: opts.demolishTiles[0] ?? null,
@@ -404,7 +400,6 @@ const hasFollowUpAction = (game: GameState, unit: Unit, sel: ReturnType<typeof o
     sel.validSiegeTile !== null ||
     sel.validDemolishTile !== null ||
     sel.validSecureTile !== null ||
-    sel.validHeistTile !== null ||
     sel.validLootTile !== null ||
     canUnitEnterOverwatch(unit, tile, cp) ||
     (unit.ammo < unit.maxAmmo && cp >= CP_SYSTEM.RELOAD_COST)
@@ -715,10 +710,6 @@ export const useGameStore = create<GameStore>((set, get) => {
           get().executeAiAction({ type: 'SECURE', unitId: attacker.id, tileId: clickedTileId, cost: INTERACT_COST });
           return;
         }
-        if (state.validHeistTile === clickedTileId) {
-          get().executeAiAction({ type: 'HEIST', unitId: attacker.id, tileId: clickedTileId, cost: INTERACT_COST });
-          return;
-        }
         if (state.validLootTile === clickedTileId) {
           get().executeAiAction({ type: 'LOOT', unitId: attacker.id, tileId: clickedTileId, cost: INTERACT_COST });
           return;
@@ -790,7 +781,6 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     secureBuilding: () => dispatchSelectedUnitAction(get().validSecureTile, (unitId, tileId) => ({ type: 'SECURE', unitId, tileId, cost: INTERACT_COST })),
 
-    heistBank: () => dispatchSelectedUnitAction(get().validHeistTile, (unitId, tileId) => ({ type: 'HEIST', unitId, tileId, cost: INTERACT_COST })),
 
     siegeBase: () => dispatchSelectedUnitAction(get().validSiegeTile, (unitId, tileId, unit) => ({ type: 'SIEGE', unitId, tileId, cost: getUnitAttackCost(unit) })),
 

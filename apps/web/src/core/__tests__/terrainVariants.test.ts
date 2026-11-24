@@ -63,7 +63,7 @@ test('Terrain variants produce rich visual diversity across mountains, forests, 
 
   assert.equal(mountains.size, 4, 'temperate mountains showcase all 4 alpine/highland/crag variants');
   assert.equal(desertMountains.size, 2, 'desert mountains showcase both Desert Mesa and Desert Butte');
-  assert.equal(forests.size, 4, 'temperate forests showcase conifer, oak, old-growth, and autumn mix');
+  assert.equal(forests.size, 6, 'temperate trees showcase all 6 colorful species (oak, pine, golden birch, crimson maple, sakura blossom, riverside willow)');
   assert.equal(dunes.size, 4, 'dunes showcase all 4 sculpted variants');
   assert.equal(watchtowers.size, 3, 'watchtowers showcase all 3 architectural variants');
   assert.equal(bunkers.size, 3, 'bunkers showcase all 3 fortification variants');
@@ -154,14 +154,56 @@ test('findMountainClusters merges 8-way irregular chains into unified massifs wi
   assert.ok(coreNode.elevation > tipNode.elevation, 'interior massif heart rises taller than outer foothill spurs');
 });
 
-test('generateDynamicMap sculpts larger irregular mountain ranges while keeping bases clear', () => {
-  let maxClusterAcrossSeeds = 0;
-  for (let s = 1; s <= 12; s++) {
-    const { map, size, baseLocations } = generateDynamicMap(2, createSeededRng(`ALPINE_SEED_${s}`));
+test('generateDynamicMap scales larger flanking mountain ranges & forest groves cleanly across 20x20 and 25x25 maps', () => {
+  let sawDesert = false;
+  let sawRoads = false;
+  let sawCanyon = false;
+  let maxMtn20 = 0;
+  let maxMtn25 = 0;
+
+  const countForestClusters4 = (grid: (Tile | undefined)[][], size: number): number[] => {
+    const vis = new Uint8Array(size * size);
+    const out: number[] = [];
+    const dirs = [[0,-1],[-1,0],[1,0],[0,1]];
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (grid[y][x]?.type !== 'FOREST' || vis[y * size + x]) continue;
+        const q = [[x, y]];
+        vis[y * size + x] = 1;
+        let count = 0;
+        while (q.length) {
+          const [cx, cy] = q.shift()!;
+          count++;
+          for (const [dx, dy] of dirs) {
+            const nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size || vis[ny * size + nx]) continue;
+            if (grid[ny][nx]?.type === 'FOREST') {
+              vis[ny * size + nx] = 1;
+              q.push([nx, ny]);
+            }
+          }
+        }
+        out.push(count);
+      }
+    }
+    return out.sort((a, b) => b - a);
+  };
+
+  for (let s = 1; s <= 15; s++) {
+    const players = s >= 12 ? 4 : 2;
+    const { map, size, baseLocations } = generateDynamicMap(players, createSeededRng(`AUDIT-${String(s).padStart(2, '0')}`));
     const grid: (Tile | undefined)[][] = Array.from({ length: size }, () => Array(size).fill(undefined));
     for (const t of map) grid[t.y][t.x] = t;
 
-    // Verify no mountain spawns right on top of or adjacent (dist <= 2) to player bases
+    if (map.some(t => t.type === 'SAND' || t.type === 'DUNES')) sawDesert = true;
+    if (map.some(t => t.type === 'ROAD' || t.type === 'ROAD_H')) sawRoads = true;
+    if (map.some(t => t.type === 'CANYON')) sawCanyon = true;
+
+    // Every map has meaningful bridges across a flowing river or canyon divide
+    const bridges = map.filter(t => t.type === 'BRIDGE' || t.type === 'BRIDGE_V').length;
+    assert.ok(bridges >= 3, `seed ${s} has meaningful river/canyon bridges (got ${bridges})`);
+
+    // Verify no mountain spawns adjacent to player bases
     for (const base of baseLocations) {
       for (const t of map) {
         if (t.type === 'MOUNTAIN') {
@@ -171,10 +213,34 @@ test('generateDynamicMap sculpts larger irregular mountain ranges while keeping 
       }
     }
 
-    const clusters = findMountainClusters(grid, grid, size);
-    const largest = clusters.reduce((m, c) => Math.max(m, c.nodes.length), 0);
-    if (largest > maxClusterAcrossSeeds) maxClusterAcrossSeeds = largest;
-    assert.ok(largest >= 4, `seed ${s} produces at least one substantial mountain range (got ${largest})`);
+    // Mountain ranges: 20x20 has 1-2 larger flanking ranges (<=9) + smaller ridges & 1-2 tile outcrops;
+    // 25x25 scales up to larger sweeping ranges (<=12) + outcrops!
+    const mtnClusters = findMountainClusters(grid, grid, size).map(c => c.nodes.length);
+    const largestMtn = mtnClusters.reduce((m, n) => Math.max(m, n), 0);
+    const multiRanges = mtnClusters.filter(n => n >= 2).length;
+    const smallOutcrops = mtnClusters.filter(n => n <= 2).length;
+    const maxCap = players === 2 ? 9 : 12;
+    if (players === 2) maxMtn20 = Math.max(maxMtn20, largestMtn);
+    else maxMtn25 = Math.max(maxMtn25, largestMtn);
+
+    assert.ok(largestMtn >= 5 && largestMtn <= maxCap, `seed ${s} (${size}x${size}) hero mountain range fits 5..${maxCap} tiles (got ${largestMtn})`);
+    assert.ok(multiRanges >= (players === 2 ? 5 : 8), `seed ${s} has rich spread flanking mountain ranges (got ${multiRanges})`);
+    assert.ok(smallOutcrops >= 3, `seed ${s} includes 1–2 tile mountain outcrops for flanking cover (got ${smallOutcrops})`);
+
+    // Forest groves: 20x20 has 1–2 cohesive groves (4–8 tiles); 25x25 scales to 2–3 larger groves (5–10 tiles), plus richly scattered solo trees!
+    const forestClusters = countForestClusters4(grid, size);
+    const multiTileForests = forestClusters.filter(n => n >= 2);
+    const loneTrees = forestClusters.filter(n => n === 1);
+    const maxGroves = players === 2 ? 2 : 3;
+    const maxGroveCap = players === 2 ? 8 : 10;
+    assert.ok(multiTileForests.length >= 1 && multiTileForests.length <= maxGroves, `seed ${s} has 1..${maxGroves} cohesive forest groves (got ${multiTileForests.length}: [${multiTileForests.join(',')}])`);
+    for (const gSize of multiTileForests) {
+      assert.ok(gSize >= 4 && gSize <= maxGroveCap, `seed ${s} forest grove covers 4..${maxGroveCap} tiles (got ${gSize})`);
+    }
+    assert.ok(loneTrees.length >= (players === 2 ? 30 : 50), `seed ${s} scatters rich standalone individual trees (got ${loneTrees.length})`);
   }
-  assert.ok(maxClusterAcrossSeeds >= 7, `generated maps feature sweeping 7+ tile irregular mountain ranges (max ${maxClusterAcrossSeeds})`);
+
+  assert.ok(maxMtn20 >= 7 && maxMtn20 <= 9, `20x20 maps include 7–9 tile hero flanking ranges (max ${maxMtn20})`);
+  assert.ok(maxMtn25 >= 8 && maxMtn25 <= 12, `25x25 maps scale up to larger 8–12 tile ranges (max ${maxMtn25})`);
+  assert.ok(sawDesert && sawRoads && sawCanyon, '15 randomized maps showcase varied desert, canyon, and road archetypes');
 });

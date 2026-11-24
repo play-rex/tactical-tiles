@@ -107,12 +107,17 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
       const attTile = unit ? tileOf(state, unit.tileId) : undefined;
       const cost = unit ? getUnitAttackCost(unit) : 0;
       const tarTile = tileOf(state, action.tileId);
+      if (action.type === 'SIEGE' && tarTile?.type === 'BANK' && unit?.type === 'SNIPER') {
+        return fail("Snipers can't crack vaults");
+      }
       const validType =
         tarTile &&
         (tarTile.hp || 0) > 0 &&
         (action.type === 'DEMOLISH'
           ? tarTile.type === 'BARRIER'
-          : state.settings.victoryMode === 'CONQUER' && tarTile.type === 'BASE' && tarTile.owner !== seat);
+          : action.type === 'SIEGE' && tarTile.type === 'BANK'
+            ? (tarTile.hackProgress || 0) < 100
+            : state.settings.victoryMode === 'CONQUER' && tarTile.type === 'BASE' && tarTile.owner !== seat);
       if (!unit || !attTile || !validType || cp < cost || unit.ammo <= 0 || !canUnitAttackFromTile(unit, attTile)) {
         return fail("That target isn't in range");
       }
@@ -129,10 +134,9 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
     }
 
     case 'SECURE':
-    case 'HEIST':
     case 'LOOT': {
       const opts = interactionsOf(action.unitId);
-      const tiles = action.type === 'SECURE' ? opts?.secureTiles : action.type === 'HEIST' ? opts?.heistTiles : opts?.lootTiles;
+      const tiles = action.type === 'SECURE' ? opts?.secureTiles : opts?.lootTiles;
       if (!tiles?.includes(action.tileId)) return fail("That unit can't reach it");
       return afford(INTERACT_COST, { type: action.type, unitId: action.unitId, tileId: action.tileId, cost: INTERACT_COST });
     }

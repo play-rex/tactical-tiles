@@ -55,6 +55,7 @@ const TERRAIN_TYPES: TerrainType[] = [
   'BANK',
   'BUILDING',
   'BARRIER',
+  'TUNNEL',
 ];
 
 const Section: React.FC<{ title: string; children?: React.ReactNode }> = ({ title, children }) => (
@@ -170,7 +171,7 @@ const RightIntelPanel: React.FC<{
       break;
     case 'BANK':
       description = 'Financial storage vault.';
-      tactical = `Can be HEISTED for Euros/CP. Protected by Turrets (${BANK_STATS.DAMAGE} DMG).`;
+      tactical = `SIEGE to breach (15 HP, no Snipers). Cash vaults €100–300 or dry intel caches. Protected by Turrets (${BANK_STATS.DAMAGE} DMG).`;
       break;
     case 'BUILDING':
       if (brushSettings.buildingType === 'WATCHTOWER') {
@@ -194,6 +195,10 @@ const RightIntelPanel: React.FC<{
     case 'BRIDGE_V':
       description = 'Water/Canyon crossing.';
       tactical = 'Allows movement across Water or Canyons (1 CP cost).';
+      break;
+    case 'TUNNEL':
+      description = 'Blasted mountain passage.';
+      tactical = 'Fast travel through Mountains (1 CP cost). No cover.';
       break;
   }
 

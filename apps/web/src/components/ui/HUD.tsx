@@ -168,6 +168,13 @@ const BuildingInfoPanel: React.FC<{ tile: Tile }> = React.memo(({ tile }) => {
     const hacked = (tile.hackProgress || 0) >= 100;
     ownerName = hacked ? 'LOOTED' : 'SECURE';
     ownerColor = hacked ? '#475569' : 'var(--acc-amber-ink)';
+    if (tile.hp !== undefined && tile.maxHp !== undefined) {
+      stats.push({ label: 'INTEGRITY', value: `${tile.hp}/${tile.maxHp}` });
+    }
+    if (!hacked) {
+      const isDry = (tile.bankGoldReward ?? GOLD_SETTINGS.HEIST_REWARD_GOLD) <= 0;
+      stats.push({ label: 'VAULT', value: isDry ? 'INTEL CACHE' : 'CASH VAULT' });
+    }
   } else if (tile.type === 'BASE') {
     name = 'HEADQUARTERS';
     if (tile.owner !== null && tile.owner !== undefined) {
@@ -677,7 +684,9 @@ export const LeftPanel: React.FC = React.memo(() => {
                         ? `Land Mine (€${item.cost}) — Hidden to enemies (${LAND_MINE_STATS.DAMAGE} DMG + stops move). Restricted within ${LAND_MINE_STATS.ENEMY_HQ_EXCLUSION_RADIUS} tiles of enemy HQ.`
                         : key === 'BARRIER'
                           ? `Deploy Barrier (x3) (€${item.cost}) — Click up to ${BARRIER_STATS.BUILD_COUNT} tiles to build ${BARRIER_STATS.HP} HP waist-high cover.`
-                          : `${item.name} (€${item.cost}) — Select placement tile on map`
+                          : key === 'TUNNEL'
+                            ? `Mountain Tunnel (€${item.cost}) — Blast a tunnel through a mountain tile: fast travel for all units, no cover.`
+                            : `${item.name} (€${item.cost}) — Select placement tile on map`
                   }
                   coreStyle={{ padding: '6px 8px', justifyContent: 'space-between' }}
                 >
@@ -1075,13 +1084,11 @@ export const RightPanel: React.FC = () => {
   const placementMode = useGameStore(state => state.placementMode);
 
   const secureBuilding = useGameStore(state => state.secureBuilding);
-  const heistBank = useGameStore(state => state.heistBank);
   const siegeBase = useGameStore(state => state.siegeBase);
   const demolishBarrier = useGameStore(state => state.demolishBarrier);
   const lootSupply = useGameStore(state => state.lootSupply);
 
   const validSecureTile = useGameStore(state => state.validSecureTile);
-  const validHeistTile = useGameStore(state => state.validHeistTile);
   const validSiegeTile = useGameStore(state => state.validSiegeTile);
   const validLootTile = useGameStore(state => state.validLootTile);
   const validDemolishTile = useGameStore(state => state.validDemolishTile);
@@ -1350,14 +1357,9 @@ export const RightPanel: React.FC = () => {
                           SECURE BUILDING (4 CP)
                         </GeoButton>
                       )}
-                      {!selectedUnit.completed && validHeistTile && (
-                        <GeoButton variant="amber" fullWidth onClick={heistBank} coreStyle={{ padding: '7px 10px' }}>
-                          HEIST BANK (4 CP)
-                        </GeoButton>
-                      )}
                       {!selectedUnit.completed && validSiegeTile && (
                         <GeoButton variant="red" fullWidth onClick={siegeBase} coreStyle={{ padding: '7px 10px' }}>
-                          SIEGE BASE
+                          SIEGE
                         </GeoButton>
                       )}
                       {!selectedUnit.completed && validDemolishTile && (

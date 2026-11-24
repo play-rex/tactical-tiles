@@ -331,6 +331,7 @@ export const terrainFootstepPreset = (
       return { preset: 'dustPuff', color: 0x94A3B8, scale: 0.92 };
     case 'ROAD':
     case 'ROAD_H':
+    case 'TUNNEL':
     case 'BUILDING':
     case 'BASE':
     case 'BARRIER':

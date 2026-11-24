@@ -1,5 +1,5 @@
 
-export type TerrainType = 'PLAINS' | 'FOREST' | 'MOUNTAIN' | 'WATER' | 'BASE' | 'ROAD' | 'ROAD_H' | 'BRIDGE' | 'BRIDGE_V' | 'BANK' | 'BUILDING' | 'BARRIER' | 'SAND' | 'DUNES' | 'QUICKSAND' | 'CANYON';
+export type TerrainType = 'PLAINS' | 'FOREST' | 'MOUNTAIN' | 'WATER' | 'BASE' | 'ROAD' | 'ROAD_H' | 'BRIDGE' | 'BRIDGE_V' | 'BANK' | 'BUILDING' | 'BARRIER' | 'SAND' | 'DUNES' | 'QUICKSAND' | 'CANYON' | 'TUNNEL';
 
 export type BuildingSubType = 'WATCHTOWER' | 'BUNKER' | 'NONE';
 
