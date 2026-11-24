@@ -1,11 +1,14 @@
 import React from 'react';
 import {
   DEFAULT_DEV_MAP_OPTIONS,
+  DEV_MAP_TOLERANCE,
   DEV_TERRAIN_LABEL,
   devBaseSlots,
   devMapReport,
+  MAP_GEN_PRESETS,
   summarizeDevMap,
   type DevMapOptions,
+  type MapGenKnobs,
 } from '@tactical/engine';
 import { PLAYER_COLORS } from '@tactical/engine/constants/Config';
 import { useGameStore } from '../store/useGameStore';
@@ -64,15 +67,53 @@ const FieldGroup: React.FC<{ title?: string; children: React.ReactNode }> = ({ t
   </GeoWell>
 );
 
-const PRESETS: { id: string; label: string; patch: Partial<DevMapOptions> }[] = [
-  { id: 'balanced', label: 'BALANCED', patch: { forestPct: 18, mountainPct: 12, waterPct: 10, desertPct: 0, buildingPct: 4, lootPct: 6, rivers: 1, banks: 2 } },
-  { id: 'lush', label: 'LUSH VALLEY', patch: { forestPct: 38, mountainPct: 14, waterPct: 16, desertPct: 0, buildingPct: 3, lootPct: 10, rivers: 1, banks: 2 } },
-  { id: 'badlands', label: 'BADLANDS', patch: { forestPct: 4, mountainPct: 22, waterPct: 0, desertPct: 78, buildingPct: 5, lootPct: 8, rivers: 0, banks: 1 } },
-  { id: 'archipelago', label: 'ARCHIPELAGO', patch: { forestPct: 16, mountainPct: 6, waterPct: 30, desertPct: 0, buildingPct: 2, lootPct: 12, rivers: 3, banks: 2 } },
-  { id: 'fortress', label: 'FORTRESS', patch: { forestPct: 10, mountainPct: 34, waterPct: 6, desertPct: 0, buildingPct: 13, lootPct: 2, rivers: 1, banks: 0 } },
-  { id: 'twin', label: 'TWIN FRONTS', patch: { forestPct: 20, mountainPct: 12, waterPct: 12, desertPct: 50, buildingPct: 4, lootPct: 4, rivers: 1, banks: 2 } },
-  { id: 'timber', label: 'TIMBER RIDGE', patch: { forestPct: 35, mountainPct: 16, waterPct: 0, desertPct: 0, buildingPct: 4, lootPct: 6, rivers: 0, banks: 2 } },
-  { id: 'empty', label: 'EMPTY SLATE', patch: { forestPct: 0, mountainPct: 0, waterPct: 0, desertPct: 0, buildingPct: 0, lootPct: 0, rivers: 0, banks: 0 } },
+/**
+ * Dev knobs that rebuild one shipped generation preset. Water style is what makes an island board
+ * an island board — without it Archipelago used to fall back to three river channels. (`CANYON` is
+ * a knob-only style with no dev equivalent, so it builds rivers here.)
+ */
+const devPatchFromKnobs = (knobs: MapGenKnobs): Partial<DevMapOptions> => ({
+  forestPct: knobs.forestPct,
+  mountainPct: knobs.mountainPct,
+  waterPct: knobs.waterPct,
+  waterStyle: knobs.waterStyle === 'CANYON' ? 'RIVERS' : knobs.waterStyle,
+  desertPct: knobs.desertPct,
+  buildingPct: knobs.buildingPct,
+  lootPct: knobs.lootPct,
+  banks: knobs.banks,
+  rivers: knobs.rivers,
+});
+
+/** CLASSIC MIX is the generator's signature randomizer, so its dev board is the default board. */
+const DEV_DEFAULT_PATCH: Partial<DevMapOptions> = {
+  forestPct: DEFAULT_DEV_MAP_OPTIONS.forestPct,
+  mountainPct: DEFAULT_DEV_MAP_OPTIONS.mountainPct,
+  waterPct: DEFAULT_DEV_MAP_OPTIONS.waterPct,
+  waterStyle: DEFAULT_DEV_MAP_OPTIONS.waterStyle,
+  desertPct: DEFAULT_DEV_MAP_OPTIONS.desertPct,
+  buildingPct: DEFAULT_DEV_MAP_OPTIONS.buildingPct,
+  lootPct: DEFAULT_DEV_MAP_OPTIONS.lootPct,
+  banks: DEFAULT_DEV_MAP_OPTIONS.banks,
+  rivers: DEFAULT_DEV_MAP_OPTIONS.rivers,
+};
+
+/**
+ * Same roster as Local Setup and Online Lobbies, generated from the same preset table so dev mode
+ * can never drift behind a new preset again. EMPTY SLATE is the dev-only blank board.
+ */
+const PRESETS: { id: string; label: string; icon: string; patch: Partial<DevMapOptions> }[] = [
+  ...MAP_GEN_PRESETS.map(p => ({
+    id: p.id,
+    label: p.label.toUpperCase(),
+    icon: p.icon,
+    patch: p.id === 'classic' ? DEV_DEFAULT_PATCH : devPatchFromKnobs(p.knobs),
+  })),
+  {
+    id: 'empty',
+    label: 'EMPTY SLATE',
+    icon: '⬜',
+    patch: { forestPct: 0, mountainPct: 0, waterPct: 0, desertPct: 0, buildingPct: 0, lootPct: 0, rivers: 0, banks: 0 },
+  },
 ];
 
 /** Counts the sandbox shows under the preview, in a stable order. */
@@ -202,13 +243,15 @@ export const DevMaps: React.FC = () => {
                 {FIDELITY_ROWS.map(([label, key]) => {
                   const built = fidelity.realized[key];
                   const asked = fidelity.requested[key];
-                  const off = Math.abs(built - asked) > 2;
+                  const off = Math.abs(built - asked) > DEV_MAP_TOLERANCE[key];
+                  // Island boards flood a sea share rather than the knob number, so the row is the sea.
+                  const rowLabel = key === 'waterPct' && devOptions.waterStyle === 'ISLANDS' ? 'SEA' : label;
                   return (
                     <div
                       key={key}
                       style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', fontSize: '11.5px', fontWeight: 700 }}
                     >
-                      <span style={{ color: 'var(--op-ink-muted)' }}>{label}</span>
+                      <span style={{ color: 'var(--op-ink-muted)' }}>{rowLabel}</span>
                       <span style={{ color: off ? 'var(--acc-red-ink, #b42318)' : 'var(--op-ink)', fontVariantNumeric: 'tabular-nums' }}>
                         {built}% {off ? '·' : '='} {asked}%
                       </span>
@@ -222,8 +265,17 @@ export const DevMaps: React.FC = () => {
                   </span>
                 </div>
               </div>
+              {devOptions.waterStyle === 'ISLANDS' ? (
+                <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--op-ink-muted)', lineHeight: 1.35 }}>
+                  SEA VOLUME {devOptions.waterPct} maps to a {fidelity.requested.waterPct}% sea on island boards.
+                </div>
+              ) : null}
               <GeoChip variant={fidelity.faithful ? 'softMint' : 'softViolet'} style={{ alignSelf: 'flex-start', fontSize: '10.5px' }}>
-                {fidelity.faithful ? 'ON TARGET' : 'RIVERS CARVE THROUGH COVER'}
+                {fidelity.faithful
+                  ? 'ON TARGET'
+                  : devOptions.waterStyle === 'ISLANDS'
+                    ? 'SEA MEASURED OVER COASTLINE & PLAZAS'
+                    : 'RIVERS CARVE THROUGH COVER'}
               </GeoChip>
             </FieldGroup>
 
@@ -271,16 +323,47 @@ export const DevMaps: React.FC = () => {
                 </FieldGroup>
 
                 <FieldGroup>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink)' }}>WATER STYLE</span>
+                    <div style={{ display: 'flex', gap: '4px', marginLeft: 'auto' }}>
+                      {(['RIVERS', 'ISLANDS', 'NONE'] as const).map(style => (
+                        <GeoButton
+                          key={style}
+                          variant={devOptions.waterStyle === style ? 'violet' : 'default'}
+                          onClick={() => setDevOptions({ waterStyle: style })}
+                          coreStyle={{ padding: '4px 8px', fontSize: '10.5px' }}
+                        >
+                          {style}
+                        </GeoButton>
+                      ))}
+                    </div>
+                  </div>
                   <Slider label="FOREST COVER" value={devOptions.forestPct} min={0} max={55} suffix="%" onChange={v => setDevOptions({ forestPct: v })} />
                   <Slider label="MOUNTAIN RANGE" value={devOptions.mountainPct} min={0} max={40} suffix="%" onChange={v => setDevOptions({ mountainPct: v })} />
-                  <Slider label="RIVER VOLUME" value={devOptions.waterPct} min={0} max={30} suffix="%" onChange={v => setDevOptions({ waterPct: v })} />
                   <Slider
-                    label="RIVERS"
+                    label={devOptions.waterStyle === 'ISLANDS' ? 'SEA VOLUME' : 'RIVER VOLUME'}
+                    value={devOptions.waterPct}
+                    min={0}
+                    max={30}
+                    suffix="%"
+                    onChange={v => setDevOptions({ waterPct: v })}
+                    hint={
+                      devOptions.waterStyle === 'ISLANDS'
+                        ? 'Island boards flood ~18–48% of the board across this 0–30 range'
+                        : undefined
+                    }
+                  />
+                  <Slider
+                    label={devOptions.waterStyle === 'ISLANDS' ? 'ISLAND RINGS' : 'RIVERS'}
                     value={devOptions.rivers}
                     min={0}
                     max={3}
                     onChange={v => setDevOptions({ rivers: v })}
-                    hint="Bridges auto-align across land and water edges so nobody is cut off"
+                    hint={
+                      devOptions.waterStyle === 'ISLANDS'
+                        ? '1 = home islands · 2 adds flank islets · 3 adds mid-edge islets on 24+ boards'
+                        : 'Bridges auto-align across land and water edges so nobody is cut off'
+                    }
                   />
                   <Slider label="DESERT SPLIT" value={devOptions.desertPct} min={0} max={100} suffix="%" onChange={v => setDevOptions({ desertPct: v })} />
                 </FieldGroup>
@@ -321,9 +404,10 @@ export const DevMaps: React.FC = () => {
                         key={p.id}
                         variant="softViolet"
                         onClick={() => setDevOptions(p.patch)}
-                        coreStyle={{ padding: '5px 9px', fontSize: '11px' }}
+                        coreStyle={{ padding: '5px 9px', fontSize: '11px', gap: '4px' }}
                       >
-                        {p.label}
+                        <span>{p.icon}</span>
+                        <span>{p.label}</span>
                       </GeoButton>
                     ))}
                   </div>

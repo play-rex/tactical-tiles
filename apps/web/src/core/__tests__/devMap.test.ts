@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { auditBridgeOrientation, devMapReport, generateDevMap } from '@tactical/engine';
+import { auditBridgeOrientation, DEV_MAP_TOLERANCE, devMapReport, generateDevMap } from '@tactical/engine';
 
 const walkable = (type: string) => type !== 'WATER';
 
@@ -129,6 +129,48 @@ test('knobs at zero build nothing, and river volume widens channels monotonicall
     0,
     'river volume alone never paints water',
   );
+});
+
+test('river volume moves smoothly: no single knob point doubles the water', () => {
+  const waterShare = (waterPct: number): number =>
+    devMapReport(generateDevMap({ seed: 'RIVER', gridSize: 22, rivers: 1, waterPct }).map, 22, { rivers: 1, waterPct })
+      .realized.waterPct;
+
+  // The old width brackets jumped 1 -> 2 tiles at 8/16/24, so one point of the knob doubled the
+  // river. Width now comes from the requested share, so neighbours differ by a tile or two.
+  for (let pct = 2; pct < 30; pct++) {
+    const here = waterShare(pct);
+    const next = waterShare(pct + 1);
+    assert.ok(next - here <= 2, `river volume ${pct}% -> ${pct + 1}% jumped ${here}% -> ${next}%`);
+  }
+  assert.ok(waterShare(9) - waterShare(8) <= 1, `8% -> 9% must not double the river (${waterShare(8)}% -> ${waterShare(9)}%)`);
+});
+
+test('island boards report the sea share the sea knob maps to, not the raw knob number', () => {
+  const islandBoard = (waterPct: number) =>
+    generateDevMap({
+      seed: 'ISLE',
+      gridSize: 20,
+      playerCount: 2,
+      waterStyle: 'ISLANDS',
+      rivers: 3,
+      waterPct,
+      forestPct: 16,
+      mountainPct: 8,
+      buildingPct: 3,
+      lootPct: 0,
+      banks: 2,
+    });
+
+  const full = islandBoard(26).report;
+  // 26 on the sea knob maps to a 45% sea (16% + 26 × 1.1 points), the shipped archipelago curve.
+  assert.equal(full.requested.waterPct, 45, 'sea volume 26 must report the 45% sea it maps to');
+  assert.ok(
+    Math.abs(full.realized.waterPct - full.requested.waterPct) <= DEV_MAP_TOLERANCE.waterPct,
+    `island sea landed ${full.realized.waterPct}% against a ${full.requested.waterPct}% target`,
+  );
+  assert.equal(full.faithful, true, 'a working archipelago must not read as an unfaithful board');
+  assert.ok(islandBoard(6).report.realized.waterPct < full.realized.waterPct, 'a calmer sea knob builds less water');
 });
 
 test('dev map honours bank and loot requests', () => {

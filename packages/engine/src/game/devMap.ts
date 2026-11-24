@@ -18,6 +18,8 @@ import { BANK_STATS, BASE_STATS } from '../constants/Config';
 import { placeEdgeAwareBridges } from '../grid/BridgePlacement';
 import type { SupplyLootType, TerrainType, Tile } from '../types';
 import { createSeededRng, generateSectorSeed, normalizeSeed } from '../utils/SeededRandom';
+import { archipelagoSeaShare, carveArchipelago } from './islandArchipelago';
+import { channelWidthStepper, planRiverChannel } from './riverChannel';
 
 export interface DevMapOptions {
   /** Seed code; the same seed always rebuilds the same battlefield. */
@@ -30,8 +32,10 @@ export interface DevMapOptions {
   forestPct: number;
   /** Share covered by mountain massifs (0–40). */
   mountainPct: number;
-  /** River volume: channel width and wander (0–30). */
+  /** River volume: share of the board under water, spread across the channels (0–30). */
   waterPct: number;
+  /** How the water is built: braided river channels, an island chain, or none at all. */
+  waterStyle: 'RIVERS' | 'ISLANDS' | 'NONE';
   /** Share of the ground painted sand/dunes instead of grass (0–100). */
   desertPct: number;
   /** Share of watchtowers/bunkers (0–15). */
@@ -51,9 +55,10 @@ export const DEFAULT_DEV_MAP_OPTIONS: DevMapOptions = {
   forestPct: 18,
   mountainPct: 12,
   waterPct: 10,
+  waterStyle: 'RIVERS',
   desertPct: 0,
   buildingPct: 4,
-  lootPct: 6,
+  lootPct: 1,
   banks: 1,
   rivers: 1,
 };
@@ -69,6 +74,16 @@ export interface DevMapCoverage {
   banks: number;
   rivers: number;
 }
+
+/** How far a realized coverage knob may sit from its request before the board reads unfaithful. */
+export const DEV_MAP_TOLERANCE = {
+  forestPct: 4,
+  mountainPct: 4,
+  desertPct: 4,
+  buildingPct: 3,
+  lootPct: 4,
+  waterPct: 12,
+} as const;
 
 export interface DevMapReport {
   tiles: number;
@@ -206,8 +221,59 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
   const lootTarget = Math.round((tiles * clampInt(opts.lootPct, 0, 40)) / 100);
   const desertTarget = Math.round((tiles * clampInt(opts.desertPct, 0, 100)) / 100);
 
-  // ── 2. Banks first: they are structure, not terrain, so reserving them up front keeps every
-  //        coverage knob exact (a bank stamped into a forest used to cost a forest tile).
+  // ── 2. Waterways: rivers carve continuous channels, island boards flood an archipelago field.
+  //        Water goes down before the terrain knobs (the order the shipped generator uses), so
+  //        forests, mountains and buildings settle on the land that is left instead of being
+  //        painted over afterwards. Bridges land later, once every HQ plaza is final.
+  const riverCount = clampInt(opts.rivers, 0, 3);
+  const riverVolume = clampInt(opts.waterPct, 0, 30);
+  const waterStyle = opts.waterStyle ?? 'RIVERS';
+  const hasWater = waterStyle !== 'NONE' && riverCount > 0 && riverVolume > 0;
+  // Width comes from the water the knob asks for, not from a bracket of the knob's value.
+  let channel: ReturnType<typeof planRiverChannel> | null = null;
+  if (hasWater && waterStyle === 'ISLANDS') {
+    carveArchipelago({
+      map,
+      size,
+      slots,
+      playerCount: players,
+      rings: riverCount,
+      waterPct: riverVolume,
+      flip: false,
+      mirrored: false,
+      noise,
+      restoreGround: t => {
+        t.type = 'PLAINS';
+        t.height = 1;
+      },
+    });
+  } else if (hasWater) {
+    channel = planRiverChannel(size, riverCount, riverVolume);
+    const wanderAmp = 0.35 + riverVolume / 25;
+    for (let r = 0; r < riverCount; r++) {
+      // Each channel walks the board once, so it averages its own width over its own run.
+      const nextWidth = channelWidthStepper(channel);
+      const horizontal = r % 2 === 0;
+      const lane = Math.round((size * (r + 1)) / (riverCount + 1));
+      let wander = 0;
+      for (let step = 0; step < size; step++) {
+        wander = Math.max(-3, Math.min(3, wander + (rng() - 0.5) * wanderAmp));
+        const depth = Math.round(lane + wander);
+        const runWidth = nextWidth();
+        for (let w = 0; w < runWidth; w++) {
+          const x = horizontal ? step : depth + w;
+          const y = horizontal ? depth + w : step;
+          const t = at(x, y);
+          if (!t || inBasePlaza(t)) continue;
+          t.type = 'WATER';
+          t.height = 0;
+          t.subType = undefined;
+        }
+      }
+    }
+  }
+
+  // ── 3. Banks: stamped on the dry land the water leaves behind, so no vault can ever be flooded.
   const bankCount = clampInt(opts.banks, 0, 4);
   const bankSpots: Tile[] = [];
   const bankFits = (t: Tile | null): t is Tile =>
@@ -240,7 +306,7 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
     if (bankFits(t)) stampBank(t);
   }
 
-  // ── 3. Mountain massifs: the tallest terrain claims its ground before anything else.
+  // ── 4. Mountain massifs: the tallest terrain claims its ground before anything else.
   paintBlobs(
     mountainTarget,
     (t): t is Tile => paintTarget(t) && t.type !== 'MOUNTAIN',
@@ -252,7 +318,7 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
     0.78,
   );
 
-  // ── 4. Forest groves: canopies over grass, sand or dunes, never over rock.
+  // ── 5. Forest groves: canopies over grass, sand or dunes, never over rock.
   paintBlobs(
     forestTarget,
     (t): t is Tile => paintTarget(t) && (t.type === 'PLAINS' || t.type === 'SAND' || t.type === 'DUNES'),
@@ -264,7 +330,7 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
     0.6,
   );
 
-  // ── 5. Buildings: watchtowers (fire platforms) and bunkers (cover). Buildings take open ground
+  // ── 6. Buildings: watchtowers (fire platforms) and bunkers (cover). Buildings take open ground
   //        only — canopies stay intact, and the desert pass still sees the grass it was promised.
   paintBlobs(
     buildingTarget,
@@ -278,7 +344,7 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
     () => 1,
   );
 
-  // ── 6. Desert: rank the leftover grass by noise and take exactly the requested share, so the
+  // ── 7. Desert: rank the leftover grass by noise and take exactly the requested share, so the
   //        coast between grass and sand follows a noise contour instead of a staircase.
   if (desertTarget > 0) {
     const grass = map.filter(t => t.type === 'PLAINS' && !inBasePlaza(t));
@@ -290,34 +356,6 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
       if (noise(t.x * 0.4 + 40, t.y * 0.4 + 40) < 0.12) {
         t.type = 'DUNES';
         t.height = 2;
-      }
-    }
-  }
-
-  // ── 7. Rivers: carve continuous orthogonal water channels first (bridges are placed after
-  //        every channel & HQ plaza is finalized, using land-edge / water-edge span detection).
-  const riverCount = clampInt(opts.rivers, 0, 3);
-  const riverVolume = clampInt(opts.waterPct, 0, 30);
-  const hasRivers = riverCount > 0 && riverVolume > 0;
-  if (hasRivers) {
-    const width = riverVolume <= 8 ? 1 : riverVolume <= 16 ? 2 : riverVolume <= 24 ? 3 : 4;
-    const wanderAmp = 0.35 + riverVolume / 25;
-    for (let r = 0; r < riverCount; r++) {
-      const horizontal = r % 2 === 0;
-      const lane = Math.round((size * (r + 1)) / (riverCount + 1));
-      let wander = 0;
-      for (let step = 0; step < size; step++) {
-        wander = Math.max(-3, Math.min(3, wander + (rng() - 0.5) * wanderAmp));
-        const depth = Math.round(lane + wander);
-        for (let w = 0; w < width; w++) {
-          const x = horizontal ? step : depth + w;
-          const y = horizontal ? depth + w : step;
-          const t = at(x, y);
-          if (!t || inBasePlaza(t) || t.type === 'BANK') continue;
-          t.type = 'WATER';
-          t.height = 0;
-          t.subType = undefined;
-        }
       }
     }
   }
@@ -345,14 +383,18 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
   });
 
   // ── 9. Edge-aware bridge placement + orthogonal HQ/Bank connectivity guarantee.
-  if (hasRivers) {
+  if (hasWater) {
     const anchors = [
       ...slots,
       ...map.filter(t => t.type === 'BANK').map(t => ({ x: t.x, y: t.y })),
     ];
+    const islands = waterStyle === 'ISLANDS';
     placeEdgeAwareBridges(map, size, {
-      maxSpan: 6,
+      // A wide river needs a longer deck than a narrow one, or its crossings silently disappear.
+      // Island boards keep the shipped 5-tile strait deck and bridge count.
+      maxSpan: islands ? 5 : Math.max(6, Math.ceil((channel?.width ?? 1) + 1)),
       minSpacing: 4,
+      ...(islands ? { targetBridges: Math.max(players * 2 + 1, Math.round(size * 0.34)) } : {}),
       anchors,
       allowCarveObstacles: true,
       rng,
@@ -396,10 +438,17 @@ export const devMapReport = (
   const share = (n: number): number => Math.round((n / Math.max(1, tiles)) * 100);
   const count = (pred: (t: Tile) => boolean): number => map.filter(pred).length;
 
+  // Island boards flood a sea share instead of the knob number, so report the share the knob maps
+  // to; comparing it against the raw 0–30 value would flag a working archipelago as broken.
+  const waterRequested =
+    opts.waterStyle === 'ISLANDS' && clampInt(opts.rivers, 0, 3) > 0 && clampInt(opts.waterPct, 0, 30) > 0
+      ? Math.round(archipelagoSeaShare(clampInt(opts.waterPct, 0, 30)) * 100)
+      : clampInt(opts.waterPct, 0, 30);
+
   const requested: DevMapCoverage = {
     forestPct: clampInt(opts.forestPct, 0, 55),
     mountainPct: clampInt(opts.mountainPct, 0, 40),
-    waterPct: clampInt(opts.waterPct, 0, 30),
+    waterPct: waterRequested,
     desertPct: clampInt(opts.desertPct, 0, 100),
     buildingPct: clampInt(opts.buildingPct, 0, 15),
     lootPct: clampInt(opts.lootPct, 0, 40),
@@ -419,12 +468,12 @@ export const devMapReport = (
 
   const within = (a: number, b: number, tolerance: number): boolean => Math.abs(a - b) <= tolerance;
   const faithful =
-    within(realized.forestPct, requested.forestPct, 4) &&
-    within(realized.mountainPct, requested.mountainPct, 4) &&
-    within(realized.desertPct, requested.desertPct, 4) &&
-    within(realized.buildingPct, requested.buildingPct, 3) &&
-    within(realized.lootPct, requested.lootPct, 4) &&
-    within(realized.waterPct, requested.waterPct, 12) &&
+    within(realized.forestPct, requested.forestPct, DEV_MAP_TOLERANCE.forestPct) &&
+    within(realized.mountainPct, requested.mountainPct, DEV_MAP_TOLERANCE.mountainPct) &&
+    within(realized.desertPct, requested.desertPct, DEV_MAP_TOLERANCE.desertPct) &&
+    within(realized.buildingPct, requested.buildingPct, DEV_MAP_TOLERANCE.buildingPct) &&
+    within(realized.lootPct, requested.lootPct, DEV_MAP_TOLERANCE.lootPct) &&
+    within(realized.waterPct, requested.waterPct, DEV_MAP_TOLERANCE.waterPct) &&
     realized.banks === requested.banks;
 
   return { tiles, requested, realized, faithful };

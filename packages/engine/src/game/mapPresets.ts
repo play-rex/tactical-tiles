@@ -12,6 +12,8 @@ import {
   isFootPassable,
   placeEdgeAwareBridges,
 } from '../grid/BridgePlacement';
+import { carveArchipelago } from './islandArchipelago';
+import { channelWidthStepper, planRiverChannel } from './riverChannel';
 import type {
   GridSizeOption,
   MapGenConfig,
@@ -812,6 +814,9 @@ export const generateConfiguredMap = (
     knobs.waterPct > 0 &&
     (knobs.waterStyle === 'ISLANDS' || knobs.rivers > 0);
 
+  // Wide rivers get wider decks; set by the river carving below, read by bridge placement after it.
+  let channelMaxSpan = 6;
+
   if (hasWaterway && (knobs.waterStyle === 'RIVERS' || knobs.waterStyle === 'CANYON')) {
     const channelType: 'WATER' | 'CANYON' = knobs.waterStyle === 'CANYON' ? 'CANYON' : 'WATER';
     // Lush Valley naturally varies across 1, 2, or 3 river variants per seed while keeping
@@ -821,9 +826,14 @@ export const generateConfiguredMap = (
       config.knobs?.rivers === undefined &&
       config.knobs?.waterPct === undefined;
     const riverCount = isLushVariant ? 1 + Math.floor(rng() * 3) : knobs.rivers;
-    const width = isLushVariant
-      ? (riverCount === 1 ? 2 : 1)
-      : (knobs.waterPct <= 8 ? 1 : knobs.waterPct <= 16 ? 2 : knobs.waterPct <= 24 ? 3 : 4);
+    // Width comes from the water the knob asks for rather than from a bracket of its value, so 8%
+    // and 9% differ by a few tiles instead of doubling the river. Lush Valley rolls its own 1- or
+    // 2-tile variant per seed and keeps that shape.
+    const channel = isLushVariant ? null : planRiverChannel(size, riverCount, knobs.waterPct);
+    const width = channel ? channel.width : riverCount === 1 ? 2 : 1;
+    /** Widest a step can paint — the band is centred and clamped on this, not on the average. */
+    const boxWidth = Math.max(1, Math.ceil(width));
+    channelMaxSpan = Math.max(6, boxWidth + 1);
     const wanderAmp = isLushVariant && riverCount >= 2 ? 0.52 : 0.42 + knobs.waterPct / 28;
     // Flip primary axis randomly so every seed feels fresh
     const primaryHorizontal = rng() < 0.5;
@@ -883,10 +893,12 @@ export const generateConfiguredMap = (
     for (const spec of specs) {
       const maxStep = spec.halfOnly ? Math.ceil(size / 2) : size;
       let wander = spec.halfOnly ? 0 : (rng() - 0.5) * 1.4;
+      // Each channel averages its own width over its own run.
+      const nextWidth = channel ? channelWidthStepper(channel) : () => width;
       const depthAt = (stepIdx: number, wOffset: number): number => {
         const rawCenter = (size - 1) * spec.laneFrac + (stepIdx - center) * spec.slope + wOffset;
-        const d = Math.round(rawCenter - (width - 1) / 2);
-        return Math.max(1, Math.min(size - 1 - width, d));
+        const d = Math.round(rawCenter - (boxWidth - 1) / 2);
+        return Math.max(1, Math.min(size - 1 - boxWidth, d));
       };
       let prevDepth = depthAt(0, wander);
       for (let step = 0; step < maxStep; step++) {
@@ -900,8 +912,9 @@ export const generateConfiguredMap = (
         // Fill intermediate orthogonal step when depth shifts so rivers never pinch diagonally
         const lo = Math.min(prevDepth, depth);
         const hi = Math.max(prevDepth, depth);
+        const runWidth = nextWidth();
         for (let d = lo; d <= hi; d++) {
-          for (let w = 0; w < width; w++) {
+          for (let w = 0; w < runWidth; w++) {
             const x = spec.horizontal ? step : d + w;
             const y = spec.horizontal ? d + w : step;
             paintChannel(x, y, channelType);
@@ -911,102 +924,23 @@ export const generateConfiguredMap = (
       }
     }
   } else if (hasWaterway && knobs.waterStyle === 'ISLANDS') {
-    // Organic Archipelago: home islands around every HQ + central treasury island + flanking islets
-    const islandCenters: Array<{ x: number; y: number; radius: number; weight: number }> = [];
-    const homeRadius = Math.max(3.6, size * 0.21);
-    for (const s of slots) {
-      islandCenters.push({ x: s.x, y: s.y, radius: homeRadius, weight: 1.0 });
-    }
-    // Central contested bank island
-    islandCenters.push({ x: center, y: center, radius: Math.max(2.8, size * 0.16), weight: 0.78 });
-
-    // Additional flank islands for 2P or higher rivers/straits setting
-    if (players === 2) {
-      const offA = flip2P ? { x: 4, y: 4 } : { x: size - 5, y: 4 };
-      const offB = flip2P ? { x: size - 5, y: size - 5 } : { x: 4, y: size - 5 };
-      if (knobs.rivers >= 2) {
-        islandCenters.push({ x: offA.x, y: offA.y, radius: Math.max(2.7, size * 0.15), weight: 0.72 });
-        islandCenters.push({ x: offB.x, y: offB.y, radius: Math.max(2.7, size * 0.15), weight: 0.72 });
-      }
-    } else if (knobs.rivers >= 3 && size >= 24) {
-      const mid = Math.floor(size / 2);
-      islandCenters.push({ x: mid, y: 4, radius: 3.1, weight: 0.68 });
-      islandCenters.push({ x: mid, y: size - 5, radius: 3.1, weight: 0.68 });
-    }
-
-    const elev = new Float64Array(totalTiles);
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        let bestPeak = 0;
-        let secondPeak = 0;
-        for (const ic of islandCenters) {
-          const d = Math.hypot(x - ic.x, y - ic.y);
-          const contrib = ic.weight * Math.exp(-(d * d) / (2 * ic.radius * ic.radius));
-          if (contrib > bestPeak) {
-            secondPeak = bestPeak;
-            bestPeak = contrib;
-          } else if (contrib > secondPeak) {
-            secondPeak = contrib;
-          }
-        }
-        // Subtle strait trough where two islands meet so straits open cleanly between islands
-        const saddlePenalty = secondPeak > 0.22 ? secondPeak * 0.65 : 0;
-        const n = noise(x * 0.28 + 5.1, y * 0.28 - 3.7) * 0.34;
-        elev[y * size + x] = bestPeak - saddlePenalty + n;
-      }
-    }
-
-    if (mirrored) {
-      for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-          const i = y * size + x;
-          const mi = (size - 1 - y) * size + (size - 1 - x);
-          if (i <= mi) {
-            const avg = (elev[i] + elev[mi]) * 0.5;
-            elev[i] = avg;
-            elev[mi] = avg;
-          }
-        }
-      }
-    }
-
-    const seaShare = Math.min(0.48, Math.max(0.18, 0.16 + knobs.waterPct * 0.011));
-    const seaTarget = Math.round(totalTiles * seaShare);
-    const ranked = map
-      .filter(t => !inBasePlaza(t.x, t.y, 2))
-      .map(t => ({ tile: t, e: elev[t.y * size + t.x] }))
-      .sort((a, b) => a.e - b.e);
-
-    for (let i = 0; i < Math.min(seaTarget, ranked.length); i++) {
-      paintChannel(ranked[i].tile.x, ranked[i].tile.y, 'WATER');
-    }
-
-    // Two gentle coastline smoothing passes remove stray 1-tile puddles and pinprick islets
-    for (let pass = 0; pass < 2; pass++) {
-      const toLand: Tile[] = [];
-      const toWater: Tile[] = [];
-      for (const t of map) {
-        if (inBasePlaza(t.x, t.y, 2)) continue;
-        let waterNeighbors = 0;
-        let totalNeighbors = 0;
-        for (const [dx, dy] of DIRS_4) {
-          const nb = at(t.x + dx, t.y + dy);
-          if (!nb) continue;
-          totalNeighbors++;
-          if (nb.type === 'WATER') waterNeighbors++;
-        }
-        if (t.type === 'WATER' && waterNeighbors <= 1) toLand.push(t);
-        else if (t.type !== 'WATER' && totalNeighbors === 4 && waterNeighbors >= 3) toWater.push(t);
-      }
-      for (const t of toLand) {
+    // Organic Archipelago: the carve lives in `islandArchipelago` so the dev sandbox floods the
+    // exact same island field instead of approximating islands with three river channels.
+    carveArchipelago({
+      map,
+      size,
+      slots,
+      playerCount: players,
+      rings: knobs.rivers,
+      waterPct: knobs.waterPct,
+      flip: flip2P,
+      mirrored,
+      noise,
+      restoreGround: t => {
         t.type = baseGroundAt(t.x, t.y);
         t.height = 1;
-      }
-      for (const t of toWater) {
-        t.type = 'WATER';
-        t.height = 0;
-      }
-    }
+      },
+    });
   }
 
   // ── 4. Clear HQ aprons & stamp HQs early so bridge placement & mountains respect them
@@ -1033,7 +967,7 @@ export const generateConfiguredMap = (
   // ── 5. Edge-Aware Bridge Placement across all WATER & CANYON channels
   const placedSpans = hasWaterway
     ? placeEdgeAwareBridges(map, size, {
-        maxSpan: knobs.waterStyle === 'ISLANDS' ? 5 : 6,
+        maxSpan: knobs.waterStyle === 'ISLANDS' ? 5 : channelMaxSpan,
         minSpacing: 4,
         targetBridges:
           knobs.waterStyle === 'ISLANDS'
