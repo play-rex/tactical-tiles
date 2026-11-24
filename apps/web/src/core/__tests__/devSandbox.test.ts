@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DEFAULT_GAME_SETTINGS } from '@tactical/engine';
+import { botAction, DEFAULT_GAME_SETTINGS, type GameEvent } from '@tactical/engine';
 import { BANK_STATS, BASE_STATS } from '@tactical/engine/constants/Config';
 import { useGameStore } from '../../store/useGameStore';
+import { highlightRecorder } from '../graphics/highlightRecorder';
+import { recapPlayer } from '../graphics/recapPlayer';
 
 const boot = () => {
   useGameStore.setState({
@@ -12,6 +14,31 @@ const boot = () => {
   useGameStore.getState().launchDevSandbox();
   useGameStore.getState().setDevFreeplay(true);
 };
+
+test('bot match: both seats are AI-driven, so a simulated match runs itself', () => {
+  boot();
+  assert.equal(useGameStore.getState().settings.gameMode, 'PVP', 'the sandbox opens as hot-seat');
+
+  // Turning bots on relaunches the same board with an AI seat on both sides.
+  useGameStore.getState().setDevBotMatch(true);
+  const launched = useGameStore.getState();
+  assert.equal(launched.devBotMatch, true);
+  assert.equal(launched.settings.gameMode, 'PVE', 'bot match runs under AI rules');
+  assert.equal(launched.settings.fogOfWar, false, 'no fog: you are watching, not playing');
+  assert.equal(launched.devFreeplay, false, 'the simulation runs real rules, not the free-CP sandbox');
+  assert.equal(launched.isAiTurn, true, 'seat 0 is locked to the bot as well');
+
+  // The brain acts for the opening seat and the board stays AI-locked afterwards.
+  const action = botAction(launched);
+  launched.executeAiAction(action);
+  const after = useGameStore.getState();
+  assert.equal(after.winner, null, 'the simulation did not end on one action');
+  assert.equal(after.isAiTurn, true, 'still AI-driven after seat 0 acts');
+
+  useGameStore.getState().setDevBotMatch(false);
+  assert.equal(useGameStore.getState().devBotMatch, false);
+  assert.equal(useGameStore.getState().isAiTurn, false, 'switching bots off hands the board back');
+});
 
 test('pure sandbox: clicking a bank strikes it instead of parking the unit on it', () => {
   boot();
@@ -65,4 +92,50 @@ test('pure sandbox: clicking an enemy HQ sieges it; units cannot stay on own HQ,
   assert.equal(useGameStore.getState().units.find(u => u.id === unit.id)!.tileId, moved.tileId, 'unit cannot stand on barrier');
   useGameStore.getState().devPlace(ownHq.x, ownHq.y, { kind: 'UNIT', unitType: 'SOLDIER', owner: 0 });
   assert.equal(useGameStore.getState().units.some(u => u.tileId === ownHq.id), false, 'cannot brush-place unit on Base');
+});
+
+test('end-of-match scoreboard stays held until the drama reel actually starts', () => {
+  boot();
+  const s = useGameStore.getState();
+  const victim = s.units.find(u => u.owner === 1);
+  const killer = s.units.find(u => u.owner === 0);
+  assert.ok(victim && killer, 'both seats have units');
+
+  const killBatch = (): GameEvent[] => [
+    { kind: 'hit', targetUnitId: victim.id, at: { x: 1, y: 1 }, damage: 12, isKill: true, weapon: 'SNIPER' },
+    {
+      kind: 'killed',
+      unitId: victim.id,
+      unitType: victim.type,
+      owner: victim.owner,
+      rank: 0,
+      at: { x: 1, y: 1 },
+      killerUnitId: killer.id,
+      killerOwner: killer.owner,
+      cause: 'COMBAT',
+    },
+  ];
+  highlightRecorder.reset();
+  for (const turn of [2, 5]) {
+    highlightRecorder.record({
+      turn,
+      seed: 'SIEGE',
+      preUnits: s.units,
+      preMapData: s.mapData,
+      postUnits: s.units,
+      postMapData: s.mapData,
+      events: killBatch(),
+    });
+  }
+
+  // The winning board is on screen with the reel cued but not started: the modal must wait.
+  useGameStore.setState({ winner: 0, finalePending: true });
+  assert.equal(useGameStore.getState().playMatchFilm(), true);
+  assert.equal(useGameStore.getState().finalePending, false, 'the hold hands over to the reel');
+  assert.equal(recapPlayer.isActive(), true, 'the reel owns the screen, so no results flash');
+
+  // Skipping the reel releases the scoreboard.
+  recapPlayer.stop();
+  assert.equal(useGameStore.getState().finalePending, false);
+  highlightRecorder.reset();
 });

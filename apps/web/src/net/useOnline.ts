@@ -88,6 +88,7 @@ interface OnlineState {
   commitMapEdits(edits: MapTilePatch[] | null): void;
   sendMapSuggestion(edits: MapTilePatch[] | null): void;
   resolveSuggestion(seat: number, accept: boolean): void;
+  setMapCustomizing(active: boolean): void;
   start(): void;
   rematch(): void;
   clearError(): void;
@@ -285,6 +286,7 @@ export const useOnline = create<OnlineState>((set, get) => {
     commitMapEdits: edits => send(ClientMsg.mapCommitEdit, { edits }),
     sendMapSuggestion: edits => send(ClientMsg.mapSuggest, { edits }),
     resolveSuggestion: (seat, accept) => send(ClientMsg.resolveSuggestion, { seat, accept }),
+    setMapCustomizing: active => send(ClientMsg.mapCustomizing, { active }),
     start: () => send(ClientMsg.start),
     rematch: () => send(ClientMsg.rematch),
     clearError: () => set({ error: null }),

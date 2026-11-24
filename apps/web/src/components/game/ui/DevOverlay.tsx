@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { TILE_SIZE } from '@tactical/engine/constants/Config';
 import { useViewportContext } from '../../../context/ViewportContext';
 import { unrotateBoardPoint } from '../../../core/boardRotation';
-import { useGameStore, type DevBrush, type DevEventKind } from '../../../store/useGameStore';
+import { useGameStore, type DevBrush } from '../../../store/useGameStore';
+import { DEV_EVENT_CATALOG, DEV_EVENT_GROUPS, devEventCoverage } from '../../../core/dev/devEventMatrix';
 
 const TERRAIN_BRUSHES: { label: string; brush: DevBrush }[] = [
   { label: 'GRASS', brush: { kind: 'TERRAIN', terrain: 'PLAINS' } },
@@ -31,23 +32,8 @@ const UNIT_BRUSHES: { label: string; brush: DevBrush }[] = [
   { label: 'SNIPER P2', brush: { kind: 'UNIT', unitType: 'SNIPER', owner: 1 } },
 ];
 
-const EVENTS: { label: string; kind: DevEventKind }[] = [
-  { label: 'ATTACK HIT', kind: 'ATTACK_HIT' },
-  { label: '1 HP GRAZE', kind: 'GRAZE_1HP' },
-  { label: 'CINEMATIC KILL', kind: 'KILL_CINEMATIC' },
-  { label: 'MICRO KILL', kind: 'KILL_MICRO' },
-  { label: 'MINE CLICK', kind: 'MINE_CLICK' },
-  { label: 'OVERWATCH KILL', kind: 'OVERWATCH_KILL' },
-  { label: 'CROSSFIRE KILL', kind: 'CROSSFIRE_KILL' },
-  { label: 'CORNER KILL', kind: 'CORNER_KILL' },
-  { label: 'VAULT HEIST', kind: 'HEIST' },
-  { label: 'BANK DEMOLISHED', kind: 'BANK_DEMOLISH' },
-  { label: 'HQ BREACH', kind: 'HQ_BREACH' },
-  { label: 'HQ DESTROYED', kind: 'HQ_DESTROY' },
-  { label: 'POTM REPLAY', kind: 'POTM_REPLAY' },
-  { label: 'EXPORT CLIP', kind: 'EXPORT_CLIP' },
-  { label: 'TURN RECAP', kind: 'TURN_RECAP' },
-];
+/** The panel renders the coverage matrix, so no cut can exist without a way to audition it. */
+const COVERAGE = devEventCoverage();
 
 const chip = (active: boolean): React.CSSProperties => ({
   background: active ? 'linear-gradient(180deg,#38bdf8,#0ea5e9)' : 'rgba(15,23,36,0.92)',
@@ -88,13 +74,20 @@ export const DevOverlay: React.FC = () => {
   const devFireEvent = useGameStore(s => s.devFireEvent);
   const devFreeplay = useGameStore(s => s.devFreeplay);
   const setDevFreeplay = useGameStore(s => s.setDevFreeplay);
+  const devBotMatch = useGameStore(s => s.devBotMatch);
+  const setDevBotMatch = useGameStore(s => s.setDevBotMatch);
   const resetGame = useGameStore(s => s.resetGame);
   const mapRotation = useGameStore(s => s.mapRotation);
   const gridSize = useGameStore(s => s.gridSize);
   const { viewport } = useViewportContext();
 
   const [brush, setBrush] = useState<DevBrush | null>(null);
-  const [open, setOpen] = useState(true);
+  // A simulated match is watched on the real game screen: fold the panel away so the HUD, kill cams
+  // and match card are unobstructed, and leave a single strip to get back in.
+  const [open, setOpen] = useState(() => !useGameStore.getState().devBotMatch);
+  useEffect(() => {
+    setOpen(!devBotMatch);
+  }, [devBotMatch]);
 
   if (!devSandbox) return null;
   const boardSize = gridSize * TILE_SIZE;
@@ -143,7 +136,9 @@ export const DevOverlay: React.FC = () => {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: '0.24em', color: '#7dd3fc' }}>DEV</span>
+          <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: '0.24em', color: '#7dd3fc' }}>
+            {devBotMatch ? 'SIM' : 'DEV'}
+          </span>
           <button onClick={() => setOpen(v => !v)} style={{ ...chip(false), padding: '2px 6px' }}>
             {open ? 'HIDE' : 'SHOW'}
           </button>
@@ -153,6 +148,13 @@ export const DevOverlay: React.FC = () => {
             style={{ ...chip(devFreeplay), padding: '2px 6px' }}
           >
             PURE SANDBOX {devFreeplay ? 'ON' : 'OFF'}
+          </button>
+          <button
+            onClick={() => setDevBotMatch(!devBotMatch)}
+            title="Both seats play themselves: run a simulated match and just watch the animations"
+            style={{ ...chip(devBotMatch), padding: '2px 6px' }}
+          >
+            BOTS {devBotMatch ? 'ON' : 'OFF'}
           </button>
           {brush && (
             <button onClick={() => setBrush(null)} style={{ ...chip(true), padding: '2px 6px' }}>
@@ -166,13 +168,26 @@ export const DevOverlay: React.FC = () => {
 
         {open && (
           <>
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-              {EVENTS.map(ev => (
-                <button key={ev.kind} onClick={() => devFireEvent(ev.kind)} style={eventChip}>
-                  {ev.label}
-                </button>
-              ))}
-            </div>
+            {DEV_EVENT_GROUPS.map(group => {
+              const rows = DEV_EVENT_CATALOG.filter(spec => spec.group === group.id);
+              if (rows.length === 0) return null;
+              return (
+                <div key={group.id} style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: 7.5, fontWeight: 900, letterSpacing: '0.16em', color: '#475569', minWidth: 54 }}>
+                    {group.label}
+                  </span>
+                  {rows.map(spec => (
+                    <button key={spec.kind} onClick={() => devFireEvent(spec.kind)} title={spec.hint} style={eventChip}>
+                      {spec.label}
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+            <span style={{ fontSize: 8, letterSpacing: '0.12em', color: COVERAGE.complete ? '#4ade80' : '#f59e0b' }}>
+              COVERAGE · CAUSES {COVERAGE.causes.length}/7 · TIERS {COVERAGE.tiers.length}/4 · CAMERAS {COVERAGE.styles.length}/8
+              {COVERAGE.complete ? ' · COMPLETE' : ` · MISSING ${[...COVERAGE.missingCauses, ...COVERAGE.missingTiers, ...COVERAGE.missingStyles].join(', ')}`}
+            </span>
 
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 520 }}>
               {TERRAIN_BRUSHES.map(item => (

@@ -293,6 +293,12 @@ interface ScheduledCue {
 /** Hard ceiling per tick so waking from ECO sleep or switching tabs never teleports FX. */
 export const MAX_TIMELINE_STEP_MS = 33.33;
 
+/**
+ * A single frame gap wider than this means rendering stopped (tab hidden/occluded, OS sleep).
+ * A kill-cam cut must never resume across such a gap: the player never saw the shot.
+ */
+export const STALE_FRAME_MS = 400;
+
 /** Linear trauma decay per second (1.0 -> 0 in ~450ms for crisp tactile response). */
 const TRAUMA_DECAY_PER_SEC = 2.2;
 const MAX_SHAKE_SCREEN_PX = 14;
@@ -554,6 +560,16 @@ export class FxTimeline {
       this.notifyActiveIfChanged();
     }
     return skipped;
+  }
+
+  /**
+   * Tab-away safety: aborts the active cut (and its deferred impact) and restores real time.
+   * Callers resume with a normal `step()`; pending cues are kept so the turn still completes.
+   */
+  public suspend(): void {
+    this.killCam.suspend();
+    this.hitStopMs = 0;
+    this.notifyActiveIfChanged();
   }
 
   /** Subscribes specifically to kill-cam `IDLE <-> ACTIVE` transitions (used to defer modals & AI). */
@@ -882,7 +898,14 @@ export class FxTimeline {
    * Returns `{ dtMs, combatDtMs }` so particle systems can respect hit-stop cleanly.
    */
   public step(rawDeltaMs: number): { dtMs: number; combatDtMs: number } {
-    const rawDtMs = Math.min(MAX_TIMELINE_STEP_MS, Math.max(0, Number.isFinite(rawDeltaMs) ? rawDeltaMs : 0));
+    const safeRawMs = Math.max(0, Number.isFinite(rawDeltaMs) ? rawDeltaMs : 0);
+    // Occlusion without a `visibilitychange` (background window, OS sleep) leaves a film running
+    // with the combat clock frozen. End the cut and hand real time back instead of resuming it
+    // mid-slam on the first frame after the gap.
+    if (safeRawMs > STALE_FRAME_MS && this.killCam.suspend()) {
+      this.notifyActiveIfChanged();
+    }
+    const rawDtMs = Math.min(MAX_TIMELINE_STEP_MS, safeRawMs);
     if (rawDtMs <= 0) {
       this.lastCombatDtMs = 0;
       this.notifyActiveIfChanged();
@@ -2009,19 +2032,21 @@ export class FxTimeline {
           this.breachedStructures.add(breachKey);
           const isSiegeTarget = e.structureType === 'BASE' || e.structureType === 'BANK';
           const structureTitle =
-            e.structureType === 'BANK' && e.destroyed
+            e.destroyed && e.structureType === 'BANK'
               ? 'BANK DEMOLISHED'
-              : e.structureType === 'BASE' && e.destroyed
+              : e.destroyed && e.structureType === 'BASE'
                 ? 'HEADQUARTERS DESTROYED'
-                : isFirstBreach && isSiegeTarget && e.damage > 0
-                  ? e.structureType === 'BANK'
-                    ? 'VAULT PENETRATED'
-                    : 'HQ BREACHED'
-                  : null;
+                : e.destroyed && e.structureType === 'BARRIER'
+                  ? 'BARRIER DEMOLISHED'
+                  : isFirstBreach && isSiegeTarget && e.damage > 0
+                    ? e.structureType === 'BANK'
+                      ? 'VAULT PENETRATED'
+                      : 'HQ BREACHED'
+                    : null;
           const structureCue = structureTitle
             ? this.buildStructureCue(
                 structureTitle,
-                `${e.structureType === 'BANK' ? 'VAULT' : 'COMMAND BASE'} TOOK ${e.damage} DAMAGE`,
+                `${e.structureType === 'BANK' ? 'VAULT' : e.structureType === 'BARRIER' ? 'BARRICADE' : 'COMMAND BASE'} TOOK ${e.damage} DAMAGE`,
                 e.structureType,
                 e.at,
                 e.attackerOwner ?? null,

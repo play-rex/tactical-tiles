@@ -640,3 +640,36 @@ test('HighlightRecorder scores match drama accurately and RecapPlayer switches b
   assert.equal(player.isActive(), false);
   assert.equal(restored, 1, 'stop() always restores authoritative live state');
 });
+
+test('tab-away safety: a suspended cut restores real time and a stale frame gap can never resume it', () => {
+  const director = new KillCamDirector();
+  const cue = makeCue({ id: 91 });
+  director.preRoll(cue);
+  advance(director, 40);
+  assert.ok(director.getTimeScale() < 1, 'the film is dilating time before we tab away');
+
+  assert.equal(director.suspend(), true);
+  assert.equal(director.isActive(), false, 'suspending ends the cut');
+  assert.equal(director.getTimeScale(), 1, 'real time is restored');
+  assert.equal(director.impact(cue), false, 'a deferred impact cannot reopen a suspended cut');
+  assert.equal(director.suspend(), false, 'suspending an idle director is a no-op');
+
+  // Occlusion can stop rendering without a `visibilitychange` event. The first frame back is
+  // seconds wide; the cut must end there instead of resuming mid-slam at 0.2x combat speed.
+  const { timeline } = buildTimeline();
+  const activeEvents: boolean[] = [];
+  timeline.subscribeKillCamActive(a => activeEvents.push(a));
+  timeline.dispatchGameEvents(killBatch('ACE'));
+  assert.equal(timeline.isKillCamActive(), true);
+
+  timeline.step(5000);
+  assert.equal(timeline.isKillCamActive(), false, 'the unseen cut is dropped');
+  assert.equal(timeline.getKillCamFrame().timeScale, 1, 'the combat clock is handed back');
+  assert.equal(timeline.getHitStopMs(), 0, 'no frozen hit-stop survives the gap');
+  assert.deepEqual(activeEvents, [true, false], 'deferred AI/modals are told the cut ended');
+
+  // A normal frame never aborts anything: the film still plays out on a healthy display.
+  timeline.dispatchGameEvents(killBatch('GRUNT'));
+  timeline.step(16);
+  assert.equal(timeline.isKillCamActive(), true, 'a 16 ms frame keeps the cut alive');
+});

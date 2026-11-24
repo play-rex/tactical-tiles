@@ -2,8 +2,8 @@
  * Play-of-the-Match highlight recorder (`highlightRecorder`).
  *
  * Pure TypeScript with zero React/Pixi dependencies. Scores every combat/structure/graze batch
- * by drama and retains only the single highest-scoring moment (~50 KB), ready to replay in-engine
- * or export as a broadcast WebM/PNG clip from `WinnerOverlay`.
+ * by drama and retains the strongest moments (~50 KB each): the single best one for the scoreboard
+ * and clip export, plus a ranked reel that `getFilm()` cuts into one chronological story.
  */
 import type { GameEvent, Tile, Unit } from '@tactical/engine';
 
@@ -23,6 +23,57 @@ export interface HighlightScoreResult {
   score: number;
   headline: string;
 }
+
+/** How many moments stay on the cutting-room floor after the top ones are kept. */
+export const HIGHLIGHT_RETAINED = 12;
+
+/** Two moments belong to the same feud when they are this close in time… */
+export const FILM_CAST_WINDOW_TURNS = 6;
+
+/** …and share a unit. Five cuts reads as a story; ten reads as a rerun. */
+export const FILM_MAX_SCENES = 5;
+
+/** The reel: one feud from its first shot to its last, across turns and seats. */
+export interface MatchFilm {
+  /** Chronological, so the match's history plays forward even though scenes are cut apart. */
+  scenes: MatchHighlight[];
+  score: number;
+  headline: string;
+  cast: string[];
+}
+
+/** The units whose fight a moment is: either side of every shot, blast, and death in it. */
+export const highlightCast = (highlight: MatchHighlight): string[] => {
+  const ids = new Set<string>();
+  for (const e of highlight.events) {
+    switch (e.kind) {
+      case 'killed':
+        ids.add(e.unitId);
+        if (e.killerUnitId) ids.add(e.killerUnitId);
+        break;
+      case 'hit':
+        if (e.targetUnitId) ids.add(e.targetUnitId);
+        break;
+      case 'projectile':
+        if (e.attackerId) ids.add(e.attackerId);
+        if (e.targetUnitId) ids.add(e.targetUnitId);
+        break;
+      case 'mineBlast':
+        if (e.victimUnitId) ids.add(e.victimUnitId);
+        break;
+      case 'movePath':
+      case 'heal':
+      case 'promotion':
+      case 'overwatchSet':
+      case 'spawn':
+        ids.add(e.unitId);
+        break;
+      default:
+        break;
+    }
+  }
+  return [...ids];
+};
 
 /** Deterministic drama scorer for an action's `GameEvent[]` batch. */
 export const scoreHighlightBatch = (
@@ -123,13 +174,20 @@ export const scoreHighlightBatch = (
 
 export class HighlightRecorder {
   private best: MatchHighlight | null = null;
+  private scenes: MatchHighlight[] = [];
 
   public reset(): void {
     this.best = null;
+    this.scenes = [];
   }
 
   public getBest(): MatchHighlight | null {
     return this.best;
+  }
+
+  /** Every kept moment, ranked by drama: the raw footage a match reel is cut from. */
+  public getScenes(): readonly MatchHighlight[] {
+    return this.scenes;
   }
 
   public record(input: {
@@ -143,9 +201,8 @@ export class HighlightRecorder {
   }): boolean {
     const { score, headline } = scoreHighlightBatch(input.events, input.postUnits);
     if (score <= 0) return false;
-    if (this.best && score < this.best.score) return false;
 
-    this.best = {
+    const entry: MatchHighlight = {
       score,
       turn: input.turn,
       headline: headline || 'HIGHLIGHT',
@@ -156,7 +213,47 @@ export class HighlightRecorder {
       postMapData: input.postMapData.map(t => ({ ...t })),
       events: input.events,
     };
-    return true;
+
+    this.scenes.push(entry);
+    this.scenes.sort((a, b) => b.score - a.score || a.turn - b.turn);
+    if (this.scenes.length > HIGHLIGHT_RETAINED) this.scenes.length = HIGHLIGHT_RETAINED;
+
+    const isBest = !this.best || score >= this.best.score;
+    if (isBest) this.best = entry;
+    return isBest;
+  }
+
+  /**
+   * The match's story, cut from the reel: the highest-drama moment and every nearby moment that
+   * shares a unit with it, in chronological order. Scenes are joined by cast and time, never by a
+   * continuous timeline — a feud can skip five turns and both seats and still cut together.
+   */
+  public getFilm(maxScenes = FILM_MAX_SCENES): MatchFilm | null {
+    const anchor = this.best ?? this.scenes[0];
+    if (!anchor) return null;
+    const cast = highlightCast(anchor);
+    const castSet = new Set(cast);
+
+    const story = this.scenes
+      .filter(scene => {
+        if (scene === anchor) return true;
+        if (Math.abs(scene.turn - anchor.turn) > FILM_CAST_WINDOW_TURNS) return false;
+        return highlightCast(scene).some(id => castSet.has(id));
+      })
+      // Closest to the anchor first, so a cap keeps the feud tight around its peak.
+      .sort(
+        (a, b) =>
+          Math.abs(a.turn - anchor.turn) - Math.abs(b.turn - anchor.turn) || b.score - a.score,
+      )
+      .slice(0, Math.max(1, maxScenes))
+      .sort((a, b) => a.turn - b.turn || a.score - b.score);
+
+    return {
+      scenes: story,
+      score: anchor.score,
+      headline: anchor.headline,
+      cast,
+    };
   }
 }
 

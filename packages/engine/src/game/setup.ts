@@ -13,8 +13,10 @@ import { assignVoronoiZones } from '../grid/ZoneGeneration';
 import { applyUnitXp, getEffectiveCpRules, getUnitMaxHp } from '../rules/CombatRules';
 import { createSeededRng, generateSectorSeed, normalizeSeed } from '../utils/SeededRandom';
 import { getChallengeById } from '../assets/ChallengeOps';
+import { PRESET_MAPS } from '../assets/Presets';
 import { cloneMatchStats, createEmptyGameState, createLog, createUnit, type GameState, type InventoryItem, type PlayerStatus } from './state';
 import { gameSettingsFor, type MapTilePatch, type TableSettings } from '../protocol';
+import { generateConfiguredMap, isClassicDynamicConfig } from './mapPresets';
 
 export const WEATHER_TYPES: WeatherType[] = ['CLEAR', 'SCORCHED', 'MONSOON', 'FOG', 'TAILWIND', 'SANDSTORM'];
 
@@ -1025,12 +1027,20 @@ const freshGame = (
     matchStats: cloneMatchStats(undefined, settings.playerCount),
 });
 
-/** A generated map from the settings' seed (or a new random seed). */
+/** A generated map from the settings' seed + optional `mapGen` preset/knobs (or a static arena). */
 export const createGeneratedGame = (settings: GameSettings): GameState => {
     const activeSeed = normalizeSeed(settings.mapSeed) || generateSectorSeed();
+    if (settings.mapGen?.staticMapId) {
+        const staticMap = PRESET_MAPS.find(m => m.id === settings.mapGen?.staticMapId);
+        if (staticMap && staticMap.baseCount >= settings.playerCount) {
+            return createCustomMapGame({ ...settings, mapSeed: activeSeed }, staticMap.data);
+        }
+    }
     const mapRng = createSeededRng(activeSeed);
     const weatherRng = createSeededRng(`${activeSeed}_weather`);
-    const { map, size, baseLocations } = generateDynamicMap(settings.playerCount, mapRng);
+    const { map, size, baseLocations } = isClassicDynamicConfig(settings.mapGen)
+        ? generateDynamicMap(settings.playerCount, mapRng)
+        : generateConfiguredMap(settings.playerCount, activeSeed, settings.mapGen!);
     const zonedMap = assignVoronoiZones(map, baseLocations);
     const units = spawnUnitsForPlayers(zonedMap, settings.unitCounts, baseLocations, settings.mutators);
     const players = startingPlayers(settings, weatherRng);

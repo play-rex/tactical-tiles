@@ -1,5 +1,5 @@
 /** Wire types shared by the server and the web client. */
-import type { BuildingSubType, GameSettings, TerrainType, Unit } from './types';
+import type { BuildingSubType, GameSettings, MapGenConfig, TerrainType, Unit } from './types';
 import type { GameEvent } from './game/state';
 import type { PlayerGameView } from './game/view';
 
@@ -65,6 +65,8 @@ export type TableSettings = Required<
   turnBaseS: number;
   /** Seconds banked after every action. 0 = no increment. Host picks 0 | 15 | 30 | 45 | 60. */
   turnIncrementS: number;
+  /** Optional map generation preset & advanced knobs (omit for classic dynamic randomizer). */
+  mapGen?: MapGenConfig;
   /** Optional sparse tile overrides from host/editor inline map edits in the lobby. */
   mapEdits?: MapTilePatch[];
   /** Whether unlocked non-editor guests can submit map suggestions (default true). */
@@ -129,6 +131,8 @@ export interface TableView {
   game: PlayerGameView | null;
   /** Transient live map draft currently being edited in the lobby (cleared on apply/cancel/start). */
   liveDraft?: MapDraftState | null;
+  /** True while the host has the Advanced Map Generator dialog open in the lobby. */
+  hostCustomizingMap?: boolean;
   /** Pending map edit suggestions submitted by unlocked guests for the host to review. */
   mapSuggestions?: MapSuggestion[];
   /**
@@ -159,6 +163,7 @@ export const ClientMsg = {
   mapCommitEdit: 'mapCommitEdit',
   mapSuggest: 'mapSuggest',
   resolveSuggestion: 'resolveSuggestion',
+  mapCustomizing: 'mapCustomizing',
   start: 'start',
   action: 'action',
   rematch: 'rematch',

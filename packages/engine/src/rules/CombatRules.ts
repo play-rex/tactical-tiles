@@ -415,22 +415,34 @@ export const canConstructOnTile = (
 
 /**
  * Determines horizontal ('BRIDGE') vs vertical ('BRIDGE_V') bridge sprite orientation from neighbors.
+ * Prefers the axis that links passable land/bridges on BOTH ends, then checks perpendicular water/canyon
+ * channels so bridges cross waterways cleanly rather than running parallel to them.
  */
 export const resolveBridgeVariant = (
     tile: Tile,
     mapData: Tile[],
     gridSize: number
 ): 'BRIDGE' | 'BRIDGE_V' => {
+    const get = (x: number, y: number): Tile | null =>
+        x >= 0 && x < gridSize && y >= 0 && y < gridSize ? mapData[y * gridSize + x] : null;
     const isPassableLand = (x: number, y: number): boolean => {
-        if (x < 0 || x >= gridSize || y < 0 || y >= gridSize) return false;
-        const neighbor = mapData[y * gridSize + x];
+        const neighbor = get(x, y);
         return !!neighbor && neighbor.type !== 'WATER' && neighbor.type !== 'CANYON';
     };
+    const isChannel = (x: number, y: number): boolean => {
+        const neighbor = get(x, y);
+        return !!neighbor && (neighbor.type === 'WATER' || neighbor.type === 'CANYON');
+    };
 
-    const horizLand = isPassableLand(tile.x - 1, tile.y) || isPassableLand(tile.x + 1, tile.y);
-    const vertLand = isPassableLand(tile.x, tile.y - 1) || isPassableLand(tile.x, tile.y + 1);
+    const wLand = isPassableLand(tile.x - 1, tile.y) ? 1 : 0;
+    const eLand = isPassableLand(tile.x + 1, tile.y) ? 1 : 0;
+    const nLand = isPassableLand(tile.x, tile.y - 1) ? 1 : 0;
+    const sLand = isPassableLand(tile.x, tile.y + 1) ? 1 : 0;
 
-    if (vertLand && !horizLand) return 'BRIDGE_V';
+    const horizScore = (wLand + eLand) * 2 + (isChannel(tile.x, tile.y - 1) ? 1 : 0) + (isChannel(tile.x, tile.y + 1) ? 1 : 0);
+    const vertScore = (nLand + sLand) * 2 + (isChannel(tile.x - 1, tile.y) ? 1 : 0) + (isChannel(tile.x + 1, tile.y) ? 1 : 0);
+
+    if (vertScore > horizScore) return 'BRIDGE_V';
     return 'BRIDGE';
 };
 

@@ -27,6 +27,38 @@ const mapTilePatchSchema = z.object({
   bankCpReward: z.number().int().min(0).max(100).optional(),
 });
 
+const mapGenKnobsSchema = z.object({
+  gridSize: z.union([z.literal('AUTO'), z.literal(16), z.literal(20), z.literal(25), z.literal(30)]).optional(),
+  waterStyle: z.enum(['RIVERS', 'ISLANDS', 'CANYON', 'NONE']).optional(),
+  rivers: z.number().int().min(0).max(3).optional(),
+  waterPct: z.number().int().min(0).max(30).optional(),
+  forestPct: z.number().int().min(0).max(55).optional(),
+  mountainPct: z.number().int().min(0).max(40).optional(),
+  desertPct: z.number().int().min(0).max(100).optional(),
+  buildingPct: z.number().int().min(0).max(15).optional(),
+  lootPct: z.number().int().min(0).max(40).optional(),
+  banks: z.number().int().min(0).max(4).optional(),
+  roads: z.boolean().optional(),
+  symmetry: z.enum(['ORGANIC', 'MIRRORED']).optional(),
+});
+
+export const mapGenSchema = z.object({
+  preset: z.enum([
+    'classic',
+    'balanced',
+    'lush_valley',
+    'archipelago',
+    'badlands',
+    'fortress',
+    'twin_fronts',
+    'timber_ridge',
+    'open_blitz',
+    'custom',
+  ]),
+  staticMapId: z.enum(['campaign_recon', 'campaign_canyon', 'campaign_delta']).optional(),
+  knobs: mapGenKnobsSchema.optional(),
+});
+
 export const settingsMsg = z.object({
   unitCounts: z
     .object({
@@ -42,10 +74,15 @@ export const settingsMsg = z.object({
   aiDifficulty: z.enum(['EASY', 'MEDIUM', 'HARD']),
   mutators: z.object({ blitzCp: z.boolean(), scarcity: z.boolean(), ironman: z.boolean() }),
   mapSeed: z.string().max(12).regex(/^[A-Za-z0-9]*$/),
+  mapGen: mapGenSchema.optional(),
   turnBaseS: z.number().int().refine(v => [0, 30, 45, 60, 90].includes(v), 'Invalid turn time'),
   turnIncrementS: z.number().int().refine(v => [0, 15, 30, 45, 60].includes(v), 'Invalid increment'),
   mapEdits: z.array(mapTilePatchSchema).max(900).optional(),
   suggestionsEnabled: z.boolean().optional(),
+});
+
+export const mapCustomizingMsg = z.object({
+  active: z.boolean(),
 });
 
 export const removeSeatMsg = z.object({ seat: z.number().int().min(0) });

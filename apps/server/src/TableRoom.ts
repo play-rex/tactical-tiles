@@ -14,6 +14,7 @@ import {
   DEFAULT_TABLE_SETTINGS,
   eventsFor,
   generateSectorSeed,
+  isSameMapGen,
   MAX_PLAYERS,
   mergeOnlineMapEdits,
   MIN_PLAYERS,
@@ -34,9 +35,11 @@ import {
 
 const EMPTY_SIGHT = new Set<string>();
 import type { z } from 'zod';
+import { PRESET_MAPS } from '@tactical/engine/assets/Presets';
 import {
   actionMsg,
   joinOptions,
+  mapCustomizingMsg,
   mapEditsPayloadMsg,
   removeSeatMsg,
   resolveSuggestionMsg,
@@ -180,8 +183,9 @@ export class TableRoom extends Room {
   private turnKey = '';
   private turnTimeout: { clear(): void } | null = null;
   private counted = false;
-  /** Transient live map draft and guest map suggestions (lobby-only, cleared on match start or seed change). */
+  /** Transient live map draft, host customizer indicator, and guest suggestions (lobby-only). */
   private liveDraft: MapDraftState | null = null;
+  private hostCustomizingMap = false;
   private suggestions = new Map<number, MapSuggestion>();
   /** After a restore: bots hold off for players finding their way back until then. */
   private graceUntil = 0;
@@ -225,6 +229,7 @@ export class TableRoom extends Room {
       const used = new Set(this.seats.map(s => s.name));
       const name = BOT_NAMES.find(n => !used.has(n)) ?? `Bot ${this.seats.length + 1}`;
       this.seats.push({ sessionId: null, playerId: null, name, isBot: true, connected: true });
+      this.ensureStaticMapFitsSeats();
       this.snapshotDirty = true;
       this.broadcastViews();
     });
@@ -247,16 +252,24 @@ export class TableRoom extends Room {
     this.on(ClientMsg.settings, (client, raw) => {
       const msg = this.parse(client, settingsMsg, raw);
       if (!msg || !this.requireHost(client) || !this.requireLobby(client)) return;
+      if (msg.mapGen?.staticMapId) {
+        const staticMap = PRESET_MAPS.find(m => m.id === msg.mapGen?.staticMapId);
+        if (!staticMap || staticMap.baseCount < Math.max(MIN_PLAYERS, this.seats.length)) {
+          return this.err(client, 'That arena does not have enough bases for the current seat count.');
+        }
+      }
       const seedChanged = msg.mapSeed !== this.settings.mapSeed;
+      const mapGenChanged = !isSameMapGen(msg.mapGen, this.settings.mapGen);
+      const mapChanged = seedChanged || mapGenChanged;
       const nextSeed = msg.mapSeed || generateSectorSeed();
       const keptOldEdits =
-        seedChanged &&
+        mapChanged &&
         Boolean(msg.mapEdits?.length) &&
         JSON.stringify(msg.mapEdits) === JSON.stringify(this.settings.mapEdits);
       this.settings = keptOldEdits
         ? { ...msg, mapSeed: nextSeed, mapEdits: undefined }
         : { ...msg, mapSeed: nextSeed };
-      if (seedChanged) {
+      if (mapChanged) {
         this.liveDraft = null;
         this.suggestions.clear();
       } else if (this.liveDraft?.seat === this.seatOf(client)) {
@@ -266,6 +279,14 @@ export class TableRoom extends Room {
         this.suggestions.clear();
       }
       this.snapshotDirty = true;
+      this.broadcastViews();
+    });
+
+    this.on(ClientMsg.mapCustomizing, (client, raw) => {
+      const msg = this.parse(client, mapCustomizingMsg, raw);
+      if (!msg || !this.requireHost(client) || !this.requireLobby(client)) return;
+      if (this.hostCustomizingMap === msg.active) return;
+      this.hostCustomizingMap = msg.active;
       this.broadcastViews();
     });
 
@@ -461,6 +482,7 @@ export class TableRoom extends Room {
 
     this.seats.push({ sessionId: client.sessionId, playerId, name, isBot: false, connected: true });
     this.hostPlayerId ??= playerId;
+    this.ensureStaticMapFitsSeats();
     this.snapshotDirty = true;
     this.broadcastViews();
   }
@@ -478,6 +500,9 @@ export class TableRoom extends Room {
     seat.connected = false;
     if (this.status === 'lobby' && this.liveDraft?.seat === seatIdx) {
       this.liveDraft = null;
+    }
+    if (this.status === 'lobby' && seat.playerId && seat.playerId === this.hostPlayerId) {
+      this.hostCustomizingMap = false;
     }
     // If it was their turn, a bot steps in after a moment.
     this.afterChange();
@@ -525,6 +550,7 @@ export class TableRoom extends Room {
       return this.err(client, `Need at least ${MIN_PLAYERS} seats — add a bot?`);
     }
     this.liveDraft = null;
+    this.hostCustomizingMap = false;
     this.suggestions.clear();
     this.game = createOnlineTableGame(this.settings, this.seats.length);
     this.status = 'playing';
@@ -732,6 +758,7 @@ export class TableRoom extends Room {
       seat.name = `${seat.name} (bot)`;
     }
     if (wasHost) {
+      this.hostCustomizingMap = false;
       const humans = this.seats.filter(s => !s.isBot && s.playerId);
       this.hostPlayerId = (humans.find(s => s.connected) ?? humans[0])?.playerId ?? null;
     }
@@ -830,6 +857,17 @@ export class TableRoom extends Room {
     }
   }
 
+  private ensureStaticMapFitsSeats() {
+    const staticId = this.settings.mapGen?.staticMapId;
+    if (!staticId) return;
+    const staticMap = PRESET_MAPS.find(m => m.id === staticId);
+    if (!staticMap || staticMap.baseCount < this.seats.length) {
+      this.settings = { ...this.settings, mapGen: undefined, mapEdits: undefined };
+      this.liveDraft = null;
+      this.suggestions.clear();
+    }
+  }
+
   private dropSeatMapEdits(removedIdx: number) {
     if (this.liveDraft) {
       if (this.liveDraft.seat === removedIdx) this.liveDraft = null;
@@ -893,6 +931,7 @@ export class TableRoom extends Room {
       turnClock: this.turnClockView(),
       game: gameView,
       liveDraft: this.status === 'lobby' ? this.liveDraft : null,
+      ...(this.status === 'lobby' && this.hostCustomizingMap ? { hostCustomizingMap: true } : {}),
       mapSuggestions: this.status === 'lobby' ? Array.from(this.suggestions.values()) : [],
       events,
       ...(missedActions ? { missedActions } : {}),

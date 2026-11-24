@@ -3,6 +3,7 @@ import {
   DEFAULT_DEV_MAP_OPTIONS,
   DEV_TERRAIN_LABEL,
   devBaseSlots,
+  devMapReport,
   summarizeDevMap,
   type DevMapOptions,
 } from '@tactical/engine';
@@ -64,11 +65,13 @@ const FieldGroup: React.FC<{ title?: string; children: React.ReactNode }> = ({ t
 );
 
 const PRESETS: { id: string; label: string; patch: Partial<DevMapOptions> }[] = [
-  { id: 'balanced', label: 'BALANCED', patch: { forestPct: 18, mountainPct: 12, waterPct: 10, desertPct: 0, buildingPct: 4, lootPct: 6, rivers: 1, banks: 1 } },
+  { id: 'balanced', label: 'BALANCED', patch: { forestPct: 18, mountainPct: 12, waterPct: 10, desertPct: 0, buildingPct: 4, lootPct: 6, rivers: 1, banks: 2 } },
   { id: 'lush', label: 'LUSH VALLEY', patch: { forestPct: 38, mountainPct: 14, waterPct: 16, desertPct: 0, buildingPct: 3, lootPct: 10, rivers: 1, banks: 2 } },
   { id: 'badlands', label: 'BADLANDS', patch: { forestPct: 4, mountainPct: 22, waterPct: 0, desertPct: 78, buildingPct: 5, lootPct: 8, rivers: 0, banks: 1 } },
   { id: 'archipelago', label: 'ARCHIPELAGO', patch: { forestPct: 16, mountainPct: 6, waterPct: 30, desertPct: 0, buildingPct: 2, lootPct: 12, rivers: 3, banks: 2 } },
   { id: 'fortress', label: 'FORTRESS', patch: { forestPct: 10, mountainPct: 34, waterPct: 6, desertPct: 0, buildingPct: 13, lootPct: 2, rivers: 1, banks: 0 } },
+  { id: 'twin', label: 'TWIN FRONTS', patch: { forestPct: 20, mountainPct: 12, waterPct: 12, desertPct: 50, buildingPct: 4, lootPct: 4, rivers: 1, banks: 2 } },
+  { id: 'timber', label: 'TIMBER RIDGE', patch: { forestPct: 35, mountainPct: 16, waterPct: 0, desertPct: 0, buildingPct: 4, lootPct: 6, rivers: 0, banks: 2 } },
   { id: 'empty', label: 'EMPTY SLATE', patch: { forestPct: 0, mountainPct: 0, waterPct: 0, desertPct: 0, buildingPct: 0, lootPct: 0, rivers: 0, banks: 0 } },
 ];
 
@@ -97,11 +100,26 @@ export const DevMaps: React.FC = () => {
   const rollDevSeed = useGameStore(s => s.rollDevSeed);
   const exitDevMaps = useGameStore(s => s.exitDevMaps);
   const launchDevSandbox = useGameStore(s => s.launchDevSandbox);
+  const devBotMatch = useGameStore(s => s.devBotMatch);
+  const setDevBotMatch = useGameStore(s => s.setDevBotMatch);
   const settings = useGameStore(s => s.settings);
   const setGameSettings = useGameStore(s => s.setGameSettings);
 
-  const counts = summarizeDevMap(devPreview);
+  const rawCounts = summarizeDevMap(devPreview);
+  const counts: Record<string, number> = {
+    ...rawCounts,
+    BRIDGE: (rawCounts.BRIDGE ?? 0) + (rawCounts.BRIDGE_V ?? 0),
+  };
   const size = Math.round(Math.sqrt(devPreview.length));
+  const fidelity = devMapReport(devPreview, size, devOptions);
+  const FIDELITY_ROWS = [
+    ['FOREST', 'forestPct'],
+    ['MOUNTAIN', 'mountainPct'],
+    ['DESERT', 'desertPct'],
+    ['RIVER BED', 'waterPct'],
+    ['BUILDINGS', 'buildingPct'],
+    ['LOOT', 'lootPct'],
+  ] as const;
   const seatColors = devBaseSlots(size, devOptions.playerCount);
   const totalUnits = settings.unitCounts.SOLDIER + settings.unitCounts.ASSAULTER + settings.unitCounts.SNIPER;
 
@@ -179,6 +197,36 @@ export const DevMaps: React.FC = () => {
               maxPreviewPx={220}
             />
 
+            <FieldGroup title="KNOB FIDELITY · BUILT / ASKED">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '3px 12px' }}>
+                {FIDELITY_ROWS.map(([label, key]) => {
+                  const built = fidelity.realized[key];
+                  const asked = fidelity.requested[key];
+                  const off = Math.abs(built - asked) > 2;
+                  return (
+                    <div
+                      key={key}
+                      style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', fontSize: '11.5px', fontWeight: 700 }}
+                    >
+                      <span style={{ color: 'var(--op-ink-muted)' }}>{label}</span>
+                      <span style={{ color: off ? 'var(--acc-red-ink, #b42318)' : 'var(--op-ink)', fontVariantNumeric: 'tabular-nums' }}>
+                        {built}% {off ? '·' : '='} {asked}%
+                      </span>
+                    </div>
+                  );
+                })}
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', fontSize: '11.5px', fontWeight: 700 }}>
+                  <span style={{ color: 'var(--op-ink-muted)' }}>BANKS</span>
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                    {fidelity.realized.banks} = {fidelity.requested.banks}
+                  </span>
+                </div>
+              </div>
+              <GeoChip variant={fidelity.faithful ? 'softMint' : 'softViolet'} style={{ alignSelf: 'flex-start', fontSize: '10.5px' }}>
+                {fidelity.faithful ? 'ON TARGET' : 'RIVERS CARVE THROUGH COVER'}
+              </GeoChip>
+            </FieldGroup>
+
             <FieldGroup title="BOARD CONTENT">
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
                 {SUMMARY_ORDER.filter(k => counts[k]).map(k => (
@@ -232,7 +280,7 @@ export const DevMaps: React.FC = () => {
                     min={0}
                     max={3}
                     onChange={v => setDevOptions({ rivers: v })}
-                    hint="Each channel is bridged every 5 tiles so nobody is cut off"
+                    hint="Bridges auto-align across land and water edges so nobody is cut off"
                   />
                   <Slider label="DESERT SPLIT" value={devOptions.desertPct} min={0} max={100} suffix="%" onChange={v => setDevOptions({ desertPct: v })} />
                 </FieldGroup>
@@ -298,12 +346,22 @@ export const DevMaps: React.FC = () => {
             </div>
 
             <GeoButton
+              variant={devBotMatch ? 'mint' : 'softViolet'}
+              fullWidth
+              onClick={() => setDevBotMatch(!devBotMatch)}
+              title="Both seats play themselves: launch a self-playing match and just watch"
+              coreStyle={{ padding: '10px 14px', fontSize: '12px', fontWeight: 900, letterSpacing: '0.8px' }}
+            >
+              {devBotMatch ? '🤖 BOT MATCH ON · BOTH SEATS PLAY THEMSELVES' : '🤖 BOT MATCH OFF · HOT-SEAT SANDBOX'}
+            </GeoButton>
+
+            <GeoButton
               variant="mint"
               fullWidth
               onClick={launchDevSandbox}
               coreStyle={{ padding: '14px 18px', fontSize: '15px', fontWeight: 900, letterSpacing: '1px' }}
             >
-              LAUNCH SANDBOX →
+              {devBotMatch ? 'WATCH SIMULATED MATCH →' : 'LAUNCH SANDBOX →'}
             </GeoButton>
           </div>
         </GeoCard>

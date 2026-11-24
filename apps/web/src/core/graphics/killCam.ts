@@ -28,6 +28,21 @@ export type KillCamTier = 'ATTACK' | 'MICRO' | 'CINEMATIC' | 'STRUCTURE';
 
 export type KillCamSubject = 'ATTACK' | 'KILL' | 'STRUCTURE';
 
+/** Every tier the director can play — used by the dev sandbox's coverage matrix. */
+export const KILL_CAM_TIERS: KillCamTier[] = ['ATTACK', 'MICRO', 'CINEMATIC', 'STRUCTURE'];
+
+/** Every signature camera profile `selectKillCamStyle` can return. */
+export const KILL_CAM_STYLES: KillCamCameraStyle[] = [
+  'STANDARD',
+  'SNIPER_WHIP',
+  'MINE_CLICK',
+  'OVERWATCH_SNAP',
+  'CROSSFIRE_TRIANGLE',
+  'BREACHER_ARC',
+  'STRUCTURE_BLOWOUT',
+  'GRAZE_FAKEOUT',
+];
+
 export type KillCamPhase = 'IDLE' | 'ARM' | 'PUSH' | 'SLAM' | 'SLOW' | 'RECOVER';
 
 export type KillCamCameraStyle =
@@ -620,6 +635,30 @@ export class KillCamDirector {
     const skippedId = this.cue.id;
     if (this.phase === 'PUSH' || this.phase === 'ARM') {
       this.skippedCueIds.add(skippedId);
+      if (this.skippedCueIds.size > 24) {
+        const oldest = this.skippedCueIds.values().next().value;
+        if (oldest !== undefined) this.skippedCueIds.delete(oldest);
+      }
+    }
+    this.reset();
+    return true;
+  }
+
+  /**
+   * Tab-away / stale-frame safety: aborts the active cut and restores real time.
+   *
+   * Unlike `skip()` (the player deliberately cancelling), this *also* blocks a deferred impact
+   * from reopening the cut. A hidden tab never saw the shot, so resuming it mid-SLAM behind the
+   * player's back — with the combat clock parked at 0.2× — is exactly the freeze this prevents.
+   */
+  public suspend(): boolean {
+    if (this.phase === 'IDLE') {
+      this.timeScale = 1;
+      return false;
+    }
+    const cueId = this.cue?.id;
+    if (cueId !== undefined) {
+      this.skippedCueIds.add(cueId);
       if (this.skippedCueIds.size > 24) {
         const oldest = this.skippedCueIds.values().next().value;
         if (oldest !== undefined) this.skippedCueIds.delete(oldest);

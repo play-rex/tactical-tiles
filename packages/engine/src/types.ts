@@ -14,6 +14,55 @@ export type GameMode = 'PVP' | 'PVE';
 export type VictoryMode = 'CONQUER' | 'DEATHMATCH';
 export type AIDifficulty = 'EASY' | 'MEDIUM' | 'HARD';
 
+export type MapPresetId =
+  | 'classic'
+  | 'balanced'
+  | 'lush_valley'
+  | 'archipelago'
+  | 'badlands'
+  | 'fortress'
+  | 'twin_fronts'
+  | 'timber_ridge'
+  | 'open_blitz'
+  | 'custom';
+
+export type WaterStyle = 'RIVERS' | 'ISLANDS' | 'CANYON' | 'NONE';
+export type MapSymmetry = 'ORGANIC' | 'MIRRORED';
+export type GridSizeOption = 'AUTO' | 16 | 20 | 25 | 30;
+
+export interface MapGenKnobs {
+  gridSize: GridSizeOption;
+  waterStyle: WaterStyle;
+  /** Waterways / straits count (0–3). */
+  rivers: number;
+  /** River channel width / island sea volume (0–30). */
+  waterPct: number;
+  /** Forest cover share (0–55). */
+  forestPct: number;
+  /** Mountain range share (0–40). */
+  mountainPct: number;
+  /** Desert sand/dunes share (0–100). */
+  desertPct: number;
+  /** Watchtowers & bunkers share (0–15). */
+  buildingPct: number;
+  /** Loose supply loot share (0–40). */
+  lootPct: number;
+  /** Bank vaults count (0–4). */
+  banks: number;
+  /** Short asphalt highway approaches extending from primary bridges. */
+  roads: boolean;
+  /** 180° rotational mirror fairness (2P/4P) or natural organic geography. */
+  symmetry: MapSymmetry;
+}
+
+export interface MapGenConfig {
+  preset: MapPresetId;
+  /** Optional handcrafted static arena ID (e.g. 'campaign_recon') playable online or locally. */
+  staticMapId?: string;
+  /** Custom overrides applied on top of the preset defaults. */
+  knobs?: Partial<MapGenKnobs>;
+}
+
 export interface WeatherState {
   playerZones: Record<number, WeatherType>; // Weather for each player's Voronoi zone
   turnsRemaining: number;
@@ -41,6 +90,7 @@ export interface GameSettings {
   victoryMode?: VictoryMode;
   aiDifficulty: AIDifficulty;
   mapSeed?: string;
+  mapGen?: MapGenConfig;
   mutators?: GameMutators;
   challengeId?: string;
 }

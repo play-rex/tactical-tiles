@@ -136,12 +136,38 @@ export function drawBridges(
       const px = x * TILE_SIZE;
       const py = y * TILE_SIZE;
       const isVertical = swapBridgeAxes ? t.type !== 'BRIDGE_V' : t.type === 'BRIDGE_V';
-      const adjCanyon =
-        grid[y - 1]?.[x]?.type === 'CANYON' ||
-        grid[y + 1]?.[x]?.type === 'CANYON' ||
-        grid[y]?.[x - 1]?.type === 'CANYON' ||
-        grid[y]?.[x + 1]?.type === 'CANYON';
-      const variant = pickBridgeVariant(t, adjCanyon, gridSize);
+
+      // Walk back to the start of a contiguous co-linear span so multi-tile bridges share
+      // one unified architecture (steel truss OR concrete viaduct) and only draw entry
+      // abutments at the two shore-facing ends.
+      const stepDx = isVertical ? 0 : 1;
+      const stepDy = isVertical ? 1 : 0;
+      let startX = x;
+      let startY = y;
+      while (grid[startY - stepDy]?.[startX - stepDx]?.type === t.type) {
+        startX -= stepDx;
+        startY -= stepDy;
+      }
+      const hasPrevSpan = startX !== x || startY !== y;
+      const hasNextSpan = grid[y + stepDy]?.[x + stepDx]?.type === t.type;
+
+      // Pick canonical anchor (minimum canonical coord) across the whole span so the style is
+      // also 100% invariant under 0/90/180/270° board rotations.
+      let anchor = grid[startY]?.[startX] ?? t;
+      let adjCanyon = false;
+      for (let cx = startX, cy = startY; grid[cy]?.[cx]?.type === t.type; cx += stepDx, cy += stepDy) {
+        const cur = grid[cy]![cx]!;
+        if (cur.y < anchor.y || (cur.y === anchor.y && cur.x < anchor.x)) anchor = cur;
+        if (
+          grid[cy - 1]?.[cx]?.type === 'CANYON' ||
+          grid[cy + 1]?.[cx]?.type === 'CANYON' ||
+          grid[cy]?.[cx - 1]?.type === 'CANYON' ||
+          grid[cy]?.[cx + 1]?.type === 'CANYON'
+        ) {
+          adjCanyon = true;
+        }
+      }
+      const variant = pickBridgeVariant(anchor, adjCanyon, gridSize);
 
       ctx.save();
       if (isVertical) {
@@ -195,26 +221,32 @@ export function drawBridges(
           ctx.fillRect(bx - 2, 49, 4, 6);
         }
       } else {
-        // Riveted Military Steel Truss Bridge
-        ctx.fillStyle = '#858F9E';
-        ctx.fillRect(0, 8, 8, 48);
-        ctx.fillRect(TILE_SIZE - 8, 8, 8, 48);
-
-        // Amber/black hazard strips on entry abutments
-        ctx.fillStyle = '#F59E0B';
-        ctx.fillRect(1, 10, 4, 6);
-        ctx.fillRect(1, 48, 4, 6);
-        ctx.fillRect(TILE_SIZE - 5, 10, 4, 6);
-        ctx.fillRect(TILE_SIZE - 5, 48, 4, 6);
+        // Riveted Military Steel Truss Bridge — shore abutments only on exterior span ends
+        const deckLeft = hasPrevSpan ? 0 : 4;
+        const deckRight = hasNextSpan ? TILE_SIZE : TILE_SIZE - 4;
+        if (!hasPrevSpan) {
+          ctx.fillStyle = '#858F9E';
+          ctx.fillRect(0, 8, 8, 48);
+          ctx.fillStyle = '#F59E0B';
+          ctx.fillRect(1, 10, 4, 6);
+          ctx.fillRect(1, 48, 4, 6);
+        }
+        if (!hasNextSpan) {
+          ctx.fillStyle = '#858F9E';
+          ctx.fillRect(TILE_SIZE - 8, 8, 8, 48);
+          ctx.fillStyle = '#F59E0B';
+          ctx.fillRect(TILE_SIZE - 5, 10, 4, 6);
+          ctx.fillRect(TILE_SIZE - 5, 48, 4, 6);
+        }
 
         // Steel roadway deck
         ctx.fillStyle = '#505967';
-        ctx.fillRect(4, 14, TILE_SIZE - 8, 36);
+        ctx.fillRect(deckLeft, 14, deckRight - deckLeft, 36);
 
         // Deck plate ribs
         ctx.strokeStyle = '#343A46';
         ctx.lineWidth = 1.4;
-        for (let i = 10; i < TILE_SIZE - 6; i += 8) {
+        for (let i = hasPrevSpan ? 4 : 10; i < (hasNextSpan ? TILE_SIZE : TILE_SIZE - 6); i += 8) {
           ctx.beginPath();
           ctx.moveTo(i, 15);
           ctx.lineTo(i, 49);
@@ -223,15 +255,17 @@ export function drawBridges(
 
         // Subtle steel tire runner strips
         ctx.fillStyle = 'rgba(148, 163, 184, 0.22)';
-        ctx.fillRect(6, 21, TILE_SIZE - 12, 4);
-        ctx.fillRect(6, 39, TILE_SIZE - 12, 4);
+        ctx.fillRect(hasPrevSpan ? 0 : 6, 21, TILE_SIZE - (hasPrevSpan ? 0 : 6) - (hasNextSpan ? 0 : 6), 4);
+        ctx.fillRect(hasPrevSpan ? 0 : 6, 39, TILE_SIZE - (hasPrevSpan ? 0 : 6) - (hasNextSpan ? 0 : 6), 4);
 
-        // Riveted upper & lower steel trusses
+        // Continuous riveted upper & lower steel trusses
+        const trussLeft = hasPrevSpan ? 0 : 2;
+        const trussRight = hasNextSpan ? TILE_SIZE : TILE_SIZE - 2;
         ctx.fillStyle = '#A0AAB9';
-        ctx.fillRect(2, 10, TILE_SIZE - 4, 5);
-        ctx.fillRect(2, 49, TILE_SIZE - 4, 5);
+        ctx.fillRect(trussLeft, 10, trussRight - trussLeft, 5);
+        ctx.fillRect(trussLeft, 49, trussRight - trussLeft, 5);
         ctx.fillStyle = '#475569';
-        for (let r = 8; r < TILE_SIZE - 6; r += 10) {
+        for (let r = hasPrevSpan ? 4 : 8; r < (hasNextSpan ? TILE_SIZE : TILE_SIZE - 6); r += 10) {
           ctx.fillRect(r, 11.5, 2, 2);
           ctx.fillRect(r, 50.5, 2, 2);
         }

@@ -7,9 +7,15 @@
  * loot, banks) and guarantees the result is still playable: bases are carved clear, and a ground
  * pass links every base so pathfinding can never strand a player behind water.
  *
+ * Knobs are honoured as *tile counts*, not as dice rolls: `forestPct: 30` on a 20×20 board paints
+ * exactly 120 forest tiles (scatter completion fills whatever the organic walks miss), so the same
+ * number means the same board every time. `devMapReport` reports what was actually built next to
+ * what was asked for, which is what the setup page shows.
+ *
  * Deterministic: the same options + seed always produce the same board.
  */
 import { BANK_STATS, BASE_STATS } from '../constants/Config';
+import { placeEdgeAwareBridges } from '../grid/BridgePlacement';
 import type { SupplyLootType, TerrainType, Tile } from '../types';
 import { createSeededRng, generateSectorSeed, normalizeSeed } from '../utils/SeededRandom';
 
@@ -52,9 +58,32 @@ export const DEFAULT_DEV_MAP_OPTIONS: DevMapOptions = {
   rivers: 1,
 };
 
+/** Coverage numbers, in the same unit the knobs use (whole percentages / counts). */
+export interface DevMapCoverage {
+  forestPct: number;
+  mountainPct: number;
+  waterPct: number;
+  desertPct: number;
+  buildingPct: number;
+  lootPct: number;
+  banks: number;
+  rivers: number;
+}
+
+export interface DevMapReport {
+  tiles: number;
+  /** What the knobs asked for (clamped to their legal range). */
+  requested: DevMapCoverage;
+  /** What is actually on the board. */
+  realized: DevMapCoverage;
+  /** True when every coverage knob landed within tolerance; rivers cutting terrain can clear it. */
+  faithful: boolean;
+}
+
 export interface DevMapResult {
   map: Tile[];
   size: number;
+  report: DevMapReport;
 }
 
 const clampInt = (value: number, min: number, max: number): number =>
@@ -99,6 +128,9 @@ export const devBaseSlots = (size: number, playerCount: number): { x: number; y:
 
 const LOOT_TYPES: SupplyLootType[] = ['AMMO', 'MEDKIT', 'FIRST_AID'];
 
+/** Ground a terrain knob is allowed to paint over (structures/water are never overwritten). */
+const OPEN_GROUND: ReadonlySet<TerrainType> = new Set<TerrainType>(['PLAINS', 'SAND', 'DUNES', 'FOREST']);
+
 export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResult => {
   const opts: DevMapOptions = { ...DEFAULT_DEV_MAP_OPTIONS, ...options };
   const size = clampInt(opts.gridSize, 12, 32);
@@ -106,6 +138,7 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
   const seed = normalizeSeed(opts.seed) || generateSectorSeed();
   const rng = createSeededRng(`${seed}_dev_${size}_${players}`);
   const noise = makeNoise(seed);
+  const tiles = size * size;
 
   const map: Tile[] = [];
   for (let y = 0; y < size; y++) {
@@ -115,123 +148,186 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
   }
   const at = (x: number, y: number): Tile | null =>
     x >= 0 && y >= 0 && x < size && y < size ? map[y * size + x] : null;
-  const inBounds = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < size && y < size;
   const pick = <T,>(arr: T[]): T => arr[Math.floor(rng() * arr.length)];
+  const anyTile = (): Tile | null => at(Math.floor(rng() * size), Math.floor(rng() * size));
+  const openGround = (t: Tile | null): t is Tile => !!t && OPEN_GROUND.has(t.type);
 
-  // ── 1. Ground: grass vs desert, split with noise so the border is a coastline, not a staircase.
-  const desertCut = clampInt(opts.desertPct, 0, 100) / 100;
-  if (desertCut > 0) {
-    for (const t of map) {
-      const n = noise(t.x * 0.24, t.y * 0.24);
-      if (n < desertCut) {
-        t.type = 'SAND';
-        // A thin dune belt with a slightly higher noise value gives the desert relief.
-        if (noise(t.x * 0.4 + 40, t.y * 0.4 + 40) < 0.12) {
-          t.type = 'DUNES';
-          t.height = 2;
+  // HQ plazas are reserved ground from the first pass: terrain knobs skip them, so a 5×5 carve at
+  // the end can never quietly eat 15% off the forest count.
+  const slots = devBaseSlots(size, players);
+  const inBasePlaza = (t: Tile): boolean =>
+    slots.some(s => Math.abs(s.x - t.x) <= 2 && Math.abs(s.y - t.y) <= 2);
+  const paintTarget = (t: Tile | null): t is Tile => openGround(t) && !inBasePlaza(t);
+
+  /**
+   * Paints organic blobs (random walks that branch, so forests read as groves and mountains as
+   * ranges), then scatter-fills whatever is left so the requested tile count is always met.
+   */
+  const paintBlobs = (
+    target: number,
+    canPaint: (t: Tile | null) => t is Tile,
+    paint: (t: Tile) => void,
+    walkSteps: () => number,
+    axisBias = 0.7,
+  ): number => {
+    let painted = 0;
+    for (let guard = 0; painted < target && guard < 4000; guard++) {
+      let cx = 1 + Math.floor(rng() * Math.max(1, size - 2));
+      let cy = 1 + Math.floor(rng() * Math.max(1, size - 2));
+      const steps = walkSteps();
+      for (let i = 0; i < steps && painted < target; i++) {
+        const t = at(cx, cy);
+        if (canPaint(t)) {
+          paint(t);
+          painted++;
         }
+        // Prefer one axis so walks read as ridges/groves rather than blobs.
+        if (rng() < axisBias) cx += rng() < 0.5 ? 1 : -1;
+        else cy += rng() < 0.5 ? 1 : -1;
+        cx = Math.max(0, Math.min(size - 1, cx));
+        cy = Math.max(0, Math.min(size - 1, cy));
       }
     }
+    // Completion pass: the walks always stall eventually (edges, blocking terrain), so finish the
+    // requested count on the remaining eligible ground instead of silently returning less.
+    for (let guard = 0; painted < target && guard < tiles * 8; guard++) {
+      const t = anyTile();
+      if (!canPaint(t)) continue;
+      paint(t);
+      painted++;
+    }
+    return painted;
+  };
+
+  // ── 1. Ground: grass vs desert is decided later (desert only paints leftover grass).
+  const forestTarget = Math.round((tiles * clampInt(opts.forestPct, 0, 55)) / 100);
+  const mountainTarget = Math.round((tiles * clampInt(opts.mountainPct, 0, 40)) / 100);
+  const buildingTarget = Math.round((tiles * clampInt(opts.buildingPct, 0, 15)) / 100);
+  const lootTarget = Math.round((tiles * clampInt(opts.lootPct, 0, 40)) / 100);
+  const desertTarget = Math.round((tiles * clampInt(opts.desertPct, 0, 100)) / 100);
+
+  // ── 2. Banks first: they are structure, not terrain, so reserving them up front keeps every
+  //        coverage knob exact (a bank stamped into a forest used to cost a forest tile).
+  const bankCount = clampInt(opts.banks, 0, 4);
+  const bankSpots: Tile[] = [];
+  const bankFits = (t: Tile | null): t is Tile =>
+    !!t &&
+    t.type === 'PLAINS' &&
+    !inBasePlaza(t) &&
+    !slots.some(s => Math.abs(s.x - t.x) + Math.abs(s.y - t.y) < 4) &&
+    !bankSpots.some(b => b.x === t.x && b.y === t.y);
+
+  const stampBank = (t: Tile) => {
+    t.type = 'BANK';
+    t.height = 1;
+    t.owner = null;
+    // Vault integrity: without hp the engine's SIEGE rejects the tile as an invalid target.
+    t.hp = BANK_STATS.HP;
+    t.maxHp = BANK_STATS.HP;
+    t.hackProgress = 0;
+    t.loot = null;
+    t.subType = undefined;
+    bankSpots.push(t);
+  };
+
+  for (let guard = 0; bankSpots.length < bankCount && guard < 2000; guard++) {
+    const t = at(3 + Math.floor(rng() * Math.max(1, size - 6)), 3 + Math.floor(rng() * Math.max(1, size - 6)));
+    if (bankFits(t)) stampBank(t);
+  }
+  // Completion pass: a dense board must still place the banks that were asked for.
+  for (let guard = 0; bankSpots.length < bankCount && guard < tiles * 4; guard++) {
+    const t = anyTile();
+    if (bankFits(t)) stampBank(t);
   }
 
-  const paintable = (t: Tile | null): t is Tile =>
-    !!t && (t.type === 'PLAINS' || t.type === 'SAND');
+  // ── 3. Mountain massifs: the tallest terrain claims its ground before anything else.
+  paintBlobs(
+    mountainTarget,
+    (t): t is Tile => paintTarget(t) && t.type !== 'MOUNTAIN',
+    t => {
+      t.type = 'MOUNTAIN';
+      t.height = 2;
+    },
+    () => 3 + Math.floor(rng() * 9),
+    0.78,
+  );
 
-  // ── 2. Mountain massifs: random walks that branch, so ranges feel grown rather than dotted.
-  const mountainTiles = Math.round((size * size * clampInt(opts.mountainPct, 0, 40)) / 100);
-  let paintedMountains = 0;
-  let mountainGuard = 0;
-  while (paintedMountains < mountainTiles && mountainGuard < 4000) {
-    mountainGuard++;
-    const sx = 1 + Math.floor(rng() * (size - 2));
-    const sy = 1 + Math.floor(rng() * (size - 2));
-    const steps = 3 + Math.floor(rng() * 9);
-    let cx = sx;
-    let cy = sy;
-    for (let i = 0; i < steps && paintedMountains < mountainTiles; i++) {
-      const t = at(cx, cy);
-      if (paintable(t)) {
-        t.type = 'MOUNTAIN';
+  // ── 4. Forest groves: canopies over grass, sand or dunes, never over rock.
+  paintBlobs(
+    forestTarget,
+    (t): t is Tile => paintTarget(t) && (t.type === 'PLAINS' || t.type === 'SAND' || t.type === 'DUNES'),
+    t => {
+      t.type = 'FOREST';
+      t.height = 1;
+    },
+    () => 2 + Math.floor(rng() * 6),
+    0.6,
+  );
+
+  // ── 5. Buildings: watchtowers (fire platforms) and bunkers (cover). Buildings take open ground
+  //        only — canopies stay intact, and the desert pass still sees the grass it was promised.
+  paintBlobs(
+    buildingTarget,
+    (t): t is Tile =>
+      !!t && !inBasePlaza(t) && (t.type === 'PLAINS' || t.type === 'SAND' || t.type === 'DUNES'),
+    t => {
+      t.type = 'BUILDING';
+      t.subType = rng() < 0.62 ? 'WATCHTOWER' : 'BUNKER';
+      t.height = 1;
+    },
+    () => 1,
+  );
+
+  // ── 6. Desert: rank the leftover grass by noise and take exactly the requested share, so the
+  //        coast between grass and sand follows a noise contour instead of a staircase.
+  if (desertTarget > 0) {
+    const grass = map.filter(t => t.type === 'PLAINS' && !inBasePlaza(t));
+    grass.sort((a, b) => noise(a.x * 0.24, a.y * 0.24) - noise(b.x * 0.24, b.y * 0.24));
+    for (const t of grass.slice(0, Math.min(desertTarget, grass.length))) {
+      t.type = 'SAND';
+      t.height = 1;
+      // A thin dune belt with a slightly higher noise value gives the desert relief.
+      if (noise(t.x * 0.4 + 40, t.y * 0.4 + 40) < 0.12) {
+        t.type = 'DUNES';
         t.height = 2;
-        paintedMountains++;
       }
-      // Prefer one axis, occasionally turn — produces ridges, not blobs.
-      if (rng() < 0.7) cx += rng() < 0.5 ? 1 : -1;
-      else cy += rng() < 0.5 ? 1 : -1;
-      cx = Math.max(0, Math.min(size - 1, cx));
-      cy = Math.max(0, Math.min(size - 1, cy));
     }
   }
 
-  // ── 3. Forest groves: looser walks, canopies over grass or sand.
-  const forestTiles = Math.round((size * size * clampInt(opts.forestPct, 0, 55)) / 100);
-  let paintedForest = 0;
-  let forestGuard = 0;
-  while (paintedForest < forestTiles && forestGuard < 4000) {
-    forestGuard++;
-    let cx = 1 + Math.floor(rng() * (size - 2));
-    let cy = 1 + Math.floor(rng() * (size - 2));
-    const steps = 2 + Math.floor(rng() * 6);
-    for (let i = 0; i < steps && paintedForest < forestTiles; i++) {
-      const t = at(cx, cy);
-      if (paintable(t)) {
-        t.type = 'FOREST';
-        t.height = 1;
-        paintedForest++;
-      }
-      if (rng() < 0.5) cx += rng() < 0.5 ? 1 : -1;
-      else cy += rng() < 0.5 ? 1 : -1;
-      cx = Math.max(0, Math.min(size - 1, cx));
-      cy = Math.max(0, Math.min(size - 1, cy));
-    }
-  }
-
-  // ── 4. Rivers: continuous orthogonal channels with bridges, so no player is ever cut off.
+  // ── 7. Rivers: carve continuous orthogonal water channels first (bridges are placed after
+  //        every channel & HQ plaza is finalized, using land-edge / water-edge span detection).
   const riverCount = clampInt(opts.rivers, 0, 3);
   const riverVolume = clampInt(opts.waterPct, 0, 30);
-  if (riverCount > 0 && riverVolume > 0) {
-    const width = riverVolume >= 18 ? 2 : 1;
+  const hasRivers = riverCount > 0 && riverVolume > 0;
+  if (hasRivers) {
+    const width = riverVolume <= 8 ? 1 : riverVolume <= 16 ? 2 : riverVolume <= 24 ? 3 : 4;
+    const wanderAmp = 0.35 + riverVolume / 25;
     for (let r = 0; r < riverCount; r++) {
       const horizontal = r % 2 === 0;
       const lane = Math.round((size * (r + 1)) / (riverCount + 1));
       let wander = 0;
-      let bridgeTick = 0;
       for (let step = 0; step < size; step++) {
-        wander = Math.max(-2, Math.min(2, wander + (rng() - 0.5) * 0.8));
+        wander = Math.max(-3, Math.min(3, wander + (rng() - 0.5) * wanderAmp));
         const depth = Math.round(lane + wander);
         for (let w = 0; w < width; w++) {
           const x = horizontal ? step : depth + w;
           const y = horizontal ? depth + w : step;
           const t = at(x, y);
-          if (!t) continue;
-          // A bridge every ~5 tiles keeps the crossing playable across the whole channel.
-          const isBridge = bridgeTick % 5 === 2;
-          t.type = isBridge ? (horizontal ? 'BRIDGE' : 'BRIDGE_V') : 'WATER';
-          t.height = isBridge ? 1 : 0;
+          if (!t || inBasePlaza(t) || t.type === 'BANK') continue;
+          t.type = 'WATER';
+          t.height = 0;
+          t.subType = undefined;
         }
-        bridgeTick++;
       }
     }
   }
 
-  // ── 5. Buildings: watchtowers (fire platforms) and bunkers (cover).
-  const buildingTiles = Math.round((size * size * clampInt(opts.buildingPct, 0, 15)) / 100);
-  for (let placed = 0, guard = 0; placed < buildingTiles && guard < 2000; guard++) {
-    const t = at(Math.floor(rng() * size), Math.floor(rng() * size));
-    if (!paintable(t)) continue;
-    t.type = 'BUILDING';
-    t.subType = rng() < 0.62 ? 'WATCHTOWER' : 'BUNKER';
-    t.height = 1;
-    placed++;
-  }
-
-  // ── 6. Bases last, and carved clear, so nothing can box an HQ in.
-  const slots = devBaseSlots(size, players);
+  // ── 8. HQs: the plazas were reserved from the first pass, so this clears & stamps every HQ.
   slots.forEach((slot, owner) => {
     for (let dy = -2; dy <= 2; dy++) {
       for (let dx = -2; dx <= 2; dx++) {
         const t = at(slot.x + dx, slot.y + dy);
-        if (!t || t.type === 'BASE') continue;
+        if (!t || t.type === 'BASE' || t.type === 'BANK') continue;
         t.type = 'PLAINS';
         t.height = 1;
         t.loot = null;
@@ -248,78 +344,32 @@ export const generateDevMap = (options: Partial<DevMapOptions> = {}): DevMapResu
     hq.loot = null;
   });
 
-  // ── 7. Banks, kept away from the HQs so a raid is a real trip.
-  const bankCount = clampInt(opts.banks, 0, 4);
-  const bankSpots: Tile[] = [];
-  for (let placed = 0, guard = 0; placed < bankCount && guard < 2000; guard++) {
-    const t = at(3 + Math.floor(rng() * (size - 6)), 3 + Math.floor(rng() * (size - 6)));
-    if (!t) continue;
-    if (t.type !== 'PLAINS' && t.type !== 'SAND' && t.type !== 'FOREST') continue;
-    if (slots.some(s => Math.abs(s.x - t.x) + Math.abs(s.y - t.y) < 4)) continue;
-    if (bankSpots.some(b => b.x === t.x && b.y === t.y)) continue;
-    t.type = 'BANK';
-    t.height = 1;
-    t.owner = null;
-    // Vault integrity: without hp the engine's SIEGE rejects the tile as an invalid target.
-    t.hp = BANK_STATS.HP;
-    t.maxHp = BANK_STATS.HP;
-    t.hackProgress = 0;
-    t.loot = null;
-    bankSpots.push(t);
-    placed++;
+  // ── 9. Edge-aware bridge placement + orthogonal HQ/Bank connectivity guarantee.
+  if (hasRivers) {
+    const anchors = [
+      ...slots,
+      ...map.filter(t => t.type === 'BANK').map(t => ({ x: t.x, y: t.y })),
+    ];
+    placeEdgeAwareBridges(map, size, {
+      maxSpan: 6,
+      minSpacing: 4,
+      anchors,
+      allowCarveObstacles: true,
+      rng,
+    });
   }
 
-  // ── 8. Loose supply loot on open ground.
-  const lootTiles = Math.round((size * size * clampInt(opts.lootPct, 0, 40)) / 100);
-  for (let placed = 0, guard = 0; placed < lootTiles && guard < 3000; guard++) {
-    const t = at(Math.floor(rng() * size), Math.floor(rng() * size));
-    if (!t || (t.type !== 'PLAINS' && t.type !== 'SAND')) continue;
-    if (t.loot) continue;
-    t.loot = pick(LOOT_TYPES);
-    placed++;
-  }
+  // ── 10. Loose supply loot on walkable ground that isn't already a structure.
+  paintBlobs(
+    lootTarget,
+    (t): t is Tile => paintTarget(t) && !t.loot,
+    t => {
+      t.loot = pick(LOOT_TYPES);
+    },
+    () => 1,
+  );
 
-  // ── 9. Ground pass: guarantee every HQ can reach every other HQ on foot.
-  const walkable = (t: Tile): boolean => t.type !== 'WATER';
-  const key = (t: Tile): string => `${t.x},${t.y}`;
-  const reachable = (from: Tile): Set<string> => {
-    const seen = new Set<string>([key(from)]);
-    const queue: Tile[] = [from];
-    while (queue.length > 0) {
-      const cur = queue.shift() as Tile;
-      const neighbours = [at(cur.x + 1, cur.y), at(cur.x - 1, cur.y), at(cur.x, cur.y + 1), at(cur.x, cur.y - 1)];
-      for (const n of neighbours) {
-        if (!n || !walkable(n)) continue;
-        const k = key(n);
-        if (seen.has(k)) continue;
-        seen.add(k);
-        queue.push(n);
-      }
-    }
-    return seen;
-  };
-  const hqTiles = slots.map(s => at(s.x, s.y)).filter((t): t is Tile => !!t);
-  if (hqTiles.length > 1) {
-    const origin = hqTiles[0];
-    for (let i = 1; i < hqTiles.length; i++) {
-      const target = hqTiles[i];
-      if (reachable(origin).has(key(target))) continue;
-      // Carve a straight service road of bridge/plains between the two HQs.
-      const steps = Math.max(Math.abs(target.x - origin.x), Math.abs(target.y - origin.y));
-      for (let s = 0; s <= steps; s++) {
-        const x = Math.round(origin.x + ((target.x - origin.x) * s) / steps);
-        const y = Math.round(origin.y + ((target.y - origin.y) * s) / steps);
-        const t = at(x, y);
-        if (!t || t.type === 'BASE') continue;
-        if (t.type === 'WATER') {
-          t.type = 'BRIDGE';
-          t.height = 1;
-        }
-      }
-    }
-  }
-
-  return { map, size };
+  return { map, size, report: devMapReport(map, size, opts) };
 };
 
 /** Turns a generated board into the per-tile counts the sandbox shows in its summary. */
@@ -327,6 +377,57 @@ export const summarizeDevMap = (map: Tile[]): Record<string, number> => {
   const out: Record<string, number> = {};
   for (const t of map) out[t.type] = (out[t.type] ?? 0) + 1;
   return out;
+};
+
+/**
+ * Compares what the knobs asked for with what the board actually contains.
+ *
+ * This is the generator's fidelity check: `forestPct: 30` should read back as ~30%, and a knob at
+ * zero must read back as zero. Rivers legitimately carve through terrain (they are painted last
+ * before the HQs), so a river-heavy board can fall out of tolerance on purpose.
+ */
+export const devMapReport = (
+  map: Tile[],
+  size: number,
+  options: Partial<DevMapOptions> = {},
+): DevMapReport => {
+  const opts: DevMapOptions = { ...DEFAULT_DEV_MAP_OPTIONS, ...options };
+  const tiles = map.length || size * size;
+  const share = (n: number): number => Math.round((n / Math.max(1, tiles)) * 100);
+  const count = (pred: (t: Tile) => boolean): number => map.filter(pred).length;
+
+  const requested: DevMapCoverage = {
+    forestPct: clampInt(opts.forestPct, 0, 55),
+    mountainPct: clampInt(opts.mountainPct, 0, 40),
+    waterPct: clampInt(opts.waterPct, 0, 30),
+    desertPct: clampInt(opts.desertPct, 0, 100),
+    buildingPct: clampInt(opts.buildingPct, 0, 15),
+    lootPct: clampInt(opts.lootPct, 0, 40),
+    banks: clampInt(opts.banks, 0, 4),
+    rivers: clampInt(opts.rivers, 0, 3),
+  };
+  const realized: DevMapCoverage = {
+    forestPct: share(count(t => t.type === 'FOREST')),
+    mountainPct: share(count(t => t.type === 'MOUNTAIN')),
+    waterPct: share(count(t => t.type === 'WATER' || t.type === 'BRIDGE' || t.type === 'BRIDGE_V')),
+    desertPct: share(count(t => t.type === 'SAND' || t.type === 'DUNES')),
+    buildingPct: share(count(t => t.type === 'BUILDING')),
+    lootPct: share(count(t => !!t.loot)),
+    banks: count(t => t.type === 'BANK'),
+    rivers: requested.rivers,
+  };
+
+  const within = (a: number, b: number, tolerance: number): boolean => Math.abs(a - b) <= tolerance;
+  const faithful =
+    within(realized.forestPct, requested.forestPct, 4) &&
+    within(realized.mountainPct, requested.mountainPct, 4) &&
+    within(realized.desertPct, requested.desertPct, 4) &&
+    within(realized.buildingPct, requested.buildingPct, 3) &&
+    within(realized.lootPct, requested.lootPct, 4) &&
+    within(realized.waterPct, requested.waterPct, 12) &&
+    realized.banks === requested.banks;
+
+  return { tiles, requested, realized, faithful };
 };
 
 export const DEV_TERRAIN_LABEL: Record<string, string> = {

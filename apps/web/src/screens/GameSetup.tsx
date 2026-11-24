@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { createChallengeGame, createCustomMapGame, createGeneratedGame } from '@tactical/engine';
+import {
+  createChallengeGame,
+  createCustomMapGame,
+  createGeneratedGame,
+  resolveEffectiveGridSize,
+  type MapGenConfig,
+} from '@tactical/engine';
 import { useGameStore } from '../store/useGameStore';
 import { GameSettings, SavedMap, MissionConfig, Tile } from '@tactical/engine/types';
 import { PRESET_MAPS } from '@tactical/engine/assets/Presets';
@@ -10,6 +16,7 @@ import { generateSectorSeed, normalizeSeed } from '@tactical/engine/utils/Seeded
 import { CareerStorage } from '@tactical/engine/storage/CareerStatsManager';
 import { GeoButton, GeoCard, GeoChip, GeoWell } from '../components/ui/GeoPrimitives';
 import { MapPreviewCard } from '../components/ui/MapPreviewModal';
+import { describeMapGen, MapGeneratorControls } from '../components/ui/MapGeneratorControls';
 import {
   BrandHeader,
   DifficultyButtons,
@@ -259,8 +266,18 @@ export const GameSetup: React.FC = () => {
 
   const totalUnits = settings.unitCounts.SOLDIER + settings.unitCounts.ASSAULTER + settings.unitCounts.SNIPER;
   const canDeploy = activeTab === 'CHALLENGES' || (totalUnits > 0 && (activeTab === 'RANDOM' || Boolean(selectedMap)));
-  const randomGridPreview = settings.playerCount >= 6 ? '30×30' : settings.playerCount >= 4 ? '25×25' : '20×20';
+  const activeGenInfo = describeMapGen(settings.mapGen, settings.playerCount);
+  const resolvedGenSize = resolveEffectiveGridSize(settings.mapGen?.knobs?.gridSize, settings.playerCount);
+  const randomGridPreview = `${resolvedGenSize}×${resolvedGenSize}`;
   const patchSettings = (patch: Partial<GameSettings>) => setSettings(prev => ({ ...prev, ...patch }));
+  const mapGenKey = JSON.stringify(settings.mapGen ?? null);
+
+  const handleMapGenChange = (nextSeed: string, nextMapGen: MapGenConfig) => {
+    const clean = normalizeSeed(nextSeed) || generateSectorSeed();
+    setFallbackSeed(clean);
+    setEditedMapData(null);
+    setSettings(prev => ({ ...prev, mapSeed: clean, mapGen: nextMapGen }));
+  };
 
   const previewGame = useMemo(() => {
     const previewSettings: GameSettings = {
@@ -282,6 +299,7 @@ export const GameSetup: React.FC = () => {
   }, [
     activeTab,
     resolvedRandomSeed,
+    mapGenKey,
     settings.playerCount,
     settings.unitCounts.SOLDIER,
     settings.unitCounts.ASSAULTER,
@@ -293,7 +311,7 @@ export const GameSetup: React.FC = () => {
 
   const previewTitle =
     activeTab === 'RANDOM'
-      ? `Sector ${resolvedRandomSeed}`
+      ? `${activeGenInfo.label} · ${resolvedRandomSeed}`
       : activeTab === 'CHALLENGES'
         ? selectedChallenge.title
         : (selectedMap?.name ?? 'Select Map');
@@ -347,8 +365,8 @@ export const GameSetup: React.FC = () => {
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' }}>
                 {[
-                  ['RANDOM', 'RANDOM', 'violet'],
-                  ['PRESET', 'PRESETS', 'violet'],
+                  ['RANDOM', 'GENERATE', 'violet'],
+                  ['PRESET', 'ARENAS', 'violet'],
                   ['CUSTOM', 'MY MAPS', 'violet'],
                   ['CHALLENGES', 'OPS', 'amber'],
                 ].map(([tabId, label, activeVar]) => (
@@ -377,58 +395,14 @@ export const GameSetup: React.FC = () => {
                 }}
               >
                 {activeTab === 'RANDOM' && (
-                  <>
-                    <GeoWell coreStyle={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      <div style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink-muted)' }}>
-                        SHAREABLE SECTOR SEED
-                      </div>
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        <input
-                          type="text"
-                          maxLength={12}
-                          placeholder={fallbackSeed}
-                          value={settings.mapSeed || ''}
-                          onChange={e => {
-                            setEditedMapData(null);
-                            setSettings({ ...settings, mapSeed: e.target.value.toUpperCase() });
-                          }}
-                          style={{
-                            flex: 1,
-                            minWidth: 0,
-                            padding: '8px 10px',
-                            background: '#FFFFFF',
-                            border: '1.5px solid var(--op-line)',
-                            borderRadius: '6px',
-                            color: 'var(--op-ink)',
-                            fontFamily: 'monospace',
-                            fontSize: '13px',
-                            fontWeight: 800,
-                            letterSpacing: '1px',
-                            outline: 'none',
-                          }}
-                        />
-                        <GeoButton
-                          title="Roll Random Sector Seed"
-                          onClick={randomizeSectorSeed}
-                          coreStyle={{ padding: '7px 12px' }}
-                        >
-                          🎲 ROLL
-                        </GeoButton>
-                      </div>
-                      <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', lineHeight: 1.4 }}>
-                        Live preview matches this exact seed — randomize anytime or share the code to replay it.
-                      </div>
-                    </GeoWell>
-
-                    <GeoWell coreStyle={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                      <div style={{ fontSize: '12px', fontWeight: 900, color: 'var(--op-ink)' }}>
-                        Grid Size &amp; Core Rule:
-                      </div>
-                      <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', lineHeight: 1.4 }}>
-                        Map scales automatically by player count: 2–3P = 20×20, 4–5P = <strong>25×25</strong>, 6P = 30×30. All units share a <strong>20 CP</strong> command battery (+10 CP/turn).
-                      </div>
-                    </GeoWell>
-                  </>
+                  <MapGeneratorControls
+                    seed={resolvedRandomSeed}
+                    mapGen={settings.mapGen}
+                    playerCount={settings.playerCount}
+                    unitCounts={settings.unitCounts}
+                    canEdit
+                    onChange={handleMapGenChange}
+                  />
                 )}
 
                 {activeTab === 'PRESET' && (
@@ -504,10 +478,10 @@ export const GameSetup: React.FC = () => {
                   title={previewTitle}
                   subtitle={
                     activeTab === 'RANDOM'
-                      ? `${settings.playerCount} Players · ${previewGame.gridSize}×${previewGame.gridSize} Procedural Sector`
+                      ? `${settings.playerCount} Players · ${previewGame.gridSize}×${previewGame.gridSize} ${activeGenInfo.label}`
                       : activeTab === 'CHALLENGES'
                         ? selectedChallenge.subtitle
-                        : `${selectedMap?.gridSize ?? previewGame.gridSize}×${selectedMap?.gridSize ?? previewGame.gridSize} Custom Arena`
+                        : `${previewGame.gridSize}×${previewGame.gridSize} Custom Arena`
                   }
                   seedLabel={activeTab === 'RANDOM' ? resolvedRandomSeed : undefined}
                   canRandomize={activeTab === 'RANDOM'}
@@ -737,7 +711,7 @@ export const GameSetup: React.FC = () => {
                   : totalUnits === 0
                     ? 'ADD AT LEAST 1 UNIT TO DEPLOY'
                     : activeTab === 'RANDOM'
-                      ? 'INITIATE RANDOM OP →'
+                      ? `DEPLOY TO ${activeGenInfo.label.toUpperCase()} →`
                       : selectedMap
                         ? `DEPLOY TO ${selectedMap.name.toUpperCase()} →`
                         : 'SELECT A MAP FROM LEFT DECK'}

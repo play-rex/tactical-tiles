@@ -10,7 +10,7 @@ import { fxTimeline } from './fxTimeline';
 
 export interface RecapStatus {
   active: boolean;
-  kind: 'RECAP' | 'POTM' | null;
+  kind: 'RECAP' | 'POTM' | 'FILM' | null;
   step: number;
   total: number;
   fastForward: boolean;
@@ -35,6 +35,21 @@ export const isDramaticRecapBatch = (events: GameEvent[]): boolean =>
       e.kind === 'mineBlast' ||
       (e.kind === 'structureHit' && (e.destroyed || e.structureType === 'BASE' || e.structureType === 'BANK')),
   );
+
+/** One cut of a match reel: a self-contained board state, its action, and the result. */
+export interface FilmScene {
+  headline: string;
+  turn?: number;
+  preUnits: Unit[];
+  preMapData?: Tile[];
+  postUnits: Unit[];
+  postMapData?: Tile[];
+  events: GameEvent[];
+}
+
+const FILM_PRE_BEAT_MS = 200;
+const FILM_CUT_FALLBACK_MS = 900;
+const FILM_SCENE_HOLD_MS = 520;
 
 type StatusListener = (status: RecapStatus) => void;
 
@@ -223,6 +238,86 @@ export class RecapPlayer {
         this.activeTimer = setTimeout(() => this.finish(gen), 1300);
       }
     }, 180);
+  }
+
+  /**
+   * Plays a match reel: scenes hard-cut from one to the next, each restoring its own snapshots.
+   * Nothing is re-simulated, so the cuts can jump turns, seats, and the whole board between beats.
+   */
+  public startFilm(scenes: readonly FilmScene[], bridge: RecapBridge, onDone?: () => void): void {
+    const list = scenes.filter(scene => scene.events.length > 0);
+    if (list.length === 0) {
+      onDone?.();
+      return;
+    }
+
+    this.stop();
+    const gen = ++this.generation;
+    this.activeBridge = bridge;
+    this.activeOnDone = onDone ?? null;
+
+    fxTimeline.setPlaybackSpeed(1);
+    fxTimeline.setReplayMode(true);
+
+    const playScene = (idx: number) => {
+      if (gen !== this.generation) return;
+      if (idx >= list.length) {
+        this.finish(gen);
+        return;
+      }
+
+      const scene = list[idx];
+      this.setStatus({
+        active: true,
+        kind: 'FILM',
+        step: idx + 1,
+        total: list.length,
+        fastForward: false,
+        label:
+          scene.turn !== undefined
+            ? `TURN ${scene.turn} · ${scene.headline || 'KEY MOMENT'}`
+            : scene.headline || 'KEY MOMENT',
+      });
+
+      // Hard cut: the board becomes this scene's "before" frame, whoever's turn it was.
+      bridge.applyDisplaySnapshot(scene.preUnits, scene.preMapData);
+
+      this.activeTimer = setTimeout(() => {
+        if (gen !== this.generation) return;
+        bridge.dispatchEvents(scene.events, scene.postUnits);
+        if (scene.postMapData) bridge.applyDisplaySnapshot(scene.postUnits, scene.postMapData);
+        this.awaitCut(gen, () => {
+          this.activeTimer = setTimeout(() => playScene(idx + 1), FILM_SCENE_HOLD_MS);
+        });
+      }, FILM_PRE_BEAT_MS);
+    };
+
+    playScene(0);
+  }
+
+  /** Waits for this beat's kill cam (if it earned one), then hands back for the next cut. */
+  private awaitCut(gen: number, done: () => void): void {
+    this.cleanupWaiters();
+    let sawKillCam = fxTimeline.isKillCamActive();
+    this.unsubKillCam = fxTimeline.subscribeKillCamActive((active) => {
+      if (gen !== this.generation) return;
+      if (active) {
+        sawKillCam = true;
+        if (this.activeTimer !== null) {
+          clearTimeout(this.activeTimer);
+          this.activeTimer = null;
+        }
+      } else if (sawKillCam) {
+        this.cleanupWaiters();
+        done();
+      }
+    });
+    if (!sawKillCam) {
+      this.activeTimer = setTimeout(() => {
+        this.cleanupWaiters();
+        done();
+      }, FILM_CUT_FALLBACK_MS);
+    }
   }
 
   private finish(gen: number): void {

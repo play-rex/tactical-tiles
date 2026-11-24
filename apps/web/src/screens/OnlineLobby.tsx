@@ -6,11 +6,13 @@ import {
   gameSettingsFor,
   MAX_PLAYERS,
   MIN_PLAYERS,
+  type MapGenConfig,
   type TableSettings,
   type TableView,
 } from '@tactical/engine';
-import { generateSectorSeed, normalizeSeed } from '@tactical/engine/utils/SeededRandom';
+import { generateSectorSeed } from '@tactical/engine/utils/SeededRandom';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME } from '../components/ui/GeoPrimitives';
+import { describeMapGen, MapGeneratorControls } from '../components/ui/MapGeneratorControls';
 import { MapPreviewCard } from '../components/ui/MapPreviewModal';
 import {
   BrandHeader,
@@ -162,60 +164,11 @@ const RulesPanel: React.FC<{ settings: TableSettings; isHost: boolean; hasBots: 
 
       <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>MUTATORS</div>
       <MutatorToggles mutators={settings.mutators} disabled={!isHost} onChange={mutators => set({ mutators })} />
-
-      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>SECTOR SEED</div>
-      <SeedInput
-        value={settings.mapSeed}
-        disabled={!isHost}
-        onCommit={mapSeed => set({ mapSeed, mapEdits: undefined })}
-        onRandomize={() => set({ mapSeed: generateSectorSeed(), mapEdits: undefined })}
-      />
     </div>
   );
 };
 
-/** Sent when you leave the field, not on every keystroke. */
-const SeedInput: React.FC<{
-  value: string;
-  disabled: boolean;
-  onCommit: (v: string) => void;
-  onRandomize?: () => void;
-}> = ({ value, disabled, onCommit, onRandomize }) => {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  const commit = () => {
-    const clean = normalizeSeed(draft);
-    if (clean !== value) onCommit(clean);
-  };
-  return (
-    <div style={{ display: 'flex', gap: '6px' }}>
-      <input
-        style={{ ...inputStyle, flex: 1, minWidth: 0, textTransform: 'uppercase', letterSpacing: '2px' }}
-        placeholder="Auto random seed"
-        maxLength={12}
-        value={draft}
-        disabled={disabled}
-        onChange={e => setDraft(normalizeSeed(e.target.value))}
-        onBlur={commit}
-        onKeyDown={e => {
-          if (e.key === 'Enter') commit();
-        }}
-      />
-      {onRandomize && (
-        <GeoButton
-          disabled={disabled}
-          onClick={onRandomize}
-          title="Roll a fresh random battlefield seed"
-          coreStyle={{ padding: '7px 11px' }}
-        >
-          🎲
-        </GeoButton>
-      )}
-    </div>
-  );
-};
-
-/** At a table, before the match: who's in, the rules, and Start. */
+/** At a table, before the match: who's in, the battlefield, the rules, and Start. */
 const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
   const addBot = useOnline(s => s.addBot);
   const removeSeat = useOnline(s => s.removeSeat);
@@ -227,6 +180,7 @@ const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
   const commitMapEdits = useOnline(s => s.commitMapEdits);
   const sendMapSuggestion = useOnline(s => s.sendMapSuggestion);
   const resolveSuggestion = useOnline(s => s.resolveSuggestion);
+  const setMapCustomizing = useOnline(s => s.setMapCustomizing);
   const me = view.seats[view.mySeat];
   const isHost = Boolean(me?.isHost);
   const suggestionsEnabled = view.settings.suggestionsEnabled !== false;
@@ -242,12 +196,14 @@ const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
   const canStart = view.seats.length >= MIN_PLAYERS;
 
   const previewPlayers = Math.max(MIN_PLAYERS, view.seats.length);
+  const mapGenKey = JSON.stringify(view.settings.mapGen ?? null);
   const uneditedGame = useMemo(
     () => createGeneratedGame(gameSettingsFor({ ...view.settings, mapEdits: undefined }, previewPlayers)),
-    // Re-bake only when seed, seat count, or starting squad counts change (not when toggling fog/weather/timers).
+    // Re-bake only when seed, mapGen, seat count, or starting squad counts change (not when toggling fog/weather/timers).
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       view.settings.mapSeed,
+      mapGenKey,
       previewPlayers,
       view.settings.unitCounts.SOLDIER,
       view.settings.unitCounts.ASSAULTER,
@@ -262,12 +218,23 @@ const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
     [uneditedGame, mapEditsKey, view.settings.victoryMode],
   );
   const activeSeed = view.settings.mapSeed || previewGame.activeSeed;
+  const activeGenInfo = describeMapGen(view.settings.mapGen, previewPlayers);
+
+  const pushMapGenUpdate = (nextSeed: string, nextMapGen: MapGenConfig) => {
+    const latest = useOnline.getState().view?.settings ?? view.settings;
+    updateSettings({
+      ...latest,
+      mapSeed: nextSeed,
+      mapGen: nextMapGen,
+      mapEdits: undefined,
+    });
+  };
 
   return (
-    <StageShell width={900}>
+    <StageShell width={1040}>
       <Header right={<GeoButton variant="softRed" onClick={() => void leave()} coreStyle={{ padding: '7px 14px' }}>LEAVE TABLE</GeoButton>} />
       <ErrorBar />
-      <div className="tt-cols" style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 42%) minmax(0, 1fr)', gap: '14px', alignItems: 'start' }}>
+      <div className="tt-cols" style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 46%) minmax(0, 1fr)', gap: '14px', alignItems: 'start' }}>
         <GeoCard>
           <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <div style={SECTION_LABEL}>TABLE CODE</div>
@@ -339,12 +306,25 @@ const Lobby: React.FC<{ view: TableView }> = ({ view }) => {
               <GeoButton variant="softViolet" fullWidth onClick={addBot}>+ ADD BOT</GeoButton>
             )}
 
+            <MapGeneratorControls
+              seed={activeSeed}
+              mapGen={view.settings.mapGen}
+              playerCount={previewPlayers}
+              unitCounts={view.settings.unitCounts}
+              canEdit={isHost}
+              hostCustomizingMap={Boolean(view.hostCustomizingMap)}
+              allowStaticArenas
+              onChange={pushMapGenUpdate}
+              onLiveSync={isHost ? pushMapGenUpdate : undefined}
+              onCustomizingChange={isHost ? setMapCustomizing : undefined}
+            />
+
             <MapPreviewCard
               game={previewGame}
-              title={`Sector ${activeSeed}`}
+              title={activeGenInfo.isStatic ? activeGenInfo.label : `${activeGenInfo.label} · ${activeSeed}`}
               subtitle={`${previewPlayers} Players · ${previewGame.gridSize}×${previewGame.gridSize} Online Battlefield`}
-              seedLabel={activeSeed}
-              canRandomize={isHost}
+              seedLabel={activeGenInfo.isStatic ? undefined : activeSeed}
+              canRandomize={isHost && !activeGenInfo.isStatic}
               onRandomize={() => updateSettings({ ...view.settings, mapSeed: generateSectorSeed(), mapEdits: undefined })}
               canEdit={canEdit}
               isEdited={Boolean(view.settings.mapEdits?.length)}

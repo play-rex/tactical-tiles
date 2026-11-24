@@ -30,6 +30,7 @@ import {
   getUnitOptions,
   DEFAULT_GAME_SETTINGS,
   INTERACT_COST,
+  isSameMapGen,
   isUnitVisible,
   spawnBlocker,
   visibleSet,
@@ -41,6 +42,7 @@ import {
 } from '@tactical/engine';
 import { useEffectStore } from './useEffectStore';
 import { fxTimeline } from '../core/graphics/fxTimeline';
+import { DEV_EVENT_MAP, devStructureBatch, type DevEventContext, type DevEventKind } from '../core/dev/devEventMatrix';
 import { highlightRecorder } from '../core/graphics/highlightRecorder';
 import { recapPlayer, type RecapBridge } from '../core/graphics/recapPlayer';
 import { SoundFX } from '../core/audio/SoundFX';
@@ -60,22 +62,7 @@ export type DevBrush =
   | { kind: 'UNIT'; unitType: UnitType; owner: number };
 
 /** Events the sandbox can fire through the real FX pipeline to audition a cut. */
-export type DevEventKind =
-  | 'ATTACK_HIT'
-  | 'GRAZE_1HP'
-  | 'KILL_CINEMATIC'
-  | 'KILL_MICRO'
-  | 'MINE_CLICK'
-  | 'OVERWATCH_KILL'
-  | 'CROSSFIRE_KILL'
-  | 'CORNER_KILL'
-  | 'HEIST'
-  | 'BANK_DEMOLISH'
-  | 'HQ_BREACH'
-  | 'HQ_DESTROY'
-  | 'POTM_REPLAY'
-  | 'EXPORT_CLIP'
-  | 'TURN_RECAP';
+export type { DevEventKind } from '../core/dev/devEventMatrix';
 
 /** How the store reaches the server during an online game (set by the online store). */
 export interface OnlineBridge {
@@ -170,6 +157,9 @@ interface GameStore extends GameState {
   /** Pure sandbox: no ranges, no CP, no turn lock. Units teleport and strike anywhere. */
   devFreeplay: boolean;
   setDevFreeplay: (on: boolean) => void;
+  /** Bot match: both seats play themselves so you can watch a full simulated game. */
+  devBotMatch: boolean;
+  setDevBotMatch: (on: boolean) => void;
   devMoveUnit: (unitId: string, tileId: string) => void;
   devAttackUnit: (attackerId: string, targetId: string) => void;
   /** Strike a structure (bank vault, enemy HQ, barrier) from anywhere, ignoring range and CP. */
@@ -222,6 +212,10 @@ interface GameStore extends GameState {
 
   // Replay & broadcast export
   playPlayOfTheMatch: (onDone?: () => void) => boolean;
+  /** The end-of-match reel: the best feud cut from first shot to last, across turns and seats. */
+  playMatchFilm: (onDone?: () => void) => boolean;
+  /** The match is over but the end-of-match cutscene hasn't claimed the screen yet. */
+  finalePending: boolean;
   exportPlayOfTheMatch: (onStatus?: (msg: string) => void) => Promise<'webm' | 'png' | 'unsupported'>;
 
   // Online
@@ -251,8 +245,14 @@ const CLEAR_SELECTION = {
 
 
 /** Local vs-AI games: the AI plays seat 1. */
+/** Bot-match mode: every seat is driven by the AI, so you can watch a full simulated game. */
+let botMatchActive = false;
+
+/** Cued once per match, so the winning board never replays the reel on a re-render. */
+let matchFilmPlayed = false;
+
 const aiPlays = (s: Pick<GameState, 'winner' | 'currentPlayer' | 'settings'>) =>
-  s.winner === null && s.currentPlayer === 1 && s.settings.gameMode === 'PVE';
+  s.winner === null && s.settings.gameMode === 'PVE' && (botMatchActive || s.currentPlayer === 1);
 
 /**
  * Whose eyes the map is drawn through (under fog, what they can see): your seat online,
@@ -381,6 +381,7 @@ const reuseSettings = (prev: GameSettings, next: GameSettings): GameSettings =>
   prev.victoryMode === next.victoryMode &&
   prev.aiDifficulty === next.aiDifficulty &&
   prev.mapSeed === next.mapSeed &&
+  isSameMapGen(prev.mapGen, next.mapGen) &&
   prev.challengeId === next.challengeId &&
   prev.unitCounts.SOLDIER === next.unitCounts.SOLDIER &&
   prev.unitCounts.ASSAULTER === next.unitCounts.ASSAULTER &&
@@ -488,12 +489,21 @@ const hasFollowUpAction = (game: GameState, unit: Unit, sel: ReturnType<typeof o
 
 export const useGameStore = create<GameStore>((set, get) => {
   /** Builds a bridge that lets `recapPlayer` step through snapshots and always restore the live board. */
-  const createRecapBridge = (liveUnits: Unit[], liveMapData: Tile[]): RecapBridge => ({
+  const createRecapBridge = (
+    liveUnits: Unit[],
+    liveMapData: Tile[],
+    /** Restored with the board when a replay revealed ground the viewer never scouted. */
+    liveVisible?: Set<string>,
+  ): RecapBridge => ({
     applyDisplaySnapshot: (units, mapData) => {
       set(mapData ? { units, mapData } : { units });
     },
     restoreLiveState: () => {
-      set({ units: liveUnits, mapData: liveMapData });
+      set(
+        liveVisible
+          ? { units: liveUnits, mapData: liveMapData, visibleTiles: liveVisible }
+          : { units: liveUnits, mapData: liveMapData },
+      );
     },
     dispatchEvents: (events, postUnits) => {
       playEvents(events, postUnits, get().units);
@@ -505,6 +515,10 @@ export const useGameStore = create<GameStore>((set, get) => {
     recapPlayer.stop();
     highlightRecorder.reset();
     useEffectStore.getState().clearAllFx();
+    // A fresh board is never a bot match until the caller says so (launchDevSandbox re-arms it).
+    botMatchActive = false;
+    matchFilmPlayed = false;
+    aiLoopSeq++;
     set({
       ...commitGameView(get(), game, visibleSet(game, 0), 0, false, false),
       lastCustomMap,
@@ -513,6 +527,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       mode: 'LOCAL',
       // A normal match never inherits the sandbox panel; launchDevSandbox opts back in.
       devSandbox: false,
+      finalePending: false,
     });
   };
 
@@ -541,11 +556,13 @@ export const useGameStore = create<GameStore>((set, get) => {
     mapRotation: readSavedBoardRotation(),
     visibleTiles: new Set(),
     isAiTurn: false,
+    finalePending: false,
     mapToEdit: null,
     mapFeedback: null,
     lastMoveSnapshot: null,
     devSandbox: false,
     devFreeplay: true,
+    devBotMatch: false,
     devOptions: DEFAULT_DEV_MAP_OPTIONS,
     devPreview: generateDevMap(DEFAULT_DEV_MAP_OPTIONS).map,
 
@@ -563,12 +580,33 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     openDevMaps: () =>
       set(state => ({ currentScreen: 'DEV', devPreview: generateDevMap(state.devOptions).map })),
-    exitDevMaps: () => set({ currentScreen: 'SETUP', devSandbox: false }),
+    exitDevMaps: () => {
+      botMatchActive = false;
+      aiLoopSeq++;
+      set({ currentScreen: 'SETUP', devSandbox: false, devBotMatch: false, isAiTurn: false, finalePending: false });
+    },
     setDevOptions: (patch) => {
       const devOptions = { ...get().devOptions, ...patch };
       set({ devOptions, devPreview: generateDevMap(devOptions).map });
     },
     rollDevSeed: () => get().setDevOptions({ seed: generateSectorSeed() }),
+    setDevBotMatch: (on) => {
+      if (!on) {
+        botMatchActive = false;
+        aiLoopSeq++;
+        set({ devBotMatch: false, isAiTurn: false });
+        return;
+      }
+      set({ devBotMatch: true });
+      const state = get();
+      // A hot-seat sandbox has no AI seat: relaunch it as a bot match on the same board/settings.
+      if (state.devSandbox && state.settings.gameMode !== 'PVE') {
+        get().launchDevSandbox();
+        return;
+      }
+      set({ isAiTurn: state.currentScreen === 'GAME' });
+      if (state.currentScreen === 'GAME' && state.devSandbox) get().runAiLoop();
+    },
     setDevFreeplay: (on) =>
       set(state => ({
         devFreeplay: on,
@@ -677,18 +715,30 @@ export const useGameStore = create<GameStore>((set, get) => {
       });
     },
     launchDevSandbox: () => {
-      const { settings, devOptions, devPreview } = get();
+      const { settings, devOptions, devPreview, devBotMatch } = get();
       const game = createCustomMapGame(
-        // Hot-seat rules so no bot fights over the sandbox while you're testing.
-        { ...settings, playerCount: devOptions.playerCount, mapSeed: devOptions.seed, gameMode: 'PVP' },
+        // Bot match: PVE rules so both seats are AI-driven; otherwise hot-seat with no bot.
+        {
+          ...settings,
+          playerCount: devOptions.playerCount,
+          mapSeed: devOptions.seed,
+          gameMode: devBotMatch ? 'PVE' : 'PVP',
+          fogOfWar: devBotMatch ? false : settings.fogOfWar,
+        },
         devPreview,
       );
       beginLocal(game, cloneTiles(devPreview));
+      botMatchActive = devBotMatch;
       set({
         devSandbox: true,
         currentScreen: 'GAME',
-        playerCp: get().devFreeplay ? topUpPlayerCp(get().playerCp) : get().playerCp,
+        isAiTurn: devBotMatch,
+        // A simulated match runs the real rules on the real game screen: no free CP, no cheat
+        // placement. The brush/event panel stays available if you want to interrupt it.
+        devFreeplay: devBotMatch ? false : get().devFreeplay,
+        playerCp: !devBotMatch && get().devFreeplay ? topUpPlayerCp(get().playerCp) : get().playerCp,
       });
+      if (devBotMatch) get().runAiLoop();
     },
     devPlace: (x, y, brush) => {
       const state = get();
@@ -776,6 +826,80 @@ export const useGameStore = create<GameStore>((set, get) => {
           postMapData: state.mapData,
           events,
         });
+      };
+
+      /** Dispatches a synthesized batch and commits the resulting unit roster (deaths included). */
+      const fireBatch = (
+        events: GameEvent[],
+        positions: Record<string, string> = {},
+        preHp?: { unitId: string; hp: number },
+      ) => {
+        if (events.length === 0) return;
+        const dead = new Set<string>();
+        for (const e of events) {
+          if (e.kind === 'killed') dead.add(e.unitId);
+          else if (e.kind === 'mineBlast' && e.victimDead && e.victimUnitId) dead.add(e.victimUnitId);
+        }
+        // Non-lethal matrix hits still wound the targeted unit so the board matches the cut.
+        const hitDamage = new Map<string, number>();
+        for (const e of events) {
+          if (e.kind === 'hit' && !e.isKill) hitDamage.set(e.targetUnitId, (hitDamage.get(e.targetUnitId) ?? 0) + e.damage);
+        }
+        // A staged cut (corner framing, or a 1-HP graze victim) presents the actors as the cue
+        // telemetry describes them, so the director classifies the situation the panel advertises.
+        const staged = state.units.map(u => {
+          const tileId = positions[u.id];
+          const hp = preHp && preHp.unitId === u.id ? preHp.hp : undefined;
+          if (!tileId && hp === undefined) return u;
+          return { ...u, ...(tileId ? { tileId } : {}), ...(hp !== undefined ? { hp } : {}) };
+        });
+        const postUnits = staged
+          .filter(u => !dead.has(u.id))
+          .map(u => {
+            const dmg = hitDamage.get(u.id);
+            return dmg ? { ...u, hp: Math.max(1, u.hp - dmg) } : u;
+          });
+        recordDev(events, staged, postUnits);
+        playEvents(events, postUnits, staged);
+        set({ units: postUnits, selectedUnitId: null });
+      };
+
+      /** Geometry for matrix-built events: the first enemy as victim, its opponent as killer. */
+      const devCtx = (): DevEventContext | null => {
+        const victimUnit = state.units.find(u => u.owner !== state.currentPlayer) ?? state.units[0];
+        const killerUnit = victimUnit ? state.units.find(u => u.owner !== victimUnit.owner) ?? victimUnit : undefined;
+        const victimTile = victimUnit ? tileOf(victimUnit.tileId) : null;
+        const killerTile = killerUnit ? tileOf(killerUnit.tileId) : null;
+        if (!victimUnit || !killerUnit || !victimTile || !killerTile) return null;
+        return {
+          gridSize: state.gridSize,
+          currentPlayer: state.currentPlayer,
+          victim: {
+            id: victimUnit.id,
+            type: victimUnit.type,
+            owner: victimUnit.owner,
+            hp: victimUnit.hp,
+            rank: victimUnit.rank ?? 0,
+            x: victimTile.x,
+            y: victimTile.y,
+            terrain: victimTile.type,
+          },
+          killer: {
+            id: killerUnit.id,
+            type: killerUnit.type,
+            owner: killerUnit.owner,
+            hp: killerUnit.hp,
+            rank: killerUnit.rank ?? 0,
+            x: killerTile.x,
+            y: killerTile.y,
+            terrain: killerTile.type,
+          },
+          flank: [
+            { x: clampGrid(victimTile.x + (victimTile.x > 2 ? -2 : 2)), y: clampGrid(victimTile.y + (victimTile.y > 2 ? -1 : 1)) },
+            { x: clampGrid(victimTile.x + (victimTile.x < state.gridSize - 3 ? 2 : -2)), y: clampGrid(victimTile.y + (victimTile.y < state.gridSize - 3 ? 1 : -1)) },
+          ],
+          structure: null,
+        };
       };
 
       const ensureDemoHighlight = () => {
@@ -945,357 +1069,72 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      if (kind === 'ATTACK_HIT' || kind === 'GRAZE_1HP') {
-        const victim = state.units.find(u => u.owner !== state.currentPlayer) ?? state.units[0];
-        if (!victim) return;
-        const attacker = state.units.find(u => u.owner !== victim.owner) ?? victim;
-        const victimTile = tileOf(victim.tileId);
-        const attackerTile = tileOf(attacker.tileId);
-        if (!victimTile || !attackerTile) return;
-        const weapon = attacker.type === 'SNIPER' ? 'SNIPER' : attacker.type === 'ASSAULTER' ? 'ASSAULTER' : 'SOLDIER';
-        const isGraze = kind === 'GRAZE_1HP';
-        const preHp = isGraze ? Math.max(victim.hp, Math.min(getUnitMaxHp(victim), 10)) : victim.hp;
-        const preUnits = state.units.map(u => (u.id === victim.id ? { ...u, hp: preHp } : u));
-        const dmg = isGraze ? Math.max(1, preHp - 1) : Math.max(1, Math.min(8, preHp - 1));
-        const postHp = isGraze ? 1 : Math.max(1, preHp - dmg);
-        const nextUnits = state.units.map(u => (u.id === victim.id ? { ...u, hp: postHp } : u));
-        const events: GameEvent[] = [
-          {
-            kind: 'projectile',
-            from: { x: attackerTile.x, y: attackerTile.y },
-            to: { x: victimTile.x, y: victimTile.y },
-            style: weapon === 'SNIPER' ? 'LASER' : weapon === 'ASSAULTER' ? 'MISSILE' : 'BULLET',
-            weapon,
-            attackerId: attacker.id,
-            targetUnitId: victim.id,
-            travelMs: 220,
-          },
-          {
-            kind: 'hit',
-            targetUnitId: victim.id,
-            at: { x: victimTile.x, y: victimTile.y },
-            from: { x: attackerTile.x, y: attackerTile.y },
-            damage: dmg,
-            weapon,
-            breakdown: {
-              baseDamage: dmg + 2,
-              watchtowerBoosted: weapon === 'SNIPER',
-              coverPct: isGraze ? 0.2 : 0,
-              coverTerrain: victimTile.type,
-              coverArmorApplied: false,
-              crossfireBonus: 0,
-            },
-          },
-          {
-            kind: 'popup',
-            at: { x: victimTile.x, y: victimTile.y },
-            text: `-${dmg}`,
-            color: isGraze ? '#F59E0B' : '#FBBF24',
-            lift: 22,
-          },
-        ];
-        recordDev(events, preUnits, nextUnits);
-        playEvents(events, nextUnits, preUnits);
-        set({ units: nextUnits });
-        return;
+      // ── Every auditionable cut comes from the coverage matrix: one builder feeds the panel, the
+      //    store and the contract test, so a button can never advertise a cut it does not play.
+      const spec = DEV_EVENT_MAP[kind];
+      if (!spec || !spec.build) return;
+
+      const base = devCtx();
+      if (!base) return;
+
+      let structure: DevEventContext['structure'] = null;
+      if (spec.structureTarget === 'BARRIER') {
+        const existing = state.mapData.find(t => t.type === 'BARRIER');
+        if (existing) {
+          structure = { x: existing.x, y: existing.y, type: 'BARRIER', owner: existing.owner ?? null };
+        } else {
+          const spots = [
+            { x: clampGrid(base.victim.x + 1), y: base.victim.y },
+            { x: clampGrid(base.victim.x - 1), y: base.victim.y },
+            { x: base.victim.x, y: clampGrid(base.victim.y + 1) },
+            { x: base.victim.x, y: clampGrid(base.victim.y - 1) },
+          ];
+          const spot = spots.find(p => {
+            const t = tileOf(`${p.x},${p.y}`);
+            return !!t && t.type === 'PLAINS' && !state.units.some(u => u.tileId === t.id);
+          });
+          if (!spot) return;
+          // Nothing to blow up yet: drop one beside the victim so the cut can be auditioned.
+          get().devPlace(spot.x, spot.y, { kind: 'STRUCTURE', structure: 'BARRIER', owner: 0 });
+          const brushed = getTileByIdFast(get().mapData, `${spot.x},${spot.y}`, state.gridSize);
+          if (brushed) structure = { x: brushed.x, y: brushed.y, type: 'BARRIER', owner: brushed.owner ?? null };
+        }
+      } else if (spec.structureTarget) {
+        const target =
+          spec.structureTarget === 'BANK'
+            ? state.mapData.find(t => t.type === 'BANK')
+            : state.mapData.find(t => t.type === 'BASE' && t.owner !== state.currentPlayer) ??
+              state.mapData.find(t => t.type === 'BASE');
+        if (target) {
+          structure = {
+            x: target.x,
+            y: target.y,
+            type: target.type as 'BASE' | 'BANK' | 'BARRIER',
+            owner: target.owner ?? null,
+          };
+        }
       }
+      if (spec.structureTarget && !structure) return;
 
-      if (kind === 'MINE_CLICK') {
-        const victim = state.units.find(u => u.owner !== state.currentPlayer) ?? state.units[0];
-        if (!victim) return;
-        const vt = tileOf(victim.tileId);
-        if (!vt) return;
-        const dx = vt.x >= 2 ? -1 : 1;
-        const p0 = { x: clampGrid(vt.x + dx * 2), y: vt.y };
-        const p1 = { x: clampGrid(vt.x + dx), y: vt.y };
-        const p2 = { x: vt.x, y: vt.y };
-        const preUnits = state.units.map(u => (u.id === victim.id ? { ...u, tileId: `${p0.x},${p0.y}` } : u));
-        const postUnits = state.units.filter(u => u.id !== victim.id);
-        const events: GameEvent[] = [
-          {
-            kind: 'movePath',
-            unitId: victim.id,
-            unitType: victim.type,
-            owner: victim.owner,
-            path: [p0, p1, p2],
-            haltedAt: 2,
-          },
-          { kind: 'mineBlast', at: p2, damage: 15, victimUnitId: victim.id, victimDead: true },
-          { kind: 'sound', sound: 'explosion' },
-          { kind: 'shake', intensity: 14, at: p2 },
-          {
-            kind: 'killed',
-            unitId: victim.id,
-            unitType: victim.type,
-            owner: victim.owner,
-            rank: (victim.rank ?? 0) as UnitRank,
-            at: p2,
-            killerOwner: state.currentPlayer,
-            victimPreHp: victim.hp,
-            cause: 'MINE',
-          },
-        ];
-        recordDev(events, preUnits, postUnits);
-        playEvents(events, postUnits, preUnits);
-        set({ units: postUnits, selectedUnitId: null });
-        return;
-      }
+      const stage = spec.stage?.(base);
+      const ctx: DevEventContext = {
+        ...base,
+        structure,
+        victim: stage?.victim ? { ...base.victim, ...stage.victim } : base.victim,
+        killer: stage?.killer ? { ...base.killer, ...stage.killer } : base.killer,
+      };
+      const positions: Record<string, string> = {};
+      if (stage?.victim) positions[base.victim.id] = `${stage.victim.x},${stage.victim.y}`;
+      if (stage?.killer) positions[base.killer.id] = `${stage.killer.x},${stage.killer.y}`;
 
-      if (kind === 'OVERWATCH_KILL') {
-        const victim = state.units.find(u => u.owner !== state.currentPlayer) ?? state.units[0];
-        if (!victim) return;
-        const killer = state.units.find(u => u.owner !== victim.owner) ?? victim;
-        const vt = tileOf(victim.tileId);
-        const kt = tileOf(killer.tileId);
-        if (!vt || !kt) return;
-        const dy = vt.y >= 2 ? -1 : 1;
-        const p0 = { x: vt.x, y: clampGrid(vt.y + dy * 2) };
-        const p1 = { x: vt.x, y: clampGrid(vt.y + dy) };
-        const p2 = { x: vt.x, y: vt.y };
-        const weapon = killer.type === 'SNIPER' ? 'SNIPER' : killer.type === 'ASSAULTER' ? 'ASSAULTER' : 'SOLDIER';
-        const preUnits = state.units.map(u => (u.id === victim.id ? { ...u, tileId: `${p0.x},${p0.y}` } : u));
-        const postUnits = state.units.filter(u => u.id !== victim.id);
-        const events: GameEvent[] = [
-          {
-            kind: 'movePath',
-            unitId: victim.id,
-            unitType: victim.type,
-            owner: victim.owner,
-            path: [p0, p1, p2],
-            haltedAt: 2,
-          },
-          {
-            kind: 'projectile',
-            from: { x: kt.x, y: kt.y },
-            to: p2,
-            style: weapon === 'SNIPER' ? 'LASER' : weapon === 'ASSAULTER' ? 'MISSILE' : 'BULLET',
-            weapon,
-            attackerId: killer.id,
-            targetUnitId: victim.id,
-            travelMs: 240,
-          },
-          {
-            kind: 'hit',
-            targetUnitId: victim.id,
-            at: p2,
-            from: { x: kt.x, y: kt.y },
-            damage: Math.max(12, victim.hp + 3),
-            weapon,
-            isKill: true,
-            breakdown: {
-              baseDamage: 12,
-              watchtowerBoosted: false,
-              coverPct: 0,
-              coverTerrain: vt.type,
-              coverArmorApplied: false,
-              crossfireBonus: 0,
-            },
-          },
-          {
-            kind: 'killed',
-            unitId: victim.id,
-            unitType: victim.type,
-            owner: victim.owner,
-            rank: (victim.rank ?? 0) as UnitRank,
-            at: p2,
-            killerOwner: killer.owner,
-            killerUnitId: killer.id,
-            killerUnitType: killer.type,
-            victimPreHp: victim.hp,
-            cause: 'OVERWATCH',
-          },
-        ];
-        recordDev(events, preUnits, postUnits);
-        playEvents(events, postUnits, preUnits);
-        set({ units: postUnits, selectedUnitId: null });
-        return;
-      }
+      // An ATTACK cue's `remainingHp` is the victim's HP at cue time, which is what decides the
+      // graze fake-out: present the victim in that state before the round lands.
+      const preHp =
+        spec.probe?.subject === 'ATTACK' && spec.probe.remainingHp !== undefined
+          ? { unitId: base.victim.id, hp: spec.probe.remainingHp }
+          : undefined;
 
-      if (kind === 'CROSSFIRE_KILL' || kind === 'CORNER_KILL') {
-        const victim = state.units.find(u => u.owner !== state.currentPlayer) ?? state.units[0];
-        if (!victim) return;
-        const killer =
-          state.units.find(u => u.owner !== victim.owner && u.type === 'SNIPER') ??
-          state.units.find(u => u.owner !== victim.owner) ??
-          victim;
-        const isCorner = kind === 'CORNER_KILL';
-        const vt = isCorner ? { x: 0, y: 0, type: tileOf('0,0')?.type ?? ('PLAINS' as const) } : tileOf(victim.tileId);
-        const kt = isCorner
-          ? { x: Math.min(7, state.gridSize - 1), y: Math.min(5, state.gridSize - 1) }
-          : tileOf(killer.tileId);
-        if (!vt || !kt) return;
-        const preUnits = isCorner
-          ? state.units.map(u =>
-              u.id === victim.id
-                ? { ...u, tileId: `${vt.x},${vt.y}` }
-                : u.id === killer.id
-                  ? { ...u, tileId: `${kt.x},${kt.y}` }
-                  : u,
-            )
-          : state.units;
-        const postUnits = preUnits.filter(u => u.id !== victim.id);
-        const allies = isCorner
-          ? undefined
-          : [
-              { x: clampGrid(vt.x + (vt.x > 2 ? -2 : 2)), y: clampGrid(vt.y + (vt.y > 2 ? -1 : 1)) },
-              { x: clampGrid(vt.x + (vt.x < state.gridSize - 3 ? 2 : -2)), y: clampGrid(vt.y + (vt.y < state.gridSize - 3 ? 1 : -1)) },
-            ];
-        const dmg = isCorner ? 22 : 19;
-        const events: GameEvent[] = [
-          {
-            kind: 'projectile',
-            from: { x: kt.x, y: kt.y },
-            to: { x: vt.x, y: vt.y },
-            style: 'LASER',
-            weapon: 'SNIPER',
-            attackerId: killer.id,
-            targetUnitId: victim.id,
-            travelMs: 320,
-          },
-          {
-            kind: 'hit',
-            targetUnitId: victim.id,
-            at: { x: vt.x, y: vt.y },
-            from: { x: kt.x, y: kt.y },
-            damage: dmg,
-            weapon: 'SNIPER',
-            isKill: true,
-            crossfireFrom: allies,
-            breakdown: {
-              baseDamage: 12,
-              watchtowerBoosted: true,
-              coverPct: isCorner ? 0.2 : 0.4,
-              coverTerrain: isCorner ? vt.type : 'FOREST',
-              coverArmorApplied: false,
-              crossfireBonus: isCorner ? 0 : 4,
-            },
-          },
-          {
-            kind: 'killed',
-            unitId: victim.id,
-            unitType: victim.type,
-            owner: victim.owner,
-            rank: (isCorner ? Math.max(victim.rank ?? 0, 1) : 3) as UnitRank,
-            at: { x: vt.x, y: vt.y },
-            killerOwner: killer.owner,
-            killerUnitId: killer.id,
-            killerUnitType: 'SNIPER',
-            victimPreHp: victim.hp,
-            zeroCpClutch: !isCorner,
-            cause: 'COMBAT',
-          },
-        ];
-        recordDev(events, preUnits, postUnits);
-        playEvents(events, postUnits, preUnits);
-        set({ units: postUnits, selectedUnitId: null });
-        return;
-      }
-
-      if (kind === 'KILL_CINEMATIC' || kind === 'KILL_MICRO') {
-        const victim = state.units.find(u => u.owner !== state.currentPlayer) ?? state.units[0];
-        if (!victim) return;
-        const killer = state.units.find(u => u.owner !== victim.owner) ?? victim;
-        const victimTile = tileOf(victim.tileId);
-        const killerTile = tileOf(killer.tileId);
-        if (!victimTile || !killerTile) return;
-        const cinematic = kind === 'KILL_CINEMATIC';
-        const weapon = killer.type === 'SNIPER' ? 'SNIPER' : killer.type === 'ASSAULTER' ? 'ASSAULTER' : 'SOLDIER';
-        const postUnits = state.units.filter(u => u.id !== victim.id);
-        const events: GameEvent[] = [
-          {
-            kind: 'projectile',
-            from: { x: killerTile.x, y: killerTile.y },
-            to: { x: victimTile.x, y: victimTile.y },
-            style: weapon === 'SNIPER' ? 'LASER' : weapon === 'ASSAULTER' ? 'MISSILE' : 'BULLET',
-            weapon,
-            attackerId: killer.id,
-            targetUnitId: victim.id,
-            travelMs: cinematic ? 360 : 220,
-          },
-          {
-            kind: 'hit',
-            targetUnitId: victim.id,
-            at: { x: victimTile.x, y: victimTile.y },
-            from: { x: killerTile.x, y: killerTile.y },
-            damage: cinematic ? 24 : 7,
-            weapon,
-            isKill: true,
-            breakdown: {
-              baseDamage: cinematic ? 20 : 7,
-              watchtowerBoosted: cinematic && weapon === 'SNIPER',
-              coverPct: 0,
-              coverTerrain: victimTile.type,
-              coverArmorApplied: false,
-              crossfireBonus: 0,
-            },
-          },
-          {
-            kind: 'killed',
-            unitId: victim.id,
-            unitType: victim.type,
-            owner: victim.owner,
-            rank: cinematic ? 3 : 0,
-            at: { x: victimTile.x, y: victimTile.y },
-            killerOwner: killer.owner,
-            killerUnitId: killer.id,
-            killerUnitType: killer.type,
-            victimPreHp: victim.hp,
-            cause: 'COMBAT',
-          },
-        ];
-        recordDev(events, state.units, postUnits);
-        playEvents(events, postUnits, state.units);
-        set({ units: postUnits, selectedUnitId: null });
-        return;
-      }
-
-      const bankTile = state.mapData.find(t => t.type === 'BANK');
-      const enemyBase =
-        state.mapData.find(t => t.type === 'BASE' && t.owner !== state.currentPlayer) ??
-        state.mapData.find(t => t.type === 'BASE');
-
-      if (kind === 'HEIST') {
-        const at = bankTile ?? enemyBase;
-        if (!at) return;
-        const events: GameEvent[] = [{ kind: 'heist', at: { x: at.x, y: at.y }, playerId: state.currentPlayer }];
-        recordDev(events, state.units, state.units);
-        playEvents(events);
-        return;
-      }
-
-      if (kind === 'BANK_DEMOLISH') {
-        if (!bankTile) return;
-        const events: GameEvent[] = [
-          {
-            kind: 'structureHit',
-            at: { x: bankTile.x, y: bankTile.y },
-            structureType: 'BANK',
-            damage: 14,
-            destroyed: true,
-            owner: bankTile.owner ?? null,
-            attackerOwner: state.currentPlayer,
-          },
-        ];
-        recordDev(events, state.units, state.units);
-        playEvents(events);
-        return;
-      }
-
-      if (!enemyBase) return;
-      const events: GameEvent[] = [
-        {
-          kind: 'structureHit',
-          at: { x: enemyBase.x, y: enemyBase.y },
-          structureType: 'BASE',
-          damage: kind === 'HQ_DESTROY' ? 50 : 8,
-          destroyed: kind === 'HQ_DESTROY',
-          owner: enemyBase.owner ?? null,
-          attackerOwner: state.currentPlayer,
-          isMatchWinning: kind === 'HQ_DESTROY',
-        },
-      ];
-      recordDev(events, state.units, state.units);
-      playEvents(events);
+      fireBatch(spec.build(ctx), positions, preHp);
     },
     openTutorial: () => set({ currentScreen: 'TUTORIAL' }),
     exitTutorial: () => set({ currentScreen: 'SETUP' }),
@@ -1330,6 +1169,9 @@ export const useGameStore = create<GameStore>((set, get) => {
       recapPlayer.stop();
       highlightRecorder.reset();
       useEffectStore.getState().clearAllFx();
+      botMatchActive = false;
+      matchFilmPlayed = false;
+      aiLoopSeq++;
       if (get().mode === 'ONLINE') {
         get().online?.leave();
         return;
@@ -1337,6 +1179,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       set({
         currentScreen: 'SETUP',
         winner: null,
+        finalePending: false,
         matchSummary: null,
         activeMission: null,
         mapData: [],
@@ -1800,7 +1643,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     runAiLoop: () => {
       const { isAiTurn, winner, settings, currentScreen, mode } = get();
-      if (mode !== 'LOCAL' || !isAiTurn || winner !== null || settings.gameMode !== 'PVE' || currentScreen !== 'GAME') return;
+      if (mode !== 'LOCAL' || !isAiTurn || winner !== null || (!botMatchActive && settings.gameMode !== 'PVE') || currentScreen !== 'GAME') return;
       const seq = ++aiLoopSeq;
       const fireAiStep = () => {
         if (seq !== aiLoopSeq) return;
@@ -1888,6 +1731,41 @@ export const useGameStore = create<GameStore>((set, get) => {
         ...(aiNext || action.type === 'END_TURN' ? { mapFeedback: null } : {}),
       });
       if (aiNext) get().runAiLoop();
+
+      // The match ends like a broadcast: the winning cut lands, then the cutscene plays, and only
+      // then the scoreboard. `finalePending` holds the results across the cue delay, when neither a
+      // kill cam nor a recap is on screen yet; it clears the moment the cutscene takes over.
+      if (state.winner === null && next.winner !== null && !matchFilmPlayed) {
+        matchFilmPlayed = true;
+        const cueAfterCut = (play: () => void) => {
+          set({ finalePending: true });
+          // Safety net: a cue that never lands must not leave the results unreachable.
+          setTimeout(() => {
+            if (get().finalePending) set({ finalePending: false });
+          }, 12_000);
+          const run = () => {
+            const current = get();
+            if (current.currentScreen === 'GAME' && current.winner !== null && current.mode === 'LOCAL') play();
+          };
+          if (fxTimeline.isKillCamActive()) {
+            const unsub = fxTimeline.subscribeKillCamActive(active => {
+              if (active) return;
+              unsub();
+              setTimeout(run, 900);
+            });
+          } else {
+            setTimeout(run, 900);
+          }
+        };
+
+        const film = highlightRecorder.getFilm();
+        if (film && film.scenes.length > 1) {
+          cueAfterCut(() => get().playMatchFilm());
+        } else if (botMatchActive) {
+          // A simulated match with no feud to cut keeps its single-moment Play of the Match replay.
+          cueAfterCut(() => get().playPlayOfTheMatch());
+        }
+      }
     },
 
     playPlayOfTheMatch: (onDone) => {
@@ -1897,8 +1775,32 @@ export const useGameStore = create<GameStore>((set, get) => {
         return false;
       }
       if (recapPlayer.isActive()) recapPlayer.stop();
+      set({ finalePending: false });
       const { units, mapData } = get();
       recapPlayer.startPotmReplay(highlight, createRecapBridge(units, mapData), onDone);
+      return true;
+    },
+
+    playMatchFilm: (onDone) => {
+      const film = highlightRecorder.getFilm();
+      if (!film || film.scenes.length === 0) {
+        set({ finalePending: false });
+        onDone?.();
+        return false;
+      }
+      if (recapPlayer.isActive()) recapPlayer.stop();
+      // The reel is taking the screen now, so the held scoreboard hands over to `recapActive`.
+      set({ finalePending: false });
+      const { units, mapData, settings, visibleTiles } = get();
+      if (film.scenes.length === 1) {
+        recapPlayer.startPotmReplay(film.scenes[0], createRecapBridge(units, mapData), onDone);
+        return true;
+      }
+      // A reel is a broadcast replay: it may show ground the viewer never scouted, so fog lifts for
+      // the duration and the live visibility set comes back with the board when it ends.
+      const restoreVisibility = settings.fogOfWar ? visibleTiles : undefined;
+      if (settings.fogOfWar) set({ visibleTiles: new Set(mapData.map(t => t.id)) });
+      recapPlayer.startFilm(film.scenes, createRecapBridge(units, mapData, restoreVisibility), onDone);
       return true;
     },
 

@@ -935,7 +935,7 @@ const FullMapDialog: React.FC<FullMapDialogProps> = ({
                     variant={interactMode === 'EDIT' ? 'softAmber' : 'default'}
                     coreStyle={{ padding: '5px 10px', fontSize: '11px' }}
                   >
-                    {interactMode === 'EDIT' ? 'VIEW ONLY' : '✏️ EDIT'}
+                    {interactMode === 'EDIT' ? 'VIEW ONLY' : '✏️ EDIT TILES'}
                   </GeoButton>
                 )}
                 {!canEdit && canSuggest && interactMode !== 'EDIT' && (
@@ -1406,7 +1406,7 @@ export const MapPreviewCard: React.FC<MapPreviewCardProps> = ({
                   onClick={() => openModal('EDIT')}
                   coreStyle={{ padding: '6px 9px', fontSize: '11px' }}
                 >
-                  ✏️ EDIT
+                  ✏️ EDIT TILES
                 </GeoButton>
               )}
               {!canEdit && canSuggest && (

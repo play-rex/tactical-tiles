@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { generateDevMap } from '@tactical/engine';
+import { auditBridgeOrientation, devMapReport, generateDevMap } from '@tactical/engine';
 
 const walkable = (type: string) => type !== 'WATER';
 
@@ -71,6 +71,66 @@ test('dev map stamps one HQ per seat and keeps them connected on river-heavy boa
   }
 });
 
+test('every terrain knob lands on its exact requested coverage across seeds and board sizes', () => {
+  for (const gridSize of [16, 20, 28]) {
+    for (const seed of ['A1', 'B2', 'C3', 'D4', 'E5']) {
+      const { report } = generateDevMap({
+        seed,
+        gridSize,
+        playerCount: 2,
+        forestPct: 30,
+        mountainPct: 18,
+        buildingPct: 8,
+        desertPct: 22,
+        lootPct: 12,
+        banks: 2,
+        rivers: 0,
+        waterPct: 0,
+      });
+      const where = `seed ${seed} @ ${gridSize}`;
+      assert.equal(report.realized.forestPct, 30, `${where}: forest cover`);
+      assert.equal(report.realized.mountainPct, 18, `${where}: mountain cover`);
+      assert.equal(report.realized.desertPct, 22, `${where}: desert split`);
+      assert.equal(report.realized.buildingPct, 8, `${where}: buildings`);
+      assert.equal(report.realized.lootPct, 12, `${where}: loot`);
+      assert.equal(report.realized.banks, 2, `${where}: banks`);
+      assert.equal(report.realized.waterPct, 0, `${where}: no rivers means no water`);
+      assert.equal(report.faithful, true, `${where}: report agrees with the knobs`);
+    }
+  }
+});
+
+test('knobs at zero build nothing, and river volume widens channels monotonically', () => {
+  const bare = generateDevMap({
+    seed: 'ZERO',
+    gridSize: 20,
+    forestPct: 0,
+    mountainPct: 0,
+    desertPct: 0,
+    buildingPct: 0,
+    lootPct: 0,
+    banks: 0,
+    rivers: 0,
+    waterPct: 0,
+  });
+  assert.equal(bare.map.every(t => t.type === 'PLAINS' || t.type === 'BASE'), true, 'empty slate is just grass and HQs');
+
+  const waterShare = (waterPct: number): number =>
+    devMapReport(generateDevMap({ seed: 'RIVER', gridSize: 22, rivers: 1, waterPct }).map, 22, { rivers: 1, waterPct })
+      .realized.waterPct;
+  const ladder = [2, 8, 14, 22, 30].map(waterShare);
+  for (let i = 1; i < ladder.length; i++) {
+    assert.ok(ladder[i] >= ladder[i - 1], `river volume ${i} is not monotonic (${ladder.join(' -> ')})`);
+  }
+  assert.ok(ladder[ladder.length - 1] > ladder[0] + 4, `volume 30 must be visibly wetter than 2 (${ladder.join(' -> ')})`);
+  assert.equal(
+    devMapReport(generateDevMap({ seed: 'DRY', gridSize: 20, rivers: 0, waterPct: 30 }).map, 20, { rivers: 0, waterPct: 30 })
+      .realized.waterPct,
+    0,
+    'river volume alone never paints water',
+  );
+});
+
 test('dev map honours bank and loot requests', () => {
   const { map } = generateDevMap({
     seed: 'LOOT',
@@ -84,4 +144,30 @@ test('dev map honours bank and loot requests', () => {
   });
   assert.equal(map.filter(t => t.type === 'BANK').length, 3);
   assert.ok(map.some(t => !!t.loot));
+});
+
+test('dev map bridges are strictly shore-aligned with zero inverted or dead-end spans across archipelago & multi-river presets', () => {
+  const seeds = ['ARCH01', 'ARCH02', 'ARCH03', 'ARCH04', 'ARCH05', 'LUSH1', 'LUSH2', 'LUSH3', 'BAL01', 'WIDE9'];
+  const configs = [
+    // Archipelago (3 wide rivers!)
+    { gridSize: 20, playerCount: 2, waterPct: 30, rivers: 3, forestPct: 16, mountainPct: 6, banks: 2 },
+    { gridSize: 24, playerCount: 4, waterPct: 30, rivers: 3, forestPct: 16, mountainPct: 10, banks: 2 },
+    // Lush Valley (3 rivers at volume 14)
+    { gridSize: 20, playerCount: 2, waterPct: 14, rivers: 3, forestPct: 38, mountainPct: 14, banks: 2 },
+    // Single & double rivers
+    { gridSize: 20, playerCount: 2, waterPct: 16, rivers: 2, forestPct: 18, mountainPct: 12, banks: 2 },
+  ];
+
+  for (const cfg of configs) {
+    for (const seed of seeds) {
+      const { map, size } = generateDevMap({ seed, ...cfg });
+      const issues = auditBridgeOrientation(map, size);
+      assert.deepEqual(
+        issues,
+        [],
+        `seed ${seed} (rivers=${cfg.rivers}, water=${cfg.waterPct}) produced glitched bridges: ${issues.map(i => i.reason).join('; ')}`,
+      );
+      assert.equal(allHqsConnected(map, size), true, `seed ${seed} stranded an HQ`);
+    }
+  }
 });

@@ -269,6 +269,16 @@
 .opgeo-range {
   accent-color: var(--acc-blue);
   cursor: pointer;
+  min-height: 22px;
+}
+.opgeo-range:focus-visible {
+  outline: 2px solid var(--acc-blue);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.opgeo-range:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 /* ── Turn banner: slides in over the map when you can act, then gets out of the way ── */
@@ -451,4 +461,14 @@
 /* Side-by-side setup columns stack on narrow screens (inline grid styles need !important) */
 @media (max-width: 899px) {
   .tt-cols { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+/* Compact procedural preset picker grid */
+.tt-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+@media (max-width: 400px) {
+  .tt-preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

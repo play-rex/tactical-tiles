@@ -459,3 +459,57 @@ test('reconnect delivers fog-honest missedActions for opponent moves while keepi
   await a.room.leave();
   await bBack.room.leave();
 });
+
+test('lobby syncs mapGen presets, custom knobs, hostCustomizingMap badge, and launches with exact configured board', async () => {
+  const a = await host('Host');
+  const initial = await a.view(() => true);
+  const b = await join(initial.code, 'Guest');
+  await b.view(() => true);
+
+  // Host opens customizer -> guest sees hostCustomizingMap = true
+  a.room.send(ClientMsg.mapCustomizing, { active: true });
+  const tuningView = await b.view(v => v.hostCustomizingMap === true, 'guest sees host tuning indicator');
+  assert.equal(tuningView.hostCustomizingMap, true);
+
+  // Add a tile edit first, then change mapGen -> stale tile edits must clear cleanly
+  const editPatch = [{ x: 5, y: 5, type: 'BUILDING' as const, height: 1, subType: 'WATCHTOWER' as const }];
+  a.room.send(ClientMsg.mapCommitEdit, { edits: editPatch });
+  const editedView = await a.view(v => v.settings.mapEdits?.length === 1);
+
+  const archGen = {
+    preset: 'custom' as const,
+    knobs: { gridSize: 16 as const, waterStyle: 'ISLANDS' as const, rivers: 3, waterPct: 24, symmetry: 'MIRRORED' as const },
+  };
+  a.room.send(ClientMsg.settings, { ...editedView.settings, mapGen: archGen });
+  const syncedB = await b.view(
+    v => v.settings.mapGen?.preset === 'custom' && v.settings.mapGen.knobs?.gridSize === 16,
+    'guest receives custom mapGen live',
+  );
+  assert.equal(syncedB.settings.mapEdits, undefined, 'changing mapGen clears stale mapEdits');
+  assert.equal(syncedB.settings.mapGen?.knobs?.waterStyle, 'ISLANDS');
+
+  // Host picks 2-base static arena Dust Bowl, then adds a bot -> auto-falls back so seat 3 is never stranded
+  a.room.send(ClientMsg.settings, {
+    ...syncedB.settings,
+    mapGen: { preset: 'classic', staticMapId: 'campaign_canyon' },
+  });
+  await b.view(v => v.settings.mapGen?.staticMapId === 'campaign_canyon', 'guest sees static arena');
+
+  a.room.send(ClientMsg.addBot);
+  const afterBot = await b.view(v => v.seats.length === 3 && v.settings.mapGen?.staticMapId === undefined, 'adding 3rd seat clears 2-base arena');
+  assert.equal(afterBot.seats.length, 3);
+
+  // Host picks Lush Valley and starts match -> hostCustomizingMap clears & server builds Lush Valley board
+  a.room.send(ClientMsg.settings, { ...afterBot.settings, mapGen: { preset: 'lush_valley' } });
+  await b.view(v => v.settings.mapGen?.preset === 'lush_valley');
+  a.room.send(ClientMsg.start);
+  const startedA = await a.view(v => v.status === 'playing');
+  const startedB = await b.view(v => v.status === 'playing');
+  assert.equal(startedA.hostCustomizingMap, undefined);
+  assert.equal(startedA.game!.game.settings.mapGen?.preset, 'lush_valley');
+  assert.equal(startedB.game!.game.mapData.length, startedA.game!.game.mapData.length);
+  assert.ok(startedA.game!.game.mapData.filter(t => t.type === 'FOREST').length > 60);
+
+  await a.room.leave();
+  await b.room.leave();
+});

@@ -1058,7 +1058,12 @@ const BattleRenderController: React.FC<{
                 }
             } else {
                 justWokeRef.current = true;
-                scheduleSingleFrame();
+                // A cut that started (or was still running) while hidden was never seen: end it and
+                // hand real time back before waking the ticker, so combat never resumes at 0.2x.
+                fxTimeline.suspend();
+                // Re-arm the ECO ticker rather than rendering a single static frame: pending FX and
+                // the turn clock have to keep advancing after the tab comes back.
+                wake(600);
             }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);

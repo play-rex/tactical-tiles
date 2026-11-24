@@ -1528,6 +1528,7 @@ export const WinnerOverlay: React.FC = () => {
   const resetGame = useGameStore(state => state.resetGame);
   const retryCurrentMatch = useGameStore(state => state.retryCurrentMatch);
   const playPlayOfTheMatch = useGameStore(state => state.playPlayOfTheMatch);
+  const playMatchFilm = useGameStore(state => state.playMatchFilm);
   const exportPlayOfTheMatch = useGameStore(state => state.exportPlayOfTheMatch);
   const victoryMode = useGameStore(state => state.settings.victoryMode);
   const matchSummary = useGameStore(state => state.matchSummary);
@@ -1538,14 +1539,16 @@ export const WinnerOverlay: React.FC = () => {
   const onlineView = useOnline(state => state.view);
   const rematch = useOnline(state => state.rematch);
   const killCamActive = useEffectStore(state => state.killCamActive);
+  const finalePending = useGameStore(state => state.finalePending);
   const localNames = useGameStore(state => state.settings.playerNames);
   const [recapActive, setRecapActive] = useState(() => recapPlayer.isActive());
   const [exportStatus, setExportStatus] = useState<string | null>(null);
 
   useEffect(() => recapPlayer.subscribe(s => setRecapActive(s.active)), []);
 
-  // Let the final HQ destruction / match-winning kill cam or POTM replay finish before showing the scoreboard.
-  if (winner === null || killCamActive || recapActive) return null;
+  // Let the final HQ destruction / match-winning kill cam, the cue delay, and the drama reel all
+  // finish before showing the scoreboard.
+  if (winner === null || killCamActive || recapActive || finalePending) return null;
   const online = mode === 'ONLINE';
   const isDraw = winner === 'DRAW';
   const isHost = Boolean(onlineView?.seats[mySeat]?.isHost);
@@ -1555,6 +1558,7 @@ export const WinnerOverlay: React.FC = () => {
   const seedValue = matchSummary?.seed || activeSeed;
   const pTheme = (!isDraw && PLAYER_UI_THEME[winner as number]) || PLAYER_UI_THEME[0];
   const highlight = highlightRecorder.getBest();
+  const film = highlightRecorder.getFilm();
 
   const handleExport = async () => {
     if (exportStatus) return;
@@ -1643,6 +1647,16 @@ export const WinnerOverlay: React.FC = () => {
                   {exportStatus ?? '⬇ EXPORT CLIP'}
                 </GeoButton>
               </div>
+              {film && film.scenes.length > 1 && (
+                <GeoButton
+                  variant="softBlue"
+                  fullWidth
+                  onClick={() => playMatchFilm()}
+                  coreStyle={{ padding: '8px 10px', fontSize: '12px' }}
+                >
+                  ▶ MATCH DRAMA REEL · {film.scenes.length} CUTS
+                </GeoButton>
+              )}
             </GeoWell>
           )}
 

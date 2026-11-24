@@ -12,6 +12,7 @@ export const RecapBanner: React.FC = () => {
 
   if (!status.active) return null;
 
+  const isFilm = status.kind === 'FILM';
   const isPotm = status.kind === 'POTM';
 
   return (
@@ -40,8 +41,12 @@ export const RecapBanner: React.FC = () => {
       role="status"
       aria-live="polite"
     >
-      <span style={{ color: isPotm ? '#FACC15' : '#38BDF8' }}>
-        {isPotm ? '★ PLAY OF THE MATCH' : `▶ ${status.label} (${status.step}/${status.total})`}
+      <span style={{ color: isPotm || isFilm ? '#FACC15' : '#38BDF8' }}>
+        {isFilm
+          ? `★ DRAMA REEL ${status.step}/${status.total} · ${status.label}`
+          : isPotm
+            ? '★ PLAY OF THE MATCH'
+            : `▶ ${status.label} (${status.step}/${status.total})`}
       </span>
       {status.fastForward && (
         <span
@@ -71,7 +76,7 @@ export const RecapBanner: React.FC = () => {
           cursor: 'pointer',
         }}
       >
-        {isPotm ? 'CLOSE' : 'SKIP'}
+        {isFilm ? 'SKIP' : isPotm ? 'CLOSE' : 'SKIP'}
       </button>
     </div>
   );

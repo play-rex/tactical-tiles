@@ -3,6 +3,8 @@ export * from './types';
 export * from './game/state';
 export * from './game/setup';
 export * from './game/devMap';
+export * from './game/mapPresets';
+export * from './grid/BridgePlacement';
 export * from './game/options';
 export * from './game/apply';
 export * from './game/validate';
