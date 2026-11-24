@@ -1,0 +1,1034 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Kill cam & attack micro-cam — cinematic overlay. Layered above the board
+   frame, below modals. Center ~45% stays completely clear so the unit, shot,
+   and impact FX are never blocked by typography.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.tt-killcam {
+  position: absolute;
+  inset: 0;
+  z-index: 44;
+  overflow: hidden;
+  pointer-events: auto;
+  cursor: pointer;
+  color: #f8fafc;
+  font-family: "Space Grotesk", "Avenir Next", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --kc-accent: #38bdf8;
+  --kc-accent-ink: #04121e;
+  --kc-victim: #ef4444;
+  --kc-inset: 16px;
+  animation: kc-overlay-out 220ms linear both;
+  animation-delay: calc(var(--kc-slam, 60ms) + var(--kc-slow, 380ms));
+}
+
+.tt-killcam--prelude {
+  animation: none;
+  pointer-events: auto;
+}
+
+.tt-killcam--attack {
+  pointer-events: none;
+  cursor: default;
+}
+
+/* ── Skip button ───────────────────────────────────────────────────────────── */
+.tt-killcam__skip {
+  position: absolute;
+  right: 16px;
+  bottom: calc(7.6% + 14px);
+  z-index: 4;
+  pointer-events: auto;
+  cursor: pointer;
+  padding: 5px 10px;
+  border: 1px solid rgba(248, 250, 252, 0.28);
+  background: rgba(5, 9, 16, 0.84);
+  color: rgba(226, 232, 240, 0.9);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  backdrop-filter: blur(4px);
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.tt-killcam__skip:hover {
+  background: rgba(15, 23, 42, 0.96);
+  border-color: rgba(248, 250, 252, 0.72);
+  color: #ffffff;
+}
+
+.tt-killcam--micro .tt-killcam__skip,
+.tt-killcam--prelude .tt-killcam__skip {
+  bottom: 14px;
+}
+
+/* ── Non-lethal Attack Micro-Cam HUD (top-right, zero center obstruction) ──── */
+.tt-killcam__attack-hud {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 7px 12px 8px;
+  background: linear-gradient(180deg, rgba(7, 11, 18, 0.86) 0%, rgba(7, 11, 18, 0.68) 100%);
+  border: 1px solid rgba(248, 250, 252, 0.14);
+  border-right: 3px solid var(--kc-accent);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+  animation: kc-stamp-in 210ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.tt-killcam__attack-eyebrow {
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.tt-killcam__attack-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tt-killcam__attack-dmg {
+  font-size: clamp(24px, 3vw, 34px);
+  line-height: 0.95;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: #ffffff;
+  text-shadow: 0 4px 16px rgba(2, 6, 12, 0.9);
+}
+
+.tt-killcam__attack-unit {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.88);
+}
+
+.tt-killcam__attack-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(203, 213, 225, 0.8);
+  font-variant-numeric: tabular-nums;
+}
+
+.tt-killcam__attack-survive {
+  color: #fde047;
+  text-shadow: 0 0 12px rgba(250, 204, 21, 0.72);
+  animation: kc-survive-pop 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.tt-killcam__attack-tease-label {
+  color: #f87171;
+  letter-spacing: 0.24em;
+}
+
+.tt-killcam__attack-hud--tease {
+  border-right-color: #ef4444;
+  box-shadow: 0 0 28px -8px rgba(239, 68, 68, 0.8);
+}
+
+.tt-killcam__attack-hud--survive {
+  border-color: rgba(250, 204, 21, 0.45);
+  border-right: 3px solid #facc15;
+  box-shadow: 0 0 32px -8px rgba(52, 211, 153, 0.55);
+  animation: kc-graze-snap 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.tt-killcam__graze-flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, rgba(239, 68, 68, 0.34) 0%, rgba(239, 68, 68, 0) 62%);
+  animation: kc-flash 120ms ease-out both;
+}
+
+.tt-killcam__glitch-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 44%;
+  height: 12%;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(250, 204, 21, 0.22) 0px,
+    rgba(56, 189, 248, 0.2) 18px,
+    transparent 18px,
+    transparent 34px
+  );
+  mix-blend-mode: screen;
+  animation: kc-glitch-tear 140ms steps(3, end) both;
+}
+
+/* ── Tactical Receipt (staggered deterministic math chain) ─────────────────── */
+.tt-killcam__receipt {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 5px;
+  max-width: 260px;
+}
+
+.tt-killcam__receipt--compact {
+  margin-top: 4px;
+  max-width: 220px;
+}
+
+.tt-killcam__rstep {
+  padding: 2px 6px;
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid rgba(248, 250, 252, 0.16);
+  background: rgba(15, 23, 42, 0.85);
+  color: rgba(226, 232, 240, 0.9);
+  animation: kc-rstep-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.tt-killcam__rstep--boost {
+  border-color: rgba(250, 204, 21, 0.45);
+  color: #fde68a;
+}
+
+.tt-killcam__rstep--mitigate {
+  border-color: rgba(56, 189, 248, 0.42);
+  color: #7dd3fc;
+}
+
+.tt-killcam__rstep--total {
+  border-color: rgba(248, 113, 113, 0.6);
+  background: rgba(127, 29, 29, 0.72);
+  color: #ffffff;
+}
+
+/* ── Dynamic Corner-Dodging: flip upper-right telemetry left when victim is top-right ── */
+.tt-killcam--dodge-right .tt-killcam__stamp,
+.tt-killcam--dodge-right .tt-killcam__attack-hud {
+  right: auto;
+  left: 22px;
+  align-items: flex-start;
+  border-right: 1px solid rgba(248, 250, 252, 0.12);
+  border-left: 3px solid var(--kc-victim);
+}
+
+.tt-killcam--dodge-right .tt-killcam__hp {
+  text-align: left;
+}
+
+.tt-killcam--dodge-right .tt-killcam__receipt {
+  justify-content: flex-start;
+}
+
+.tt-killcam--dodge-right .tt-killcam__speed {
+  left: auto;
+  right: 20px;
+}
+
+/* ── Land Mine ARM beat ("*click*") ────────────────────────────────────────── */
+.tt-killcam__slugline--mine {
+  color: #fca5a5;
+  text-shadow: 0 0 18px rgba(239, 68, 68, 0.75);
+}
+
+.tt-killcam--gold .tt-killcam__headline {
+  color: #fef08a;
+  text-shadow:
+    0 0 1px rgba(255, 255, 255, 0.95),
+    0 8px 28px rgba(2, 6, 12, 0.9),
+    0 0 54px rgba(250, 204, 21, 0.55);
+}
+
+.tt-killcam__chip--cyan {
+  border-color: rgba(56, 189, 248, 0.52);
+  color: #bae6fd;
+}
+
+/* ── Letterbox ─────────────────────────────────────────────────────────────── */
+.tt-killcam__bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 7.6%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  background: linear-gradient(180deg, #04060a 0%, #05070c 100%);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.66);
+  pointer-events: none;
+  animation: kc-bar-in var(--kc-slam, 60ms) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.tt-killcam__bar--top {
+  top: 0;
+  transform-origin: top center;
+  border-bottom: 1px solid rgba(248, 250, 252, 0.08);
+}
+
+.tt-killcam__bar--bottom {
+  bottom: 0;
+  transform-origin: bottom center;
+  border-top: 1px solid rgba(248, 250, 252, 0.08);
+}
+
+.tt-killcam__bar-net {
+  font-variant-numeric: tabular-nums;
+  color: rgba(148, 163, 184, 0.75);
+}
+
+.tt-killcam__bar-brand {
+  letter-spacing: 0.34em;
+  color: rgba(148, 163, 184, 0.45);
+}
+
+.tt-killcam__rec {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #f87171;
+  animation: kc-rec 900ms steps(2, end) infinite;
+}
+
+.tt-killcam__bar--top .tt-killcam__rec {
+  letter-spacing: 0.24em;
+}
+
+/* ── Atmosphere ────────────────────────────────────────────────────────────── */
+.tt-killcam__vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 50% 52%, rgba(2, 6, 12, 0) 46%, rgba(2, 6, 12, 0.36) 82%, rgba(2, 6, 12, 0.7) 100%),
+    linear-gradient(180deg, rgba(2, 6, 12, 0.38) 0%, rgba(2, 6, 12, 0) 22%, rgba(2, 6, 12, 0) 74%, rgba(2, 6, 12, 0.42) 100%);
+  animation: kc-vignette-in 240ms ease-out both;
+}
+
+.tt-killcam__flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  background: radial-gradient(circle at 50% 52%, rgba(255, 255, 255, 0.88) 0%, rgba(255, 236, 236, 0.32) 34%, rgba(255, 255, 255, 0) 68%);
+  animation: kc-flash 190ms ease-out both;
+}
+
+.tt-killcam__scan {
+  position: absolute;
+  inset: -40% 0 -40% 0;
+  pointer-events: none;
+  opacity: 0.18;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.09) 0px,
+    rgba(255, 255, 255, 0.09) 1px,
+    rgba(255, 255, 255, 0) 1px,
+    rgba(255, 255, 255, 0) 3px
+  );
+  animation: kc-scan 900ms linear infinite;
+}
+
+/* ── Framing brackets ──────────────────────────────────────────────────────── */
+.tt-killcam__brackets {
+  position: absolute;
+  inset: var(--kc-inset);
+  pointer-events: none;
+}
+
+.tt-killcam__brackets i {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  border: 2px solid rgba(248, 250, 252, 0.82);
+  animation: kc-bracket-slam 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.tt-killcam__brackets i:nth-child(1) {
+  top: 0;
+  left: 0;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.tt-killcam__brackets i:nth-child(2) {
+  top: 0;
+  right: 0;
+  border-left: 0;
+  border-bottom: 0;
+}
+
+.tt-killcam__brackets i:nth-child(3) {
+  bottom: 0;
+  right: 0;
+  border-left: 0;
+  border-top: 0;
+}
+
+.tt-killcam__brackets i:nth-child(4) {
+  bottom: 0;
+  left: 0;
+  border-right: 0;
+  border-top: 0;
+}
+
+.tt-killcam__brackets--prelude {
+  inset: 22px;
+}
+
+.tt-killcam__brackets--prelude i {
+  width: 30px;
+  height: 30px;
+  border-color: rgba(248, 250, 252, 0.5);
+  animation: kc-bracket-track 900ms ease-in-out infinite;
+}
+
+/* ── Prelude slug ──────────────────────────────────────────────────────────── */
+.tt-killcam__slugline {
+  position: absolute;
+  top: 24px;
+  left: 26px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: rgba(248, 250, 252, 0.72);
+  pointer-events: none;
+  animation: kc-slug-in 160ms ease-out both;
+}
+
+.tt-killcam__slugline-sep {
+  color: rgba(248, 250, 252, 0.25);
+}
+
+/* ── Headline (upper lane — never intrudes on center combat stage) ─────────── */
+.tt-killcam__headline-wrap {
+  position: absolute;
+  top: calc(7.6% + 12px);
+  left: 0;
+  right: 0;
+  padding: 0 180px;
+  text-align: center;
+  pointer-events: none;
+  animation: kc-headline-slam 340ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.tt-killcam__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: rgba(248, 250, 252, 0.68);
+}
+
+.tt-killcam__headline {
+  font-size: clamp(28px, 4.6vw, 56px);
+  line-height: 0.94;
+  font-weight: 900;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+  color: #ffffff;
+  text-shadow:
+    0 0 1px rgba(255, 255, 255, 0.9),
+    0 8px 28px rgba(2, 6, 12, 0.85),
+    0 0 46px color-mix(in srgb, var(--kc-accent) 42%, transparent);
+}
+
+/* ── Off-center damage telemetry stamp (upper-right flank, center stays clear) */
+.tt-killcam__stamp {
+  position: absolute;
+  top: calc(7.6% + 14px);
+  right: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  padding: 7px 13px 8px;
+  background: linear-gradient(180deg, rgba(7, 11, 18, 0.86) 0%, rgba(7, 11, 18, 0.64) 100%);
+  border: 1px solid rgba(248, 250, 252, 0.12);
+  border-right: 3px solid var(--kc-victim);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+  animation: kc-stamp-in 300ms cubic-bezier(0.16, 1, 0.3, 1) 40ms both;
+}
+
+.tt-killcam__damage {
+  font-size: clamp(32px, 4.6vw, 56px);
+  line-height: 0.88;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: #ffffff;
+  text-shadow:
+    0 0 18px rgba(248, 113, 113, 0.55),
+    0 10px 30px rgba(2, 6, 12, 0.9);
+}
+
+.tt-killcam__hp {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.8);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ── Killer / victim cards ─────────────────────────────────────────────────── */
+.tt-killcam__cards {
+  position: absolute;
+  left: 50%;
+  bottom: calc(7.6% + 14px);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  max-width: calc(100% - 40px);
+  pointer-events: none;
+}
+
+.tt-killcam__card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 176px;
+  padding: 9px 15px 10px;
+  background: linear-gradient(180deg, rgba(7, 11, 18, 0.94) 0%, rgba(7, 11, 18, 0.76) 100%);
+  border: 1px solid rgba(248, 250, 252, 0.09);
+  backdrop-filter: blur(2px);
+  animation: kc-card-in 260ms cubic-bezier(0.16, 1, 0.3, 1) 90ms both;
+}
+
+.tt-killcam__card--killer {
+  border-left: 3px solid var(--kc-accent);
+  box-shadow: -10px 0 34px -18px var(--kc-accent);
+}
+
+.tt-killcam__card--victim {
+  border-left: 3px solid var(--kc-victim);
+  animation-delay: 120ms;
+}
+
+.tt-killcam__role {
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.82);
+}
+
+.tt-killcam__name {
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: 0.01em;
+  line-height: 1.05;
+  color: #ffffff;
+}
+
+.tt-killcam__card--killer .tt-killcam__name {
+  color: var(--kc-accent);
+  text-shadow: 0 0 22px color-mix(in srgb, var(--kc-accent) 45%, transparent);
+}
+
+.tt-killcam__card--victim .tt-killcam__name {
+  position: relative;
+  display: inline-block;
+  color: rgba(248, 250, 252, 0.92);
+}
+
+.tt-killcam__card--victim .tt-killcam__name::after {
+  content: "";
+  position: absolute;
+  left: -2px;
+  right: -2px;
+  top: 52%;
+  height: 2px;
+  background: var(--kc-victim);
+  transform-origin: left center;
+  animation: kc-strike 220ms cubic-bezier(0.16, 1, 0.3, 1) 340ms both;
+}
+
+.tt-killcam__meta {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.tt-killcam__slash {
+  width: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(7, 11, 18, 0.7);
+  border-top: 1px solid rgba(248, 250, 252, 0.09);
+  border-bottom: 1px solid rgba(248, 250, 252, 0.09);
+}
+
+.tt-killcam__slash span {
+  display: block;
+  width: 2px;
+  height: 34px;
+  background: linear-gradient(180deg, var(--kc-accent), var(--kc-victim));
+  transform: rotate(18deg);
+  animation: kc-slash 220ms cubic-bezier(0.16, 1, 0.3, 1) 160ms both;
+}
+
+/* ── Cause chips ───────────────────────────────────────────────────────────── */
+.tt-killcam__chips {
+  position: absolute;
+  left: 50%;
+  bottom: calc(7.6% + 90px);
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: calc(100% - 40px);
+  pointer-events: none;
+  animation: kc-chips-in 240ms ease-out 240ms both;
+}
+
+.tt-killcam__chip {
+  padding: 3px 8px;
+  border: 1px solid rgba(248, 250, 252, 0.16);
+  background: rgba(7, 11, 18, 0.72);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.86);
+  white-space: nowrap;
+}
+
+.tt-killcam__chip--hot {
+  border-color: color-mix(in srgb, var(--kc-victim) 55%, transparent);
+  color: #fecaca;
+  box-shadow: 0 0 18px -8px var(--kc-victim);
+}
+
+.tt-killcam__chip--gold {
+  border-color: rgba(250, 204, 21, 0.5);
+  color: #fde68a;
+}
+
+/* ── Slow-motion readout (upper-left to balance right-flank damage stamp) ──── */
+.tt-killcam__speed {
+  position: absolute;
+  top: calc(7.6% + 14px);
+  left: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  color: rgba(226, 232, 240, 0.78);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.tt-killcam__speed-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--kc-victim);
+  box-shadow: 0 0 12px var(--kc-victim);
+  animation: kc-rec 700ms steps(2, end) infinite;
+}
+
+.tt-killcam__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Micro tier: a punch, not a cutscene ───────────────────────────────────── */
+.tt-killcam--micro .tt-killcam__bar,
+.tt-killcam--micro .tt-killcam__scan,
+.tt-killcam--micro .tt-killcam__brackets,
+.tt-killcam--micro .tt-killcam__chips,
+.tt-killcam--micro .tt-killcam__speed {
+  display: none;
+}
+
+.tt-killcam--micro .tt-killcam__headline-wrap {
+  top: 14px;
+  padding: 0 150px;
+  animation-duration: 220ms;
+}
+
+.tt-killcam--micro .tt-killcam__eyebrow {
+  font-size: 8px;
+  margin-bottom: 3px;
+}
+
+.tt-killcam--micro .tt-killcam__headline {
+  font-size: clamp(20px, 2.4vw, 28px);
+  text-shadow: 0 4px 18px rgba(2, 6, 12, 0.9);
+}
+
+.tt-killcam--micro .tt-killcam__stamp {
+  top: 14px;
+  right: 16px;
+  padding: 5px 10px 6px;
+}
+
+.tt-killcam--micro .tt-killcam__damage {
+  font-size: clamp(24px, 3.2vw, 38px);
+}
+
+.tt-killcam--micro .tt-killcam__hp {
+  font-size: 8.5px;
+}
+
+.tt-killcam--micro .tt-killcam__cards {
+  bottom: 14px;
+}
+
+.tt-killcam--micro .tt-killcam__card {
+  min-width: 0;
+  padding: 5px 11px 6px;
+  background: rgba(7, 11, 18, 0.66);
+}
+
+.tt-killcam--micro .tt-killcam__role {
+  display: none;
+}
+
+.tt-killcam--micro .tt-killcam__name {
+  font-size: 15px;
+}
+
+.tt-killcam--micro .tt-killcam__meta {
+  font-size: 8px;
+  letter-spacing: 0.16em;
+}
+
+.tt-killcam--micro .tt-killcam__slash {
+  width: 24px;
+}
+
+.tt-killcam--micro .tt-killcam__slash span {
+  height: 24px;
+}
+
+/* ── Keyframes ─────────────────────────────────────────────────────────────── */
+@keyframes kc-bar-in {
+  from {
+    transform: scaleY(0);
+    opacity: 0.2;
+  }
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes kc-vignette-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes kc-flash {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes kc-scan {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(6px);
+  }
+}
+
+@keyframes kc-bracket-slam {
+  from {
+    opacity: 0;
+    transform: scale(1.6);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes kc-bracket-track {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translate(0, 0);
+  }
+  50% {
+    opacity: 0.7;
+    transform: translate(3px, 3px);
+  }
+}
+
+@keyframes kc-headline-slam {
+  from {
+    opacity: 0;
+    transform: scale(1.36) translateY(8px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes kc-stamp-in {
+  from {
+    opacity: 0;
+    transform: translateX(18px) scale(1.14);
+    filter: blur(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes kc-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes kc-slash {
+  from {
+    opacity: 0;
+    transform: rotate(18deg) scaleY(0.2);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(18deg) scaleY(1);
+  }
+}
+
+@keyframes kc-strike {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes kc-chips-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@keyframes kc-slug-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes kc-rec {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes kc-overlay-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes kc-rstep-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes kc-graze-snap {
+  0% {
+    transform: translateX(-8px) scale(1.12);
+    filter: hue-rotate(-30deg);
+  }
+  60% {
+    transform: translateX(3px) scale(0.98);
+    filter: hue-rotate(0deg);
+  }
+  100% {
+    transform: translateX(0) scale(1);
+    filter: none;
+  }
+}
+
+@keyframes kc-survive-pop {
+  from {
+    opacity: 0;
+    transform: scale(1.22);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes kc-glitch-tear {
+  0% {
+    opacity: 0.9;
+    transform: translateX(-18px) skewX(-12deg);
+  }
+  50% {
+    opacity: 0.65;
+    transform: translateX(14px) skewX(8deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(0) skewX(0);
+  }
+}
+
+/* Overlay must also disappear for anyone who asked the OS for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .tt-killcam {
+    display: none !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .tt-killcam__headline-wrap {
+    padding: 0 16px;
+  }
+
+  .tt-killcam__stamp {
+    top: auto;
+    right: 12px;
+    bottom: calc(7.6% + 12px);
+    padding: 5px 9px;
+  }
+
+  .tt-killcam--micro .tt-killcam__stamp {
+    top: auto;
+    bottom: 52px;
+  }
+
+  .tt-killcam__skip {
+    top: calc(7.6% + 10px);
+    bottom: auto;
+    right: 12px;
+  }
+
+  .tt-killcam--micro .tt-killcam__skip,
+  .tt-killcam--prelude .tt-killcam__skip {
+    top: 10px;
+    bottom: auto;
+  }
+
+  .tt-killcam__cards {
+    flex-direction: column;
+    left: 12px;
+    transform: none;
+    bottom: calc(7.6% + 12px);
+    gap: 4px;
+    max-width: calc(100% - 140px);
+  }
+
+  .tt-killcam__slash {
+    display: none;
+  }
+
+  .tt-killcam__card {
+    min-width: 0;
+    padding: 6px 12px;
+  }
+
+  .tt-killcam__name {
+    font-size: 16px;
+  }
+
+  .tt-killcam__chips {
+    bottom: calc(7.6% + 150px);
+  }
+
+  /* The top bar already prints the slow-motion readout on a narrow screen. */
+  .tt-killcam__speed {
+    display: none;
+  }
+
+  .tt-killcam__bar {
+    font-size: 8px;
+    letter-spacing: 0.16em;
+  }
+}

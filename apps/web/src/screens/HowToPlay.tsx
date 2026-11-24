@@ -300,8 +300,8 @@ export const HowToPlay: React.FC = () => {
                               {key === 'WATER' && 'Impassable without Bridge.'}
                               {key === 'BARRIER' && 'Blocks movement; 80% defensive cover.'}
                               {key === 'TUNNEL' && 'Blasted passage: 1-CP travel through mountains, no cover.'}
-                              {key === 'BASE' && 'Headquarters (+20% Defense).'}
-                              {key === 'BANK' && 'Lootable Vault (+20% Defense).'}
+                              {key === 'BASE' && 'Headquarters. Impassable; 20% siege armor.'}
+                              {key === 'BANK' && 'Vault structure. Impassable; breach via siege (20% armor).'}
                             </td>
                           </tr>
                         );

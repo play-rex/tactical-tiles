@@ -23,6 +23,7 @@ import {
   applyUnitXp,
   calculateAttackOutcome,
   calculateDemolishDamage,
+  calculateOverwatchOutcome,
   calculateSiegeDamage,
   canConstructOnTile,
   canHoldDrop,
@@ -32,13 +33,14 @@ import {
   getEffectiveBankRewards,
   getEffectiveCpRules,
   getEffectiveMaxRespawns,
+  getUnitBaseDamage,
   getUnitMaxHp,
   resolveBridgeVariant,
 } from '../rules/CombatRules';
 import { resolveMoveWithOverwatch } from '../rules/OverwatchRules';
 import { calculateMatchScorecard } from '../storage/CareerStatsManager';
 import { createSeededRng } from '../utils/SeededRandom';
-import { getCrossfireSupporters, getSupplyDropTargets, isConstruct, isConsumable, visibleSet } from './options';
+import { getCrossfireSupporters, getSupplyDropTargets, isConstruct, isConsumable, isValidSpawnTile, visibleSet } from './options';
 import { rollWeather } from './setup';
 import {
   createLog,
@@ -46,6 +48,7 @@ import {
   cloneMatchStats,
   MAX_LOG_ENTRIES,
   nextActivePlayer,
+  type DamageBreakdown,
   type GameAction,
   type GameEvent,
   type GameState,
@@ -135,6 +138,7 @@ class Fx {
     isCrit?: boolean;
     suppressed?: boolean;
     crossfireFrom?: Tile[];
+    breakdown?: DamageBreakdown;
     delayMs?: number;
   }) {
     const crossfirePts = params.crossfireFrom && params.crossfireFrom.length > 0 ? params.crossfireFrom.map(pt) : undefined;
@@ -149,10 +153,17 @@ class Fx {
       ...(params.isCrit ? { isCrit: true } : {}),
       ...(params.suppressed ? { suppressed: true } : {}),
       ...(crossfirePts ? { crossfireFrom: crossfirePts } : {}),
+      ...(params.breakdown ? { breakdown: params.breakdown } : {}),
       ...(params.delayMs !== undefined ? { delayMs: params.delayMs } : {}),
     });
   }
-  killed(unit: Pick<Unit, 'id' | 'type' | 'owner' | 'rank'>, at: Tile, cause: KillCause, killerOwner?: number) {
+  killed(
+    unit: Pick<Unit, 'id' | 'type' | 'owner' | 'rank'> & { hp?: number },
+    at: Tile,
+    cause: KillCause,
+    killerOwner?: number,
+    meta?: { killerUnitId?: string; killerUnitType?: UnitType; zeroCpClutch?: boolean },
+  ) {
     this.events.push({
       kind: 'killed',
       unitId: unit.id,
@@ -161,6 +172,10 @@ class Fx {
       rank: unit.rank ?? 0,
       at: pt(at),
       ...(killerOwner !== undefined ? { killerOwner } : {}),
+      ...(meta?.killerUnitId ? { killerUnitId: meta.killerUnitId } : {}),
+      ...(meta?.killerUnitType ? { killerUnitType: meta.killerUnitType } : {}),
+      ...(unit.hp !== undefined ? { victimPreHp: unit.hp } : {}),
+      ...(meta?.zeroCpClutch ? { zeroCpClutch: true } : {}),
       cause,
     });
   }
@@ -501,6 +516,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           fx.sound(shooter.type === 'SNIPER' ? 'sniper' : 'attack');
           fx.sound('hit');
           if (shooterTile) {
+            const owOutcome = calculateOverwatchOutcome(shooter, shooterTile, interceptTile, mUnit.owner, mUnit);
             fx.projectile(shooterTile, interceptTile, shooter.type === 'SNIPER' ? 'LASER' : 'BULLET', {
               weapon: shooter.type,
               attackerId: shooter.id,
@@ -514,12 +530,24 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
               weapon: shooter.type,
               isKill: trig.victimDead,
               isCrit: trig.damage >= 7,
+              breakdown: {
+                baseDamage: OVERWATCH_STATS[shooter.type].damage,
+                watchtowerBoosted: owOutcome.watchtowerBoosted,
+                coverPct: owOutcome.defense,
+                coverTerrain: interceptTile.type,
+                coverArmorApplied: owOutcome.coverArmorApplied,
+                crossfireBonus: 0,
+                isOverwatch: true,
+              },
             });
             fx.popup(interceptTile, `-${trig.damage}`, '#FF6D00', 12);
             fx.shake(trig.damage > 5 ? 10 : 5, interceptTile);
           }
           if (trig.victimDead) {
-            fx.killed(mUnit, interceptTile, 'OVERWATCH', shooter.owner);
+            fx.killed(mUnit, interceptTile, 'OVERWATCH', shooter.owner, {
+              killerUnitId: shooter.id,
+              killerUnitType: shooter.type,
+            });
           }
 
           newUnits = newUnits.map(u => {
@@ -775,9 +803,11 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const tarTile = getTileByIdFast(mapData, tar.tileId, gridSize);
       const crossfireSupporters = tarTile ? getCrossfireSupporters(att, tarTile, newUnits, mapData, weather, gridSize) : [];
       const crossfireBonus = crossfireSupporters.length > 0 ? COMBAT_BONUSES.CROSSFIRE_DAMAGE : 0;
-      const { damage: finalDmg } = calculateAttackOutcome(att, attTile, tarTile, tar.owner, tar, crossfireBonus);
+      const outcome = calculateAttackOutcome(att, attTile, tarTile, tar.owner, tar, crossfireBonus);
+      const finalDmg = outcome.damage;
       const remainingHp = tar.hp - finalDmg;
       const isKill = remainingHp <= 0;
+      const zeroCpClutch = isKill && action.cost > 0 && (nextPlayerCp[currentPlayer] ?? 0) === 0;
 
       const crossfireTiles = crossfireSupporters
         .map(s => getTileByIdFast(mapData, s.tileId, gridSize))
@@ -801,12 +831,24 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           isCrit: crossfireBonus > 0 || finalDmg >= 7,
           suppressed: Boolean(tar.isOverwatching && finalDmg > 0 && !isKill),
           crossfireFrom: crossfireTiles,
+          breakdown: {
+            baseDamage: getUnitBaseDamage(att),
+            watchtowerBoosted: outcome.watchtowerBoosted,
+            coverPct: outcome.defense,
+            coverTerrain: tarTile.type,
+            coverArmorApplied: outcome.coverArmorApplied,
+            crossfireBonus: outcome.crossfireBonus,
+          },
         });
         fx.popup(tarTile, `-${finalDmg}`, '#FF0000', 10);
         if (crossfireBonus > 0) fx.popup(tarTile, `CROSSFIRE +${crossfireBonus}`, '#F59E0B', 26);
         fx.shake(finalDmg > 5 ? 12 : 4, tarTile);
         if (isKill) {
-          fx.killed(tar, tarTile, 'COMBAT', currentPlayer);
+          fx.killed(tar, tarTile, 'COMBAT', currentPlayer, {
+            killerUnitId: att.id,
+            killerUnitType: att.type,
+            zeroCpClutch,
+          });
         }
       }
 
@@ -963,6 +1005,9 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const goldCost = action.goldCost || 0;
       if (nextPlayerGold[currentPlayer] < goldCost) return reject('Not enough Euros');
       if (!action.deadUnitId) return reject('Missing unit to redeploy');
+      if (!isValidSpawnTile({ mapData: newMap, units: newUnits, gridSize }, currentPlayer, action.tileId)) {
+        return reject("Can't redeploy there");
+      }
       spendCp(actionCost(action));
       spendGold(goldCost);
       const unitType = action.unitType as UnitType;
@@ -1005,9 +1050,8 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         if (!getSupplyDropTargets(state, currentPlayer).has(action.tileId)) return reject('Invalid drop zone');
         targetTileId = action.tileId;
       } else {
-        // Random drop: lands 3–9 tiles from HQ, or a random valid zone near friendly units on base-less maps
+        // Random drop: lands 3–9 tiles from HQ, or a random valid zone near friendly units
         const base = newMap.find(t => t.type === 'BASE' && t.owner === currentPlayer);
-        targetTileId = base?.id;
         if (base) {
           for (let i = 0; i < 20; i++) {
             const dist = 3 + Math.floor(Math.random() * 7);
@@ -1022,7 +1066,8 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
               }
             }
           }
-        } else {
+        }
+        if (!targetTileId) {
           const candidates = Array.from(getSupplyDropTargets(state, currentPlayer));
           if (candidates.length > 0) {
             targetTileId = candidates[Math.floor(Math.random() * candidates.length)];
@@ -1403,6 +1448,18 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
 
   if (newWinner !== null) {
     if (state.winner === null) {
+      // Tag the decisive kill or structure destruction so the Kill Cam escalates to FINAL BLOW.
+      for (let i = fx.events.length - 1; i >= 0; i--) {
+        const ev = fx.events[i];
+        if (ev.kind === 'killed') {
+          ev.isMatchWinning = true;
+          break;
+        }
+        if (ev.kind === 'structureHit' && ev.destroyed && ev.structureType === 'BASE') {
+          ev.isMatchWinning = true;
+          break;
+        }
+      }
       const roundsTaken = mission
         ? Math.max(1, newTotalTurns - (mission.startingRound ?? 0) + 1)
         : Math.max(1, newTotalTurns + 1);

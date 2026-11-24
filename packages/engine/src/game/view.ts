@@ -44,6 +44,12 @@ export function viewFor(state: GameState, seat: number, visible = visibleSet(sta
 export function eventsFor(events: GameEvent[], fog: boolean, before: Set<string>, after: Set<string>): GameEvent[] {
   if (!fog) return events;
   const seen = (p: { x: number; y: number }) => before.has(`${p.x},${p.y}`) || after.has(`${p.x},${p.y}`);
+  const visibleHitOrigins = new Set<string>();
+  for (const e of events) {
+    if (e.kind === 'hit' && e.targetUnitId && e.from && seen(e.from)) {
+      visibleHitOrigins.add(e.targetUnitId);
+    }
+  }
   const out: GameEvent[] = [];
   for (const e of events) {
     switch (e.kind) {
@@ -56,8 +62,21 @@ export function eventsFor(events: GameEvent[], fog: boolean, before: Set<string>
       case 'projectile':
         if (seen(e.from) || seen(e.to)) out.push(e);
         break;
-      case 'popup':
       case 'killed':
+        if (seen(e.at)) {
+          const originSeen = visibleHitOrigins.has(e.unitId);
+          out.push(
+            originSeen
+              ? e
+              : {
+                  ...e,
+                  killerUnitId: undefined,
+                  killerUnitType: undefined,
+                },
+          );
+        }
+        break;
+      case 'popup':
       case 'mineBlast':
       case 'structureHit':
       case 'heist':
@@ -71,11 +90,17 @@ export function eventsFor(events: GameEvent[], fog: boolean, before: Set<string>
         break;
       case 'hit':
         if (seen(e.at)) {
+          const originSeen = Boolean(e.from && seen(e.from));
           const visibleCrossfire = e.crossfireFrom?.filter(seen);
           out.push({
             ...e,
-            from: e.from && seen(e.from) ? e.from : undefined,
+            from: originSeen ? e.from : undefined,
             crossfireFrom: visibleCrossfire && visibleCrossfire.length > 0 ? visibleCrossfire : undefined,
+            breakdown: e.breakdown
+              ? originSeen
+                ? e.breakdown
+                : { ...e.breakdown, watchtowerBoosted: false }
+              : undefined,
           });
         }
         break;

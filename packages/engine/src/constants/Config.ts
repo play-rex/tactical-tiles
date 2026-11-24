@@ -121,8 +121,8 @@ export const TERRAIN_COSTS: Record<string, number> = {
   FOREST: 2, 
   MOUNTAIN: 3, // Cost 3 means walkable but expensive
   WATER: 99, 
-  BASE: 1,
-  BANK: 1,
+  BASE: 99,
+  BANK: 99,
   BUILDING: 1,
   BARRIER: 99,
   SAND: 1,

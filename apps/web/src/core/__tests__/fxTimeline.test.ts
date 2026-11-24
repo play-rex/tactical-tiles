@@ -25,6 +25,8 @@ import {
 
 const createHarness = (terrainMap: Record<string, TerrainType> = {}) => {
   const timeline = new FxTimeline();
+  // These tests pin combat-time choreography; the kill-cam camera has its own suite.
+  timeline.setKillCamEnabled(false);
   const sounds: { at: number; sound: SoundName }[] = [];
   let killConfirmCount = 0;
   const projectiles: { at: number; req: ProjectileSpawnRequest }[] = [];
@@ -570,6 +572,7 @@ test('FxTimeline drives parachute supply drops, promotion chevron bursts, and 3-
 
 test('FxTimeline routes unit-specific realistic Foley (pistol, tank blast missile, tank treads, Base rotating MG burst)', () => {
   const timeline = new FxTimeline();
+  timeline.setKillCamEnabled(false);
   const weaponFires: string[] = [];
   const weaponImpacts: string[] = [];
   const unitMoves: string[] = [];
@@ -647,6 +650,7 @@ test('FxTimeline routes unit-specific realistic Foley (pistol, tank blast missil
 
 test('FxTimeline sequences multi-target HQ sweeps one target after another with turret slewing, swivel SFX, and per-target impact sync', () => {
   const timeline = new FxTimeline();
+  timeline.setKillCamEnabled(false);
   const weaponFires: { at: number; weapon: string; burstRounds?: number }[] = [];
   const weaponImpacts: { at: number; weapon: string; burstRounds?: number }[] = [];
   const turretSwivels: number[] = [];
@@ -790,6 +794,7 @@ test('FxTimeline sequences multi-target HQ sweeps one target after another with 
 
 test('FxTimeline sequences Bank Turret laser before multi-target HQ artillery without overlapping', () => {
   const timeline = new FxTimeline();
+  timeline.setKillCamEnabled(false);
   const weaponFires: { at: number; weapon: string; burstRounds?: number }[] = [];
   const weaponImpacts: { at: number; weapon: string }[] = [];
   const turretSwivels: number[] = [];

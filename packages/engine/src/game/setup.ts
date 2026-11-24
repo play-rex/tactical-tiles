@@ -370,47 +370,64 @@ export const generateDynamicMap = (
     };
 
     // Tactical flanking geometry:
-    // - 20x20: 5 spread mountain ranges (1–2 larger 7–9 tile flanking barriers + 3 medium/small ridges) + 1–2 tile outcrops
-    // - 25x25: 8 spread mountain ranges (2–3 larger 8–12 tile flanking massifs + 5 medium/small ridges) + 1–2 tile outcrops
+    // - 20x20: 1–2 larger flanking ranges (7–9t, 6–7t) + rich 2–3t & 4–5t center/flank ridges + 1–2t outcrops
+    // - 25x25: 2–3 sweeping massifs (8–12t) + 5 medium/small ridges + 1–2t outcrops
     // Every cluster enforces 8-way non-merging so crisp 1–3 tile flanking passes always stay open between ranges!
-    const plannedRangeSizes: number[] =
+    const plannedRangeDefs: Array<{ size: number; centerBias: boolean }> =
         numPlayers === 2
             ? [
-                7 + Math.floor(rng() * 3),                       // 1st hero flanking range (7–9 tiles)
-                rng() < 0.6 ? 7 + Math.floor(rng() * 2) : 5,     // 2nd large/medium range (7–8 or 5 tiles)
-                4 + Math.floor(rng() * 2),                       // medium ridge (4–5 tiles)
-                3 + Math.floor(rng() * 2),                       // compact ridge (3–4 tiles)
-                3,                                               // tactical spur (3 tiles)
+                { size: 7 + Math.floor(rng() * 3), centerBias: false },                  // hero flanking barrier (7–9t)
+                { size: rng() < 0.65 ? 6 + Math.floor(rng() * 2) : 5, centerBias: false }, // secondary range (6–7 or 5t)
+                { size: 4 + Math.floor(rng() * 2), centerBias: true },                   // mid-flank ridge (4–5t)
+                { size: 3, centerBias: true },                                           // center-flank 3t ridge
+                { size: 3, centerBias: true },                                           // center-flank 3t ridge
+                { size: 2 + Math.floor(rng() * 2), centerBias: true },                   // center-flank 2–3t ridge
+                { size: 2 + Math.floor(rng() * 2), centerBias: false },                  // outer-flank 2–3t ridge
+                { size: 2 + Math.floor(rng() * 2), centerBias: false },                  // outer-flank 2–3t spur
               ]
             : numPlayers <= 4
                 ? [
-                    9 + Math.floor(rng() * 4),                   // sweeping hero massif (9–12 tiles)
-                    8 + Math.floor(rng() * 3),                   // large flanking range (8–10 tiles)
-                    7 + Math.floor(rng() * 3),                   // large-medium range (7–9 tiles)
-                    5 + Math.floor(rng() * 2),                   // medium ridge (5–6 tiles)
-                    4 + Math.floor(rng() * 2),                   // medium ridge (4–5 tiles)
-                    4,                                           // tactical ridge (4 tiles)
-                    3 + Math.floor(rng() * 2),                   // compact ridge (3–4 tiles)
-                    3,                                           // flanking spur (3 tiles)
+                    { size: 9 + Math.floor(rng() * 4), centerBias: false },              // sweeping hero massif (9–12t)
+                    { size: 8 + Math.floor(rng() * 3), centerBias: false },              // large flanking range (8–10t)
+                    { size: 7 + Math.floor(rng() * 3), centerBias: false },              // large-medium range (7–9t)
+                    { size: 5 + Math.floor(rng() * 2), centerBias: true },               // inner-flank ridge (5–6t)
+                    { size: 4 + Math.floor(rng() * 2), centerBias: true },               // inner-flank ridge (4–5t)
+                    { size: 4, centerBias: false },                                      // tactical ridge (4t)
+                    { size: 3 + Math.floor(rng() * 2), centerBias: true },               // center-flank 3–4t ridge
+                    { size: 3, centerBias: false },                                      // flanking spur (3t)
                   ]
-                : [12, 10, 9, 8, 6, 5, 5, 4, 4, 3];
+                : [12, 10, 9, 8, 6, 5, 5, 4, 4, 3].map((sz, idx) => ({ size: sz, centerBias: idx >= 4 && idx <= 7 }));
 
     const rangeAnchors: { x: number; y: number }[] = [];
     let nextMtnClusterId = 0;
 
-    for (const targetSize of plannedRangeSizes) {
+    for (const { size: targetSize, centerBias } of plannedRangeDefs) {
         const cid = nextMtnClusterId++;
         let sx = -1;
         let sy = -1;
-        for (let attempt = 0; attempt < 55; attempt++) {
+        let bestSeedScore = -Infinity;
+        const innerMinD = 2;
+        const innerMaxD = Math.floor(size * 0.36);
+        const minSpread = targetSize <= 3 ? Math.max(3, Math.floor(size * 0.16)) : Math.floor(size * 0.21);
+
+        for (let attempt = 0; attempt < 65; attempt++) {
             const cx = 1 + Math.floor(rng() * (size - 2));
             const cy = 1 + Math.floor(rng() * (size - 2));
             if (!canPlaceMountain(cx, cy, cid)) continue;
-            const spread = attempt < 28 ? Math.floor(size * 0.22) : Math.floor(size * 0.13);
-            if (rangeAnchors.every(a => Math.abs(a.x - cx) + Math.abs(a.y - cy) >= spread)) {
+            const dCenter = Math.abs(cx - centerX) + Math.abs(cy - centerY);
+            const spreadReq = attempt < 36 ? minSpread : Math.max(2, minSpread - 1);
+            if (!rangeAnchors.every(a => Math.abs(a.x - cx) + Math.abs(a.y - cy) >= spreadReq)) continue;
+
+            let score = rng() * 2.5;
+            if (centerBias) {
+                score += dCenter >= innerMinD && dCenter <= innerMaxD ? 12 : -Math.abs(dCenter - innerMaxD);
+            } else {
+                score += dCenter >= 4 && dCenter <= Math.floor(size * 0.55) ? 6 : 0;
+            }
+            if (score > bestSeedScore) {
+                bestSeedScore = score;
                 sx = cx;
                 sy = cy;
-                break;
             }
         }
         if (sx === -1) continue;
@@ -449,13 +466,16 @@ export const generateDynamicMap = (
     }
 
     // Add compact 2-tile rocky pillars + isolated 1-tile sniper crags for crisp LOS pockets & tactical flanking cover
-    const twoTileOutcropTarget = numPlayers === 2 ? 3 : numPlayers <= 4 ? 5 : 6;
+    const twoTileOutcropTarget = numPlayers === 2 ? 4 : numPlayers <= 4 ? 5 : 6;
     let twoTilePlaced = 0;
-    for (let attempt = 0; attempt < 75 && twoTilePlaced < twoTileOutcropTarget; attempt++) {
+    for (let attempt = 0; attempt < 95 && twoTilePlaced < twoTileOutcropTarget; attempt++) {
         const cid = nextMtnClusterId++;
         const cx = 1 + Math.floor(rng() * (size - 2));
         const cy = 1 + Math.floor(rng() * (size - 2));
         if (!canPlaceMountain(cx, cy, cid)) continue;
+        // Bias first 2 compact 2-tile pillars near mid-map flanking corridors
+        const dCenter = Math.abs(cx - centerX) + Math.abs(cy - centerY);
+        if (twoTilePlaced < 2 && attempt < 45 && dCenter > Math.floor(size * 0.42)) continue;
         const dirs = shuffle([...DIRS_8]);
         let pairTile: Tile | null = null;
         for (const [dx, dy] of dirs) {
@@ -478,9 +498,9 @@ export const generateDynamicMap = (
         twoTilePlaced++;
     }
 
-    const loneCragTarget = numPlayers === 2 ? 4 : numPlayers <= 4 ? 6 : 8;
+    const loneCragTarget = numPlayers === 2 ? 5 : numPlayers <= 4 ? 6 : 8;
     let loneCragsPlaced = 0;
-    for (let attempt = 0; attempt < 85 && loneCragsPlaced < loneCragTarget; attempt++) {
+    for (let attempt = 0; attempt < 95 && loneCragsPlaced < loneCragTarget; attempt++) {
         const cid = nextMtnClusterId++;
         const cx = 1 + Math.floor(rng() * (size - 2));
         const cy = 1 + Math.floor(rng() * (size - 2));
@@ -517,25 +537,35 @@ export const generateDynamicMap = (
         }
     }
 
-    // 9. Scaled Cohesive Forest Groves + Richly Scattered Individual Trees:
-    // - 20x20: strictly 2 groves (1 larger 6–8 tile ambush forest + 1 classic 5–6 tile grove) + 38–44 solo trees
-    // - 25x25: 3 larger groves (7–10 tiles each) + 64–74 solo trees
-    // - 30x30: 4 groves (7–10 tiles each) + 86–96 solo trees
+    // 9. Scaled Cohesive Forest Groves + Tactical 3–5 Tile Flanking Copses + Rich Solo Trees:
+    // - 20x20: 1 larger hero forest (6–8t) + 1 classic grove (5–6t) + 3 clever flanking forest clusters (3–5t each, center & flank biased) + 42–48 solo trees
+    // - 25x25: 3 larger groves (7–10t) + 1 center-flanking 3–4t copse + 64–73 solo trees
+    // - 30x30: 4 groves (7–10t) + 1 center-flanking 4–5t copse + 86–96 solo trees
     const forestClusterOwner = new Int16Array(size * size).fill(-1);
-    const plannedGroveSizes: number[] =
+    const plannedGroveDefs: Array<{ size: number; centerBias: boolean }> =
         numPlayers === 2
             ? [
-                6 + Math.floor(rng() * 3), // 1 larger hero forest (6–8 tiles)
-                5 + Math.floor(rng() * 2), // 1 classic forest grove (5–6 tiles)
+                { size: 6 + Math.floor(rng() * 3), centerBias: false }, // 1 larger hero forest (6–8 tiles)
+                { size: 5 + Math.floor(rng() * 2), centerBias: false }, // 1 classic forest grove (5–6 tiles)
+                { size: 4 + Math.floor(rng() * 2), centerBias: true },  // central flanking wood (4–5 tiles)
+                { size: 3 + Math.floor(rng() * 2), centerBias: true },  // central/bridge approach copse (3–4 tiles)
+                { size: 3 + Math.floor(rng() * 2), centerBias: false }, // outer lane flank copse (3–4 tiles)
               ]
             : numPlayers <= 4
                 ? [
-                    8 + Math.floor(rng() * 3), // 8–10 tiles
-                    7 + Math.floor(rng() * 3), // 7–9 tiles
-                    6 + Math.floor(rng() * 2), // 6–7 tiles
+                    { size: 8 + Math.floor(rng() * 3), centerBias: false }, // 8–10 tiles
+                    { size: 7 + Math.floor(rng() * 3), centerBias: false }, // 7–9 tiles
+                    { size: 6 + Math.floor(rng() * 2), centerBias: false }, // 6–7 tiles
+                    { size: 3 + Math.floor(rng() * 2), centerBias: true },  // inner flanking copse (3–4 tiles)
                   ]
-                : [9, 8, 8, 7];
-    const GROVE_ID_LIMIT = plannedGroveSizes.length;
+                : [
+                    { size: 9, centerBias: false },
+                    { size: 8, centerBias: false },
+                    { size: 8, centerBias: false },
+                    { size: 7, centerBias: false },
+                    { size: 4, centerBias: true },
+                  ];
+    const GROVE_ID_LIMIT = plannedGroveDefs.length;
 
     const hasForeignForestNeighbor8 = (x: number, y: number, myId: number): boolean => {
         for (const [dx, dy] of DIRS_8) {
@@ -578,19 +608,29 @@ export const generateDynamicMap = (
     const groveAnchors: { x: number; y: number }[] = [];
     let nextForestId = 0;
 
-    for (const targetGroveSize of plannedGroveSizes) {
+    for (const { size: targetGroveSize, centerBias } of plannedGroveDefs) {
         const gid = nextForestId++;
         let sx = -1;
         let sy = -1;
-        for (let attempt = 0; attempt < 60; attempt++) {
+        let bestScore = -Infinity;
+        const minSpread = targetGroveSize <= 4 ? Math.max(4, Math.floor(size * 0.20)) : Math.floor(size * 0.27);
+        const innerMaxD = Math.floor(size * 0.36);
+
+        for (let attempt = 0; attempt < 65; attempt++) {
             const cx = 2 + Math.floor(rng() * (size - 4));
             const cy = 2 + Math.floor(rng() * (size - 4));
             if (!canPlaceGroveTile(cx, cy, gid)) continue;
-            const spread = attempt < 35 ? Math.floor(size * 0.30) : Math.floor(size * 0.20);
-            if (groveAnchors.every(a => Math.abs(a.x - cx) + Math.abs(a.y - cy) >= spread)) {
+            const spread = attempt < 38 ? minSpread : Math.max(3, minSpread - 2);
+            if (!groveAnchors.every(a => Math.abs(a.x - cx) + Math.abs(a.y - cy) >= spread)) continue;
+            const dCenter = Math.abs(cx - centerX) + Math.abs(cy - centerY);
+            let score = rng() * 2.5;
+            if (centerBias) {
+                score += dCenter >= 2 && dCenter <= innerMaxD ? 12 : -Math.abs(dCenter - innerMaxD);
+            }
+            if (score > bestScore) {
+                bestScore = score;
                 sx = cx;
                 sy = cy;
-                break;
             }
         }
         if (sx === -1) continue;
@@ -621,7 +661,7 @@ export const generateDynamicMap = (
     // Generously scatter individual standalone colorful trees across open meadows, foothills & riverbanks!
     const loneTreeTarget =
         numPlayers === 2
-            ? 38 + Math.floor(rng() * 7) // 38–44 individual trees on 20x20!
+            ? 42 + Math.floor(rng() * 7) // 42–48 individual trees on 20x20!
             : numPlayers <= 4
                 ? 64 + Math.floor(rng() * 10) // 64–73 on 25x25
                 : 86 + Math.floor(rng() * 10);
@@ -809,7 +849,8 @@ export const generateDynamicMap = (
                     }
                     for (const [dx, dy] of DIRS_4) {
                         const nt = getTile(cur.x + dx, cur.y + dy);
-                        if (!nt || visited.has(nt.id) || isGroundBlocked(nt)) continue;
+                        if (!nt || visited.has(nt.id)) continue;
+                        if (nt.id !== targetBase.id && isGroundBlocked(nt)) continue;
                         visited.add(nt.id);
                         queue.push(nt);
                     }
@@ -824,7 +865,7 @@ export const generateDynamicMap = (
                         else if (cy !== targetBase.y) cy += cy < targetBase.y ? 1 : -1;
                         const movedH = cx !== prevX;
                         const stepTile = getTile(cx, cy);
-                        if (stepTile && isGroundBlocked(stepTile)) {
+                        if (stepTile && stepTile.id !== targetBase.id && stepTile.type !== 'BASE' && isGroundBlocked(stepTile)) {
                             stepTile.type =
                                 stepTile.type === 'WATER' || stepTile.type === 'CANYON'
                                     ? (movedH ? 'BRIDGE' : 'BRIDGE_V')
@@ -850,11 +891,24 @@ export const spawnUnitsForPlayers = (
     mutators?: GameMutators
 ): Unit[] => {
     const units: Unit[] = [];
+    const occupied = new Set<string>();
     let idCounter = 0;
 
     baseLocations.forEach(base => {
         const candidates = mapTiles
-            .filter(t => t.type !== 'WATER' && t.type !== 'MOUNTAIN' && t.type !== 'BUILDING' && t.type !== 'BASE' && t.type !== 'CANYON' && t.type !== 'BARRIER' && t.type !== 'QUICKSAND')
+            .filter(
+                t =>
+                    !occupied.has(t.id) &&
+                    t.type !== 'WATER' &&
+                    t.type !== 'MOUNTAIN' &&
+                    t.type !== 'BUILDING' &&
+                    t.type !== 'BASE' &&
+                    t.type !== 'BANK' &&
+                    t.type !== 'CANYON' &&
+                    t.type !== 'BARRIER' &&
+                    t.type !== 'QUICKSAND' &&
+                    t.hazardState !== 'LAVA'
+            )
             .sort((a, b) => getManhattanDistance(a, base) - getManhattanDistance(b, base));
         
         let idx = 0;
@@ -865,10 +919,12 @@ export const spawnUnitsForPlayers = (
         ];
         spawnList.forEach(type => {
             if (idx < candidates.length) {
+                const tileId = candidates[idx].id;
+                occupied.add(tileId);
                 units.push(createUnit({
                     id: `unit_${idCounter++}`,
                     type: type as UnitType,
-                    tileId: candidates[idx].id,
+                    tileId,
                     owner: base.owner,
                     mutators,
                 }));

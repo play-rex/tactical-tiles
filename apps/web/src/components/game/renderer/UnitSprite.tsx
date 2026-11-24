@@ -32,6 +32,7 @@ interface UnitSpriteProps {
     isReadyTurn?: boolean;
     unit: any;
     mapRotation?: BoardRotation;
+    initialFacingRad?: number;
     onSelectTile?: (tx: number, ty: number) => void;
     onPointerDown?: () => void;
 }
@@ -45,6 +46,7 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     isReadyTurn = false,
     unit,
     mapRotation = 0 as BoardRotation,
+    initialFacingRad,
 }) => {
     const containerRef = useRef<PIXI.Container>(null);
     const rotWrapperRef = useRef<PIXI.Container>(null);
@@ -55,7 +57,11 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     const hadImpulseRef = useRef(false);
     const reducedMotionRef = useRef<boolean>(getPrefersReducedMotion());
     const worldCenter = (gridSize * TILE_SIZE) / 2;
-    const facingRef = useRef<number>(Math.atan2(worldCenter - y, worldCenter - x));
+    const facingRef = useRef<number>(
+        typeof initialFacingRad === 'number' && Number.isFinite(initialFacingRad)
+            ? initialFacingRad
+            : Math.atan2(worldCenter - y, worldCenter - x),
+    );
 
     // Narrow selector: only re-renders this single unit when a projectile targeting it launches & lands
     const deferredHpBonus = useEffectStore(state => state.deferredHp[unit.id] ?? 0);

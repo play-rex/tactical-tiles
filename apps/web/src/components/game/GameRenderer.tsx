@@ -23,11 +23,14 @@ import { TileEffectsLayer } from './renderer/TileEffectsLayer';
 import { WaterShimmerLayer } from './renderer/WaterShimmerLayer';
 import { LivingMapLayer } from './renderer/LivingMapLayer';
 import { DropAndPromoLayer } from './renderer/DropAndPromoLayer';
+import { PerimeterApronLayer } from './renderer/PerimeterApronLayer';
+import { KillCamSchematicLayer } from './renderer/KillCamSchematicLayer';
+import { setLivePixiApp, getLivePixiApp } from '../../core/graphics/livePixiRef';
 import { WeatherSystemMemo as WeatherSystem } from './renderer/WeatherSystem.tsx'; // Explicit .tsx extension
 import { FxMode, subscribeRendererWake, useEffectStore, wakeBattleRenderer } from '../../store/useEffectStore';
 import { fxTimeline } from '../../core/graphics/fxTimeline';
 import type { ParticlePool } from '../../core/graphics/ParticlePool';
-import { canUnitAttackFromTile } from '@tactical/engine/rules/CombatRules';
+import { canUnitAttackFromTile, getUnitMaxHp } from '@tactical/engine/rules/CombatRules';
 import { getOverwatchCoverageTiles } from '@tactical/engine/rules/OverwatchRules';
 import { useLowPowerStageOptions } from './renderer/pixiStageUtils';
 import { type BoardRotation, rotateBoardPoint, unrotateBoardPoint } from '../../core/boardRotation';
@@ -869,6 +872,9 @@ const HoverOverlayLayer = React.memo<{
  * Renders units that were lethally hit in the authoritative state while the lethal shot
  * or compound Overwatch/Mine march is still in flight, so units never vanish before impact.
  */
+/** Re-export live PixiJS Application accessor for clip export. */
+export { getLivePixiApp };
+
 const PendingDeathsLayer = React.memo<{
     aliveUnitIds: Set<string>;
     gridSize: number;
@@ -880,7 +886,10 @@ const PendingDeathsLayer = React.memo<{
         <>
             {pendingDeaths.map(ghost => {
                 if (aliveUnitIds.has(ghost.unitId)) return null;
-                const baseHp = UNIT_STATS[ghost.unitType].hp;
+                const baseStats = UNIT_STATS[ghost.unitType];
+                const fullMaxHp = getUnitMaxHp({ type: ghost.unitType, rank: ghost.rank } as any);
+                const maxAmmo = ghost.maxAmmo ?? baseStats.maxAmmo;
+                const ammo = ghost.ammo ?? maxAmmo;
                 return (
                     <UnitSprite
                         key={`pending_${ghost.unitId}`}
@@ -889,9 +898,9 @@ const PendingDeathsLayer = React.memo<{
                             type: ghost.unitType,
                             owner: ghost.owner,
                             hp: ghost.displayHp,
-                            maxHp: baseHp,
-                            ammo: 1,
-                            maxAmmo: 1,
+                            maxHp: fullMaxHp,
+                            ammo,
+                            maxAmmo,
                             rank: ghost.rank,
                             hasMoved: true,
                             completed: false,
@@ -904,6 +913,7 @@ const PendingDeathsLayer = React.memo<{
                         tileX={ghost.endTileX}
                         tileY={ghost.endTileY}
                         mapRotation={mapRotation}
+                        initialFacingRad={ghost.facingRad}
                         isSelected={false}
                         isReadyTurn={false}
                     />
@@ -1066,8 +1076,9 @@ const BattleRenderController: React.FC<{
         };
     }, [app, particlePoolRef, wake, scheduleSingleFrame]);
 
-    // Stop PixiJS global Ticker.shared so no stray background RAF loop runs
+    // Stop PixiJS global Ticker.shared so no stray background RAF loop runs & register app for clip export
     useEffect(() => {
+        setLivePixiApp(app);
         try {
             PIXI.Ticker.shared.autoStart = false;
             PIXI.Ticker.shared.stop();
@@ -1075,12 +1086,13 @@ const BattleRenderController: React.FC<{
             // Safe guard
         }
         return () => {
+            if (getLivePixiApp() === app) setLivePixiApp(null);
             if (singleRafRef.current !== null) {
                 cancelAnimationFrame(singleRafRef.current);
                 singleRafRef.current = null;
             }
         };
-    }, []);
+    }, [app]);
 
     // Central clamped timeline & particle stepping + adaptive FPS / ECO auto-sleep
     useTick(() => {
@@ -1226,9 +1238,9 @@ export const GameRenderer = () => {
     const validSiegeTile = useGameStore(state => state.validSiegeTile);
     const validDemolishTile = useGameStore(state => state.validDemolishTile);
 
-    // Visual Effects & Render Mode
+    // Visual Effects & Render Mode (dark tactical table slate prevents light-grey edge void!)
     const fxMode = useEffectStore(state => state.fxMode);
-    const stageOptions = useLowPowerStageOptions(0xCFD7E4, fxMode === 'ECO' ? 1.25 : 1.5);
+    const stageOptions = useLowPowerStageOptions(0x0B1220, fxMode === 'ECO' ? 1.25 : 1.5);
 
     const terrainSig = useMemo(() => computeTerrainSignature(mapData, gridSize, mapRotation), [mapData, gridSize, mapRotation]);
     const bakedBoard = useMemo(() => bakeTacticalReconBoard(mapData, gridSize, mapRotation), [terrainSig]);
@@ -1295,6 +1307,11 @@ export const GameRenderer = () => {
                 e.preventDefault();
                 rotateMap(e.shiftKey ? -90 : 90);
             } else if (e.key === 'Escape') {
+                if (fxTimeline.isKillCamActive()) {
+                    e.preventDefault();
+                    fxTimeline.skipKillCam();
+                    return;
+                }
                 const st = useGameStore.getState();
                 if (
                     st.placementMode?.active ||
@@ -1492,7 +1509,22 @@ export const GameRenderer = () => {
                     worldWidth={totalBoardSize}
                     worldHeight={totalBoardSize}
                     setViewport={setViewport}
+                    schematicOverlay={
+                        <Container
+                            name="killcam_schematic_root"
+                            x={totalBoardSize / 2}
+                            y={totalBoardSize / 2}
+                            pivot={{ x: totalBoardSize / 2, y: totalBoardSize / 2 }}
+                            angle={mapRotation}
+                            eventMode="none"
+                        >
+                            <KillCamSchematicLayer />
+                        </Container>
+                    }
                 >
+                    {/* 0. DARK ANODIZED COMMAND-TABLE PERIMETER APRON (zero grey void on corner zoom/shake/tilt) */}
+                    <PerimeterApronLayer gridSize={gridSize} mapRotation={mapRotation} />
+
                     {/* 0a. BAKED TACTICAL RECON HD TERRAIN (pre-rotated in upright screen space so assets never flip) */}
                     <SafeSprite
                         texture={bakedBoard.terrainTexture}

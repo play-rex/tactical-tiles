@@ -17,6 +17,14 @@ const DeathGhostSprite: React.FC<{ data: DeathGhost }> = React.memo(({ data }) =
   const elapsedRef = useRef(0);
   const reducedMotionRef = useRef<boolean>(getPrefersReducedMotion());
 
+  const cx = data.x + TILE_SIZE / 2;
+  const cy = data.y + TILE_SIZE / 2;
+  const hasAngle = typeof data.incomingAngle === 'number' && Number.isFinite(data.incomingAngle);
+  const knockDirX = hasAngle ? Math.cos(data.incomingAngle!) : 0;
+  const knockDirY = hasAngle ? Math.sin(data.incomingAngle!) : -1;
+  const spinSign = knockDirX >= 0 ? 1 : -1;
+  const knockDistPx = data.cause === 'MINE' ? 22 : hasAngle ? 19 : 12;
+
   useEffect(() => {
     reducedMotionRef.current = getPrefersReducedMotion();
     return subscribeReducedMotion((reduced) => {
@@ -27,7 +35,7 @@ const DeathGhostSprite: React.FC<{ data: DeathGhost }> = React.memo(({ data }) =
   const drawFlash = useCallback((g: PIXI.Graphics) => {
     g.clear();
     g.beginFill(0xFFE4E6, 1);
-    g.drawCircle(0, 0, TILE_SIZE * 0.42);
+    g.drawCircle(0, 0, TILE_SIZE * 0.44);
     g.endFill();
   }, []);
 
@@ -46,38 +54,41 @@ const DeathGhostSprite: React.FC<{ data: DeathGhost }> = React.memo(({ data }) =
       const flashT = elapsed / 95;
       if (flashT < 1) {
         flashRef.current.visible = true;
-        flashRef.current.alpha = (1 - flashT) * 0.85;
+        flashRef.current.alpha = (1 - flashT) * 0.9;
       } else {
         flashRef.current.visible = false;
       }
     }
 
     if (reducedMotionRef.current) {
+      root.position.set(cx, cy);
       root.scale.set(1, 1);
       root.rotation = 0;
       root.alpha = Math.max(0, 1 - t * t);
       return;
     }
 
-    // Brief 90ms impact pop, then smooth shrink + tumble + fade
-    if (t < 0.16) {
-      const p = t / 0.16;
-      const sc = 1 + 0.14 * p;
-      root.scale.set(sc, sc);
-      root.rotation = 0.08 * p;
+    // Physical knockback trajectory along incoming bullet vector + impact squash-stretch tumble
+    if (t < 0.15) {
+      const p = t / 0.15;
+      const push = knockDistPx * 0.25 * p;
+      root.position.set(cx + knockDirX * push, cy + knockDirY * push);
+      root.scale.set(1 + 0.18 * p, 1 - 0.12 * p);
+      root.rotation = spinSign * 0.12 * p;
       root.alpha = 1;
     } else {
-      const p = (t - 0.16) / 0.84;
+      const p = (t - 0.15) / 0.85;
+      const easeOut = 1 - Math.pow(1 - p, 2.3);
       const easeIn = p * p;
-      const sc = Math.max(0.28, 1.14 - 0.86 * easeIn);
-      root.scale.set(sc, sc);
-      root.rotation = 0.08 + 0.48 * p;
-      root.alpha = Math.max(0, 1 - Math.pow(p, 1.35));
+      const push = knockDistPx * (0.25 + 0.75 * easeOut);
+      root.position.set(cx + knockDirX * push, cy + knockDirY * push);
+      const sc = Math.max(0.24, 1.12 - 0.88 * easeIn);
+      root.scale.set(sc, sc * (1 - 0.08 * p));
+      root.rotation = spinSign * (0.12 + 0.82 * easeOut);
+      root.alpha = Math.max(0, 1 - Math.pow(p, 1.4));
     }
   });
 
-  const cx = data.x + TILE_SIZE / 2;
-  const cy = data.y + TILE_SIZE / 2;
   const texture = getTexture(`UNIT_P${data.owner}_${data.unitType}`);
 
   return (
@@ -96,7 +107,7 @@ const DeathGhostSprite: React.FC<{ data: DeathGhost }> = React.memo(({ data }) =
   );
 });
 
-/** Isolated layer rendering 550ms dying unit sprites without re-rendering surviving units. */
+/** Isolated layer rendering 550ms dying unit sprites with directional knockback tumble. */
 export const DeathGhostLayer: React.FC = React.memo(() => {
   const deathGhosts = useEffectStore(state => state.deathGhosts);
   if (deathGhosts.length === 0) return null;

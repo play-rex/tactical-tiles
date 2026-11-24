@@ -213,31 +213,47 @@ test('generateDynamicMap scales larger flanking mountain ranges & forest groves 
       }
     }
 
-    // Mountain ranges: 20x20 has 1-2 larger flanking ranges (<=9) + smaller ridges & 1-2 tile outcrops;
-    // 25x25 scales up to larger sweeping ranges (<=12) + outcrops!
+    // Mountain ranges:
+    // - 20x20 has 1-2 larger flanking ranges (6-9) + rich 2-3 tile center/flank ridges + 1-2 tile outcrops
+    // - 25x25 scales up to larger sweeping ranges (8-12) + ridges + outcrops
     const mtnClusters = findMountainClusters(grid, grid, size).map(c => c.nodes.length);
     const largestMtn = mtnClusters.reduce((m, n) => Math.max(m, n), 0);
     const multiRanges = mtnClusters.filter(n => n >= 2).length;
-    const smallOutcrops = mtnClusters.filter(n => n <= 2).length;
+    const midSmallRidges = mtnClusters.filter(n => n >= 2 && n <= 3).length;
     const maxCap = players === 2 ? 9 : 12;
     if (players === 2) maxMtn20 = Math.max(maxMtn20, largestMtn);
     else maxMtn25 = Math.max(maxMtn25, largestMtn);
 
     assert.ok(largestMtn >= 5 && largestMtn <= maxCap, `seed ${s} (${size}x${size}) hero mountain range fits 5..${maxCap} tiles (got ${largestMtn})`);
-    assert.ok(multiRanges >= (players === 2 ? 5 : 8), `seed ${s} has rich spread flanking mountain ranges (got ${multiRanges})`);
-    assert.ok(smallOutcrops >= 3, `seed ${s} includes 1–2 tile mountain outcrops for flanking cover (got ${smallOutcrops})`);
+    assert.ok(multiRanges >= (players === 2 ? 7 : 8), `seed ${s} has rich spread flanking mountain ranges (got ${multiRanges})`);
+    assert.ok(midSmallRidges >= 4, `seed ${s} includes >=4 compact 2-3 tile flanking mountain ridges (got ${midSmallRidges})`);
 
-    // Forest groves: 20x20 has 1–2 cohesive groves (4–8 tiles); 25x25 scales to 2–3 larger groves (5–10 tiles), plus richly scattered solo trees!
+    // Check center-ring tactical population (2 <= dCenter <= 7 on 20x20) so center corridors never feel barren
+    if (players === 2) {
+      const centerTacticalCount = map.filter(
+        t => (t.type === 'MOUNTAIN' || t.type === 'FOREST') &&
+             Math.abs(t.x - Math.floor(size / 2)) + Math.abs(t.y - Math.floor(size / 2)) <= 7,
+      ).length;
+      assert.ok(centerTacticalCount >= 14, `seed ${s} populates center-flank ring richly for flanking (got ${centerTacticalCount} tiles)`);
+    }
+
+    // Forest groves:
+    // - 20x20 has up to 5 groves (hero 6-8 + medium 5-6 + 3 flanking 3-5 tile clusters) + generous solo trees
+    // - 25x25 has up to 4 groves (7-10 tiles + flanking 3-4 copse) + solo trees
     const forestClusters = countForestClusters4(grid, size);
     const multiTileForests = forestClusters.filter(n => n >= 2);
+    const midFlankGroves = forestClusters.filter(n => n >= 3 && n <= 5);
     const loneTrees = forestClusters.filter(n => n === 1);
-    const maxGroves = players === 2 ? 2 : 3;
+    const maxGroves = players === 2 ? 5 : 4;
     const maxGroveCap = players === 2 ? 8 : 10;
-    assert.ok(multiTileForests.length >= 1 && multiTileForests.length <= maxGroves, `seed ${s} has 1..${maxGroves} cohesive forest groves (got ${multiTileForests.length}: [${multiTileForests.join(',')}])`);
-    for (const gSize of multiTileForests) {
-      assert.ok(gSize >= 4 && gSize <= maxGroveCap, `seed ${s} forest grove covers 4..${maxGroveCap} tiles (got ${gSize})`);
+    assert.ok(multiTileForests.length >= 2 && multiTileForests.length <= maxGroves, `seed ${s} has 2..${maxGroves} cohesive forest clusters (got ${multiTileForests.length}: [${multiTileForests.join(',')}])`);
+    if (players === 2) {
+      assert.ok(midFlankGroves.length >= 2, `seed ${s} (20x20) includes >=2 flanking 3-5 tile forest clusters (got ${midFlankGroves.length}: [${forestClusters.filter(n => n >= 2).join(',')}])`);
     }
-    assert.ok(loneTrees.length >= (players === 2 ? 30 : 50), `seed ${s} scatters rich standalone individual trees (got ${loneTrees.length})`);
+    for (const gSize of multiTileForests) {
+      assert.ok(gSize >= 3 && gSize <= maxGroveCap, `seed ${s} forest cluster covers 3..${maxGroveCap} tiles (got ${gSize})`);
+    }
+    assert.ok(loneTrees.length >= (players === 2 ? 32 : 50), `seed ${s} scatters rich standalone individual trees (got ${loneTrees.length})`);
   }
 
   assert.ok(maxMtn20 >= 7 && maxMtn20 <= 9, `20x20 maps include 7–9 tile hero flanking ranges (max ${maxMtn20})`);

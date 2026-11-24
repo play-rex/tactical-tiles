@@ -247,6 +247,7 @@ export const getStepCost = (
     unitRank: UnitRank = 0
 ): number | null => {
     if (tile.hazardState === 'LAVA') return null;
+    if (tile.type === 'BASE' || tile.type === 'BANK' || tile.type === 'BARRIER') return null;
     if (tile.type === 'MOUNTAIN' && unitType !== 'SNIPER') return null;
     if (tile.type === 'BUILDING') {
         if (tile.owner !== currentPlayer) return null;

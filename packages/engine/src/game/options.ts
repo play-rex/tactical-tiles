@@ -138,6 +138,8 @@ export const canTileHoldSpawn = (t: Tile): boolean =>
   t.type !== 'CANYON' &&
   t.type !== 'MOUNTAIN' &&
   t.type !== 'BUILDING' &&
+  t.type !== 'BASE' &&
+  t.type !== 'BANK' &&
   t.hazardState !== 'LAVA';
 
 export const isValidSpawnTile = (
@@ -161,7 +163,7 @@ export const isValidSpawnTile = (
   return false;
 };
 
-/** Where `player` may bring a fallen unit back: their bases and the tiles around them. */
+/** Where `player` may bring a fallen unit back: walkable tiles around their bases. */
 export const getSpawnTiles = (state: Pick<GameState, 'mapData' | 'units' | 'gridSize'>, player: number): string[] => {
   const occupied = new Set(state.units.map(u => u.tileId));
   const seen = new Set<string>();

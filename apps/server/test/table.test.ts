@@ -419,3 +419,43 @@ test('lobby live drafts, guest suggestions toggle, per-player edit grant, and lo
   await a.room.leave();
   await b.room.leave();
 });
+
+test('reconnect delivers fog-honest missedActions for opponent moves while keeping events empty and sync clean', async () => {
+  const aliceId = pid();
+  const bobId = pid();
+  const a = await host('Alice', aliceId);
+  const code = (await a.view(() => true)).code;
+  const b = await join(code, 'Bob', bobId);
+  await a.view(v => v.seats.length === 2);
+
+  a.room.send(ClientMsg.start);
+  const startA = await a.view(v => v.status === 'playing', 'Alice started');
+  await b.view(v => v.status === 'playing', 'Bob started');
+
+  // Bob drops unexpectedly (not a consented leave), so his seat is held.
+  (b.room.connection as unknown as { close: (code?: number) => void }).close(4999);
+  await a.view(v => v.seats[1].connected === false, 'Alice sees Bob disconnected');
+
+  // While Bob is away, Alice moves a unit.
+  const mover = startA.game!.game.units.find(u => u.owner === 0 && moveCostsFor(startA.game!.game, u).size > 0)!;
+  const [targetTileId] = moveCostsFor(startA.game!.game, mover).keys();
+  a.room.send(ClientMsg.action, { type: 'MOVE', unitId: mover.id, targetTileId, cost: 1 });
+  const movedA = await a.view(v => v.seq > startA.seq, 'Alice moved while Bob away');
+
+  // Bob reconnects with the same playerId: events must stay empty, while missedActions carries Alice's move!
+  const bBack = await join(code, 'Bob', bobId);
+  const resumed = await bBack.view(v => v.status === 'playing' && v.seq === movedA.seq, 'Bob resumed');
+  assert.deepEqual(resumed.events, [], 'reconnect never replays stale events in view.events');
+  assert.ok(resumed.missedActions && resumed.missedActions.length >= 1, 'reconnect delivers missedActions recap');
+  assert.equal(resumed.missedActions![0].actorSeat, 0);
+  assert.ok(resumed.missedActions![0].events.some(e => e.kind === 'movePath'));
+
+  // A subsequent plain sync must not replay missedActions again.
+  bBack.room.send(ClientMsg.sync);
+  const synced = await bBack.view(v => v.seq === movedA.seq && v.missedActions === undefined, 'sync has no missedActions');
+  assert.deepEqual(synced.events, []);
+  assert.equal(synced.missedActions, undefined);
+
+  await a.room.leave();
+  await bBack.room.leave();
+});

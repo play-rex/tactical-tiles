@@ -81,7 +81,13 @@ const bfsFromWithGap = (
             const nIdx = ny * gridSize + nx;
             if (dists[nIdx] !== -1) continue;
             const t = mapData[nIdx];
-            if (!t || t.hazardState === 'LAVA' || TERRAIN_COSTS[t.type] >= 90 || t.type === 'BUILDING') continue;
+            if (!t || t.hazardState === 'LAVA') continue;
+            // Structure targets (BASE, BANK, BUILDING) can be reached up to their tile without walking through them.
+            if (t.type === 'BASE' || t.type === 'BANK' || t.type === 'BUILDING') {
+                dists[nIdx] = dists[cur] + 1;
+                continue;
+            }
+            if (TERRAIN_COSTS[t.type] >= 90) continue;
             if (t.type === 'MOUNTAIN' && t.id !== gapId) continue;
             dists[nIdx] = dists[cur] + 1;
             q.push(nIdx);

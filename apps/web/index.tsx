@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './src/styles/opChamferGeo.css';
+import './src/styles/killCam.css';
 import { GameRenderer } from './src/components/game/GameRenderer';
 import { BankRewardModal, LeftPanel, RightPanel, WinnerOverlay } from './src/components/ui/HUD';
 import { GameSetup } from './src/screens/GameSetup';
 import { MapEditor } from './src/screens/MapEditor';
 import { HowToPlay } from './src/screens/HowToPlay';
 import { OnlineLobby } from './src/screens/OnlineLobby';
+import { DevMaps } from './src/screens/DevMaps';
 import { hasSavedTable, codeFromUrl, useOnline } from './src/net/useOnline';
 import { useGameStore } from './src/store/useGameStore';
 import { ViewportProvider } from './src/context/ViewportContext';
@@ -14,6 +16,9 @@ import { MapControls, PhoneDock } from './src/components/game/ui/MapControls';
 import { MapHoverCard } from './src/components/game/ui/MapHoverCard';
 import { TurnBanner } from './src/components/game/ui/TurnBanner';
 import { TacticalBanner } from './src/components/game/ui/TacticalBanner';
+import { KillCamOverlay } from './src/components/game/ui/KillCamOverlay';
+import { RecapBanner } from './src/components/game/ui/RecapBanner';
+import { DevOverlay } from './src/components/game/ui/DevOverlay';
 import { CameraFollow } from './src/components/game/ui/CameraFollow';
 import { useNarrow } from './src/hooks/useNarrow';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME, playerDisplayName } from './src/components/ui/GeoPrimitives';
@@ -56,7 +61,16 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
   const rotateMap = useGameStore(state => state.rotateMap);
   const fxMode = useEffectStore(state => state.fxMode);
   const toggleFxMode = useEffectStore(state => state.toggleFxMode);
+  const killCamMode = useEffectStore(state => state.killCamMode);
+  const cycleKillCamMode = useEffectStore(state => state.cycleKillCamMode);
   const [muted, setMuted] = useState(() => SoundFX.isMuted());
+
+  const killCamTitle =
+    killCamMode === 'FULL'
+      ? 'Kill Cam: FULL (≤4s cinematic cuts + attack micro-cam · Click for SHORT)'
+      : killCamMode === 'SHORT'
+        ? 'Kill Cam: SHORT (fast ~1–2s cuts + snappy attack lean · Click for OFF)'
+        : 'Kill Cam: OFF (classic tactical banners only · Click for FULL)';
 
   const toggleMute = () => {
     const next = !muted;
@@ -159,6 +173,14 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
               ↻ {mapRotation}°
             </GeoButton>
             <GeoButton
+              onClick={cycleKillCamMode}
+              variant={killCamMode === 'FULL' ? 'softBlue' : killCamMode === 'SHORT' ? 'softAmber' : 'default'}
+              title={killCamTitle}
+              coreStyle={{ padding: '4px 8px' }}
+            >
+              {killCamMode === 'OFF' ? 'CAM OFF' : killCamMode === 'SHORT' ? 'CAM 1×' : 'CAM'}
+            </GeoButton>
+            <GeoButton
               onClick={toggleFxMode}
               variant={fxMode === 'ECO' ? 'softMint' : 'softBlue'}
               title={fxMode === 'ECO' ? 'Switch to Live Ambient Map FX (water shimmer, radar sweeps, base smoke)' : 'Pause Ambient Map FX (0% idle GPU Eco mode)'}
@@ -222,6 +244,14 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
             ↻ {mapRotation}°
           </GeoButton>
           <GeoButton
+            onClick={cycleKillCamMode}
+            variant={killCamMode === 'FULL' ? 'softBlue' : killCamMode === 'SHORT' ? 'softAmber' : 'default'}
+            title={killCamTitle}
+            coreStyle={{ padding: '4px 10px' }}
+          >
+            CAM: {killCamMode}
+          </GeoButton>
+          <GeoButton
             onClick={toggleFxMode}
             variant={fxMode === 'ECO' ? 'softMint' : 'softBlue'}
             title={
@@ -266,6 +296,9 @@ const MapFrame: React.FC = () => (
             <MapHoverCard />
             <TurnBanner />
             <TacticalBanner />
+            <KillCamOverlay />
+            <RecapBanner />
+            <DevOverlay />
           </div>
         </div>
       </div>
@@ -316,6 +349,10 @@ const App = () => {
 
   if (currentScreen === 'ONLINE') {
     return <OnlineLobby />;
+  }
+
+  if (currentScreen === 'DEV') {
+    return <DevMaps />;
   }
 
   return (

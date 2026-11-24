@@ -23,6 +23,7 @@ import {
   type GameState,
   type MapDraftState,
   type MapSuggestion,
+  type MissedActionBatch,
   type SeatInfo,
   ServerMsg,
   type TableSettings,
@@ -159,6 +160,10 @@ export class TableRoom extends Room {
   /** Cached per-seat GameView instances for the current `seq`. */
   private cachedViewsSeq = -1;
   private cachedGameViews: TableView['game'][] = [];
+  /** Last `seq` delivered to each seat (used to build fog-honest missed-action recaps on reconnect). */
+  private seatLastSentSeq: number[] = [];
+  /** Bounded fog-honest ring buffer of recent opponent actions (capped at 12) for Turn Recap. */
+  private actionHistory: { seq: number; actorSeat: number; round: number; perSeat: (MissedActionBatch | null)[] }[] = [];
   /** True only when durable TableSnapshot fields changed and need persisting. */
   private snapshotDirty = false;
   /** Bot actions taken this turn (a runaway guard). */
@@ -385,6 +390,8 @@ export class TableRoom extends Room {
     this.status = snap.status;
     this.game = snap.game;
     this.seq = snap.seq;
+    this.seatLastSentSeq = [];
+    this.actionHistory = [];
     this.snapshotDirty = false;
     this.turnKey = '';
     this.turnDeadline = null;
@@ -424,7 +431,8 @@ export class TableRoom extends Room {
     const { playerId } = parsed.data;
 
     // Coming back to your own seat (from a new tab, or after the connection dropped): take it over.
-    const mine = this.seats.find(s => !s.isBot && s.playerId === playerId);
+    const mineIdx = this.seats.findIndex(s => !s.isBot && s.playerId === playerId);
+    const mine = mineIdx >= 0 ? this.seats[mineIdx] : undefined;
     if (mine) {
       const previous = mine.sessionId;
       mine.sessionId = client.sessionId;
@@ -440,7 +448,7 @@ export class TableRoom extends Room {
       if (previous && previous !== client.sessionId) {
         this.evictSession(previous, CloseCode.openedElsewhere, 'Opened somewhere else');
       }
-      this.afterChange();
+      this.afterChange(undefined, mineIdx);
       return;
     }
 
@@ -484,7 +492,7 @@ export class TableRoom extends Room {
         return;
       }
       seat.connected = true;
-      this.afterChange();
+      this.afterChange(undefined, seatIdx);
     } catch {
       this.vacate(client.sessionId);
     } finally {
@@ -521,6 +529,8 @@ export class TableRoom extends Room {
     this.game = createOnlineTableGame(this.settings, this.seats.length);
     this.status = 'playing';
     this.seq++;
+    this.seatLastSentSeq = [];
+    this.actionHistory = [];
     this.snapshotDirty = true;
     this.refreshSight();
     this.turnKey = '';
@@ -563,6 +573,33 @@ export class TableRoom extends Room {
       this.turnDeadline += this.incrementMs();
     }
     this.seq++;
+    // Record fog-honest missed-action batches per human seat for "While You Were Away" Turn Recap.
+    const actorSeat =
+      action.type === 'BANK_REWARD'
+        ? (before.bankRewardPending?.playerId ?? before.currentPlayer)
+        : before.currentPlayer;
+    const perSeat: (MissedActionBatch | null)[] = this.seats.map((s, i) => {
+      if (s.isBot) return null;
+      const evs = seatEvents[i];
+      // Skip sound-only / invisible batches so hidden enemy moves in fog never leak or pad recaps.
+      if (!evs || !evs.some(e => e.kind !== 'sound')) return null;
+      const beforeSight = sightBefore[i] ?? EMPTY_SIGHT;
+      const preUnits = (fog
+        ? before.units.filter(u => u.owner === i || beforeSight.has(u.tileId))
+        : before.units
+      ).map(u => ({ ...u }));
+      return {
+        seq: this.seq,
+        actorSeat,
+        round: before.totalTurns + 1,
+        preUnits,
+        events: evs,
+      };
+    });
+    if (perSeat.some(Boolean)) {
+      this.actionHistory.push({ seq: this.seq, actorSeat, round: before.totalTurns + 1, perSeat });
+      if (this.actionHistory.length > 12) this.actionHistory.shift();
+    }
     if (after.winner !== null) this.status = 'finished';
     this.snapshotDirty = true;
     this.afterChange(seatEvents);
@@ -585,7 +622,7 @@ export class TableRoom extends Room {
   }
 
   /** Broadcast, then schedule whatever happens next without a human. */
-  private afterChange(seatEvents?: GameEvent[][]) {
+  private afterChange(seatEvents?: GameEvent[][], reconnectedSeat?: number) {
     this.pending?.clear();
     this.pending = null;
     const game = this.game;
@@ -593,7 +630,7 @@ export class TableRoom extends Room {
       this.turnTimeout?.clear();
       this.turnTimeout = null;
       this.turnDeadline = null;
-      this.broadcastViews(seatEvents);
+      this.broadcastViews(seatEvents, reconnectedSeat);
       return;
     }
     // A new turn gets a fresh clock (0 base = timer off: no deadline, no auto-end).
@@ -602,7 +639,7 @@ export class TableRoom extends Room {
       const base = this.baseMs();
       this.turnDeadline = base > 0 ? Date.now() + base : null;
     }
-    this.broadcastViews(seatEvents);
+    this.broadcastViews(seatEvents, reconnectedSeat);
     this.scheduleAutoTurn();
     this.scheduleTurnExpiry();
   }
@@ -764,11 +801,11 @@ export class TableRoom extends Room {
   }
 
   /** Every change ends here: send each player their view, and save the table. */
-  private broadcastViews(seatEvents?: GameEvent[][]) {
+  private broadcastViews(seatEvents?: GameEvent[][], reconnectedSeat?: number) {
     const seats = this.seatInfo();
     for (const client of this.clients) {
       const mySeat = this.seatOf(client);
-      this.sendView(client, seats, seatEvents?.[mySeat] ?? []);
+      this.sendView(client, seats, seatEvents?.[mySeat] ?? [], reconnectedSeat !== undefined && mySeat === reconnectedSeat);
     }
     this.persist();
   }
@@ -822,8 +859,9 @@ export class TableRoom extends Room {
   /**
    * `seats` is shared by every client in a broadcast, so it is built once by the caller.
    * Effects are only attached on the broadcast for the action that created them (never on `sync` or reconnect).
+   * On reconnect (`includeMissed`), fog-honest missed opponent batches are attached separately in `missedActions`.
    */
-  private sendView(client: Client, seats = this.seatInfo(), events: GameEvent[] = []) {
+  private sendView(client: Client, seats = this.seatInfo(), events: GameEvent[] = [], includeMissed = false) {
     const mySeat = this.seatOf(client);
     let gameView: TableView['game'] = null;
     if (this.game && mySeat >= 0) {
@@ -832,6 +870,19 @@ export class TableRoom extends Room {
         this.cachedGameViews = [];
       }
       gameView = this.cachedGameViews[mySeat] ?? (this.cachedGameViews[mySeat] = viewFor(this.game, mySeat, this.sight[mySeat]));
+    }
+    let missedActions: MissedActionBatch[] | undefined;
+    if (includeMissed && this.status !== 'lobby' && mySeat >= 0) {
+      const lastSeq = this.seatLastSentSeq[mySeat] ?? 0;
+      if (lastSeq > 0 && lastSeq < this.seq) {
+        const missed = this.actionHistory
+          .filter(entry => entry.seq > lastSeq && entry.actorSeat !== mySeat && entry.perSeat[mySeat] !== null)
+          .map(entry => entry.perSeat[mySeat]!);
+        if (missed.length > 0) missedActions = missed;
+      }
+    }
+    if (this.status !== 'lobby' && mySeat >= 0) {
+      this.seatLastSentSeq[mySeat] = this.seq;
     }
     const view: TableView = {
       code: this.roomId,
@@ -844,6 +895,7 @@ export class TableRoom extends Room {
       liveDraft: this.status === 'lobby' ? this.liveDraft : null,
       mapSuggestions: this.status === 'lobby' ? Array.from(this.suggestions.values()) : [],
       events,
+      ...(missedActions ? { missedActions } : {}),
       seq: this.seq,
     };
     client.send(ServerMsg.view, view);

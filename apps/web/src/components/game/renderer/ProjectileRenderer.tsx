@@ -44,7 +44,7 @@ export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data, ma
             const totalMs = travelMs + afterglowMs;
             if (elapsed >= totalMs) return;
 
-            const sweepT = Math.min(1, elapsed / (travelMs * 0.55));
+            const sweepT = Math.min(1, elapsed / (travelMs * 0.92));
             const headX = data.startX + dx * sweepT;
             const headY = data.startY + dy * sweepT;
             const fadeT = elapsed > travelMs ? (elapsed - travelMs) / afterglowMs : 0;
@@ -62,13 +62,24 @@ export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data, ma
             g.lineTo(headX, headY);
             g.lineStyle(0);
 
-            if (sweepT >= 1 && alpha > 0.15) {
-                const ringR = 6 + fadeT * 20;
-                g.lineStyle(2.2 * widthScale, 0xFB7185, alpha * 0.85);
+            if (sweepT >= 0.96 && alpha > 0.12) {
+                // High-velocity rail over-penetration exit streak extending past the target!
+                const exitLen = (32 + fadeT * 52) * Math.min(1, alpha * 1.4);
+                const exitX = data.endX + ux * exitLen;
+                const exitY = data.endY + uy * exitLen;
+                g.lineStyle(7 * widthScale, 0xE11D48, alpha * 0.36);
+                g.moveTo(data.endX, data.endY);
+                g.lineTo(exitX, exitY);
+                g.lineStyle(2.4 * widthScale, 0xFFFFFF, alpha * 0.92);
+                g.moveTo(data.endX, data.endY);
+                g.lineTo(exitX, exitY);
+
+                const ringR = 6 + fadeT * 22;
+                g.lineStyle(2.2 * widthScale, 0xFB7185, alpha * 0.88);
                 g.drawCircle(data.endX, data.endY, ringR);
                 g.lineStyle(0);
-                g.beginFill(0xFFFFFF, alpha * 0.9);
-                g.drawCircle(data.endX, data.endY, 4.5 * widthScale);
+                g.beginFill(0xFFFFFF, alpha * 0.95);
+                g.drawCircle(data.endX, data.endY, 4.8 * widthScale);
                 g.endFill();
             }
             return;

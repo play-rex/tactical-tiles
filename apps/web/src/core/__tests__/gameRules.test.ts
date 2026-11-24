@@ -214,9 +214,14 @@ test('Preset Maps: Bridges and Bases remain intact and navigable', () => {
     assert.equal(reconBases.length, 4);
     const reconBank = recon.data.find(t => t.type === 'BANK');
     assert.ok(reconBank);
+    const bankAdj = recon.data.filter(
+        t => t.type !== 'WATER' && t.type !== 'CANYON' && Math.abs(t.x - reconBank.x) + Math.abs(t.y - reconBank.y) === 1
+    );
+    assert.ok(bankAdj.length > 0);
     for (const base of reconBases) {
-        const pathToBank = getMovePath(base, reconBank.id, 999, recon.data, [], 'SOLDIER', base.owner ?? 0, clearWeather, recon.width);
-        assert.ok(pathToBank.length > 0, `Base ${base.id} should reach Bank ${reconBank.id}`);
+        const movesFromBase = getValidMoves(base, 999, recon.data, [], 'SOLDIER', base.owner ?? 0, clearWeather, recon.width);
+        assert.equal(movesFromBase.has(reconBank.id), false, `Bank ${reconBank.id} must not be enterable`);
+        assert.ok(bankAdj.some(adj => movesFromBase.has(adj.id)), `Base ${base.id} should reach Bank ${reconBank.id} perimeter`);
     }
 
     const canyon = PRESET_MAPS.find(m => m.id === 'campaign_canyon');
@@ -447,7 +452,7 @@ test('Store: MAX_RESPAWNS is strictly enforced and RELOAD restores ammo', () => 
     useGameStore.getState().executeAiAction({
         type: 'SPAWN',
         unitType: 'SOLDIER',
-        tileId: '0,0',
+        tileId: '0,1',
         cost: 0,
         goldCost: 50,
         deadUnitId: 'dead_1'
@@ -488,7 +493,7 @@ test('Random map generation: 25 random maps all connect P0 and P1 bases', () => 
                 const ny = cur.y + dy;
                 if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
                 const nt = mapData[ny * gridSize + nx];
-                if (!nt || visited.has(nt.id) || TERRAIN_COSTS[nt.type] >= 90 || nt.type === 'MOUNTAIN' || nt.type === 'BUILDING') continue;
+                if (!nt || visited.has(nt.id) || (nt.id !== b1.id && TERRAIN_COSTS[nt.type] >= 90) || nt.type === 'MOUNTAIN' || nt.type === 'BUILDING') continue;
                 visited.add(nt.id);
                 queue.push(nt);
             }
@@ -1631,14 +1636,21 @@ test('setup map preview matches the exact battlefield deployed locally and suppo
     // Inline map edits: move P0 base cleanly & add a Watchtower, diff patches, and confirm online/local parity
     const edited = cloneTiles(preview.mapData);
     const p0BaseIdx = edited.findIndex(t => t.type === 'BASE' && t.owner === 0);
-    const dstIdx = edited.findIndex(t => t.type === 'PLAINS' && t.x >= 2 && t.y >= 2);
+    const dstIdx = edited.findIndex(t => (t.type === 'PLAINS' || t.type === 'SAND') && t.x >= 2 && t.y >= 2);
     assert.ok(p0BaseIdx >= 0 && dstIdx >= 0);
     const oldP0 = { ...edited[p0BaseIdx] };
     const oldDst = { ...edited[dstIdx] };
     edited[dstIdx] = { ...edited[dstIdx], type: 'BASE', owner: 0, height: 1 };
     edited[p0BaseIdx] = { ...edited[p0BaseIdx], type: oldDst.type, owner: undefined, height: oldDst.height };
 
-    const towerIdx = edited.findIndex((t, i) => i !== p0BaseIdx && i !== dstIdx && t.type === 'PLAINS');
+    const towerIdx = edited.findIndex(
+        (t, i) =>
+            i !== p0BaseIdx &&
+            i !== dstIdx &&
+            !(t.x === 0 && t.y === 1) &&
+            !(t.x === 1 && t.y === 0) &&
+            (t.type === 'PLAINS' || t.type === 'SAND'),
+    );
     assert.ok(towerIdx >= 0);
     edited[towerIdx] = { ...edited[towerIdx], type: 'BUILDING', subType: 'WATCHTOWER', height: 1 };
 
@@ -1661,7 +1673,7 @@ test('setup map preview matches the exact battlefield deployed locally and suppo
             !(t.x === 0 && t.y === 1) &&
             !(t.x === 1 && t.y === 0) &&
             (t.x !== edited[towerIdx].x || t.y !== edited[towerIdx].y) &&
-            t.type === 'PLAINS',
+            (t.type === 'PLAINS' || t.type === 'SAND'),
     )!;
     const merged = mergeOnlineMapEdits(tableWithHostEdit, 3, [
         { x: bunkerTile.x, y: bunkerTile.y, type: 'BUILDING', height: 1, subType: 'BUNKER' },

@@ -14,6 +14,17 @@
  */
 import { PLAYER_COLORS, TILE_SIZE, UNIT_STATS, VETERANCY_CONFIG } from '@tactical/engine/constants/Config';
 import type { GameEvent, KillCause, SoundName, SupplyLootType, TerrainType, TilePoint, UnitRank, UnitType, WeaponVisual } from '@tactical/engine';
+import {
+  classifyKillTier,
+  getKillCamTiming,
+  KillCamDirector,
+  selectKillCamStyle,
+  type KillCamCue,
+  type KillCamFrame,
+  type KillCamMode,
+  type KillCamPoint,
+  type KillCamTier,
+} from './killCam';
 
 export type ProjectileVisualStyle = 'BULLET' | 'LASER' | 'MISSILE';
 
@@ -89,6 +100,10 @@ export interface PendingDeathVisual {
   endTileY: number;
   /** Pre-lethal HP to display until the lethal blow arrives. */
   displayHp: number;
+  /** Preserved ammo & facing so units never visually snap right before dying. */
+  ammo?: number;
+  maxAmmo?: number;
+  facingRad?: number;
 }
 
 export interface DeathGhostRequest {
@@ -102,6 +117,8 @@ export interface DeathGhostRequest {
   y: number;
   cause: KillCause;
   durationMs: number;
+  /** Incoming projectile travel vector in board radians for directional knockback tumble. */
+  incomingAngle?: number;
 }
 
 export type TileEffectKind = 'scorch' | 'mineFlash' | 'captureWave' | 'spawnBeam';
@@ -225,6 +242,21 @@ export interface TimelineSink {
   playUnitMove?: (unitType: UnitType, durationMs: number, terrain?: TerrainType) => void;
   playTacticalFoley?: (kind: 'reload' | 'overwatch' | 'heal' | 'build') => void;
   playKillConfirm?: () => void;
+  /** `IN` = shot in flight (riser matched to `flightRealMs`), `HIT` = lethal impact (sub drop + shell). */
+  playKillCamSting?: (stage: 'IN' | 'HIT', tier: KillCamTier, flightRealMs?: number) => void;
+  playMineClick?: () => void;
+  playOverwatchStatic?: () => void;
+  playGrazeSurvive?: () => void;
+  /** Live unit metadata lookup used to enrich attack micro-cam & pending-death fidelity. */
+  getUnitInfo?: (unitId: string) => {
+    type: UnitType;
+    owner: number;
+    rank: UnitRank;
+    hp: number;
+    maxHp: number;
+    ammo?: number;
+    maxAmmo?: number;
+  } | undefined;
   spawnProjectile?: (proj: ProjectileSpawnRequest) => void;
   removeProjectile?: (id: string) => void;
   spawnCrossfire?: (lock: CrossfireLockRequest) => void;
@@ -409,6 +441,15 @@ export const subscribeReducedMotion = (listener: (reduced: boolean) => void): ((
   }
 };
 
+const rankAdjustedMaxHp = (unitType: UnitType, rank: number): number => {
+  const baseHp = UNIT_STATS[unitType]?.hp ?? 1;
+  const bonus = Math.round(baseHp * VETERANCY_CONFIG.RANK_HP_MULT);
+  let maxHp = baseHp;
+  if (rank >= 1) maxHp += bonus;
+  if (rank >= 3) maxHp += bonus;
+  return maxHp;
+};
+
 const tileKey = (p: TilePoint) => `${p.x},${p.y}`;
 const smoothstep = (t: number) => t * t * (3 - 2 * t);
 
@@ -433,9 +474,27 @@ export class FxTimeline {
   private baseTurrets = new Map<string, InternalBaseTurret>();
   private activeVisualCount = 0;
   private allowImmediateZeroCues = false;
+  private killCam = new KillCamDirector();
+  private killCamMode: KillCamMode = 'FULL';
+  private lastEnabledKillCamMode: 'FULL' | 'SHORT' = 'FULL';
+  private replayMode = false;
+  private savedModeBeforeReplay: KillCamMode | null = null;
+  private playbackSpeed = 1;
+  private subjectScreen = { x: 0.5, y: 0.5 };
+  /**
+   * Structures that have already been hit this match. A cut fires on the first hit on a bank or
+   * HQ ("they're in") and on destruction — never on routine siege damage, which would hijack the
+   * camera every single turn.
+   */
+  private breachedStructures = new Set<string>();
+  /** Match-scoped narrative memory: first kill + who each unit has slain (for VENDETTA). */
+  private firstBloodClaimed = false;
+  private slayersByUnitId = new Map<string, Set<number>>();
   private sink: TimelineSink = {};
   private activeListeners = new Set<(active: boolean) => void>();
   private lastNotifiedActive = false;
+  private killCamActiveListeners = new Set<(active: boolean) => void>();
+  private lastNotifiedKillCamActive = false;
 
   public configure(sink: Partial<TimelineSink>): void {
     this.sink = { ...this.sink, ...sink };
@@ -459,6 +518,90 @@ export class FxTimeline {
 
   public getPendingCueCount(): number {
     return this.cues.length;
+  }
+
+  /** Live kill-cam camera/time-dilation sample, polled by the viewport rig and the overlay. */
+  public getKillCamFrame(): KillCamFrame {
+    return this.killCam.getFrame();
+  }
+
+  public isKillCamActive(): boolean {
+    return this.killCam.isActive();
+  }
+
+  /** Sets kill-cam pacing (`FULL`, `SHORT`, or `OFF`). */
+  public setKillCamMode(mode: KillCamMode): void {
+    this.killCamMode = mode;
+    if (mode !== 'OFF') this.lastEnabledKillCamMode = mode;
+    this.killCam.setMode(mode);
+    this.notifyActiveIfChanged();
+  }
+
+  public getKillCamMode(): KillCamMode {
+    return this.killCamMode;
+  }
+
+  /** Turns the cinematic camera off or back on (headless FX tests, replay scrubbing). */
+  public setKillCamEnabled(enabled: boolean): void {
+    this.setKillCamMode(enabled ? this.lastEnabledKillCamMode : 'OFF');
+  }
+
+  /** Immediately skips the active kill/structure cut and prevents its deferred impact from reopening. */
+  public skipKillCam(): boolean {
+    const skipped = this.killCam.skip();
+    if (skipped) {
+      this.sink.onWake?.(420);
+      this.notifyActiveIfChanged();
+    }
+    return skipped;
+  }
+
+  /** Subscribes specifically to kill-cam `IDLE <-> ACTIVE` transitions (used to defer modals & AI). */
+  public subscribeKillCamActive(listener: (active: boolean) => void): () => void {
+    this.killCamActiveListeners.add(listener);
+    return () => {
+      this.killCamActiveListeners.delete(listener);
+    };
+  }
+
+  /** Stores victim's projected viewport coords (0..1) so KillCamOverlay can dodge corners. */
+  public setKillCamSubjectScreen(x: number, y: number): void {
+    this.subjectScreen.x = x;
+    this.subjectScreen.y = y;
+  }
+
+  public getKillCamSubjectScreen(): { x: number; y: number } {
+    return this.subjectScreen;
+  }
+
+  /** Speed multiplier for non-kill-cam playback (used by Async Turn Recap 2.5x fast-forward). */
+  public setPlaybackSpeed(mult: number): void {
+    this.playbackSpeed = Math.max(0.25, Math.min(4, Number.isFinite(mult) ? mult : 1));
+  }
+
+  public getPlaybackSpeed(): number {
+    return this.playbackSpeed;
+  }
+
+  /** Forces FULL kill-cam mode and tags cues as replay while playing Play-of-the-Match. */
+  public setReplayMode(on: boolean): void {
+    if (on === this.replayMode) return;
+    this.replayMode = on;
+    if (on) {
+      this.savedModeBeforeReplay = this.killCamMode;
+      this.killCamMode = 'FULL';
+      this.killCam.setMode('FULL');
+    } else if (this.savedModeBeforeReplay !== null) {
+      const prev = this.savedModeBeforeReplay;
+      this.savedModeBeforeReplay = null;
+      this.killCamMode = prev;
+      this.killCam.setMode(prev);
+    }
+    this.notifyActiveIfChanged();
+  }
+
+  public isReplayMode(): boolean {
+    return this.replayMode;
   }
 
   public hasActiveMove(unitId: string): boolean {
@@ -531,6 +674,7 @@ export class FxTimeline {
       this.unitImpulses.size > 0 ||
       this.unitMoveTracks.size > 0 ||
       this.baseTurrets.size > 0 ||
+      this.killCam.isActive() ||
       this.activeVisualCount > 0 ||
       Boolean(this.sink.hasActiveParticles?.())
     );
@@ -548,6 +692,11 @@ export class FxTimeline {
     if (active !== this.lastNotifiedActive) {
       this.lastNotifiedActive = active;
       this.activeListeners.forEach(fn => fn(active));
+    }
+    const kcActive = this.killCam.isActive();
+    if (kcActive !== this.lastNotifiedKillCamActive) {
+      this.lastNotifiedKillCamActive = kcActive;
+      this.killCamActiveListeners.forEach(fn => fn(kcActive));
     }
   }
 
@@ -733,17 +882,21 @@ export class FxTimeline {
    * Returns `{ dtMs, combatDtMs }` so particle systems can respect hit-stop cleanly.
    */
   public step(rawDeltaMs: number): { dtMs: number; combatDtMs: number } {
-    const dtMs = Math.min(MAX_TIMELINE_STEP_MS, Math.max(0, Number.isFinite(rawDeltaMs) ? rawDeltaMs : 0));
-    if (dtMs <= 0) {
+    const rawDtMs = Math.min(MAX_TIMELINE_STEP_MS, Math.max(0, Number.isFinite(rawDeltaMs) ? rawDeltaMs : 0));
+    if (rawDtMs <= 0) {
       this.lastCombatDtMs = 0;
       this.notifyActiveIfChanged();
       return { dtMs: 0, combatDtMs: 0 };
     }
 
+    // The kill-cam film clock runs in real time and dilates the combat clock below, so
+    // ghosts, particles, popups and the remainder of the shot all slow down together.
+    this.killCam.step(rawDtMs);
+
     // Trauma always runs even during hit-stop so impacts feel snappy rather than frozen dead
     if (this.trauma > 0) {
-      this.traumaTimeMs += dtMs;
-      this.trauma = Math.max(0, this.trauma - TRAUMA_DECAY_PER_SEC * (dtMs / 1000));
+      this.traumaTimeMs += rawDtMs;
+      this.trauma = Math.max(0, this.trauma - TRAUMA_DECAY_PER_SEC * (rawDtMs / 1000));
       if (this.trauma <= 0.001) {
         this.trauma = 0;
         this.traumaTimeMs = 0;
@@ -751,12 +904,14 @@ export class FxTimeline {
     }
 
     if (this.hitStopMs > 0) {
-      this.hitStopMs = Math.max(0, this.hitStopMs - dtMs);
+      this.hitStopMs = Math.max(0, this.hitStopMs - rawDtMs);
       this.lastCombatDtMs = 0;
       this.notifyActiveIfChanged();
-      return { dtMs, combatDtMs: 0 };
+      return { dtMs: rawDtMs, combatDtMs: 0 };
     }
 
+    const speedMult = this.killCam.isActive() ? this.killCam.getTimeScale() : this.playbackSpeed;
+    const dtMs = rawDtMs * speedMult;
     this.lastCombatDtMs = dtMs;
     this.clockMs += dtMs;
 
@@ -832,7 +987,20 @@ export class FxTimeline {
     }
 
     this.notifyActiveIfChanged();
-    return { dtMs, combatDtMs: dtMs };
+    return { dtMs: rawDtMs, combatDtMs: dtMs };
+  }
+
+  /**
+   * Forgets per-match kill-cam milestones (the first breach of each bank/HQ).
+   *
+   * Deliberately separate from `clear()`: that also runs when the tab is hidden or the renderer
+   * unmounts mid-match, and wiping the memory there would re-arm the first-breach cut every time.
+   * Only match start / reset / exit call this.
+   */
+  public resetMatchMemory(): void {
+    this.breachedStructures.clear();
+    this.firstBloodClaimed = false;
+    this.slayersByUnitId.clear();
   }
 
   /** Clears all pending cues, move tracks, trauma, impulses, turrets, and active transient visuals. */
@@ -844,9 +1012,260 @@ export class FxTimeline {
     this.unitImpulses.clear();
     this.unitMoveTracks.clear();
     this.baseTurrets.clear();
+    this.killCam.clear();
     this.activeVisualCount = 0;
     this.sink.onClearVisuals?.();
     this.notifyActiveIfChanged();
+  }
+
+  /**
+   * Structure losses get the same treatment as a kill: bank demolition, HQ breach, vault heist.
+   * There is no round to track, so `STRUCTURE` timing punches in on the blast itself.
+   */
+  private buildStructureCue(
+    title: string,
+    detail: string,
+    structureType: 'BASE' | 'BANK' | 'BARRIER',
+    at: { x: number; y: number },
+    attackerOwner: number | null,
+    structureOwner: number | null,
+    damage: number,
+    isMatchWinning = false,
+  ): KillCamCue | null {
+    if (this.killCamMode === 'OFF' || getPrefersReducedMotion()) return null;
+    const focus = tileCenterPx(at);
+    return {
+      id: this.nextFxSeq++,
+      tier: 'STRUCTURE',
+      subject: 'STRUCTURE',
+      cameraStyle: 'STRUCTURE_BLOWOUT',
+      cause: 'COMBAT',
+      title,
+      detail,
+      structureType,
+      victimOwner: structureOwner ?? undefined,
+      killerOwner: attackerOwner,
+      isMatchWinning,
+      isReplay: this.replayMode,
+      hasVisibleOrigin: false,
+      damage,
+      maxHp: 0,
+      overkill: 0,
+      crossfireCount: 0,
+      distanceTiles: 0,
+      focusX: focus.x,
+      focusY: focus.y,
+      markerX: focus.x,
+      markerY: focus.y,
+      // A structure is a couple of tiles wide, so the crop is looser than a unit kill.
+      frameW: TILE_SIZE * 4.4,
+      frameH: TILE_SIZE * 3.8,
+      combo: 1,
+      travelMs: 0,
+    };
+  }
+
+  private buildAttackCamCue(
+    e: Extract<GameEvent, { kind: 'hit' }>,
+    flightMs: number,
+    attackerId: string | undefined,
+    isOverwatch: boolean,
+  ): KillCamCue | null {
+    if (this.killCamMode === 'OFF' || getPrefersReducedMotion()) return null;
+    const focus = tileCenterPx(e.at);
+    const from = e.from;
+    const marker = from ? tileCenterPx(from) : focus;
+    const frameW = Math.abs(marker.x - focus.x) + TILE_SIZE * 2.1;
+    const frameH = Math.abs(marker.y - focus.y) + TILE_SIZE * 1.9;
+    const distanceTiles = from ? Math.hypot(from.x - e.at.x, from.y - e.at.y) : 0;
+    const crossfirePoints: KillCamPoint[] | undefined =
+      e.crossfireFrom && e.crossfireFrom.length > 0 ? e.crossfireFrom.map(tileCenterPx) : undefined;
+    const crossfireCount = crossfirePoints?.length ?? 0;
+    const victimInfo = e.targetUnitId ? this.sink.getUnitInfo?.(e.targetUnitId) : undefined;
+    const attackerInfo = attackerId ? this.sink.getUnitInfo?.(attackerId) : undefined;
+    const cause: KillCause = isOverwatch
+      ? 'OVERWATCH'
+      : e.weapon === 'TURRET'
+        ? 'TURRET'
+        : e.weapon === 'ARTILLERY'
+          ? 'ARTILLERY'
+          : 'COMBAT';
+    const isGraze = victimInfo?.hp === 1;
+
+    return {
+      id: this.nextFxSeq++,
+      tier: 'ATTACK',
+      subject: 'ATTACK',
+      cameraStyle: isGraze ? 'GRAZE_FAKEOUT' : 'STANDARD',
+      cause,
+      weapon: e.weapon,
+      victimUnitId: e.targetUnitId,
+      victimUnitType: victimInfo?.type,
+      victimOwner: victimInfo?.owner,
+      victimRank: victimInfo?.rank,
+      victimName: victimInfo ? (UNIT_STATS[victimInfo.type]?.name ?? victimInfo.type) : undefined,
+      remainingHp: victimInfo?.hp,
+      isCrit: e.isCrit,
+      killerOwner: attackerInfo?.owner ?? null,
+      killerUnitId: attackerId,
+      killerUnitType: attackerInfo?.type,
+      breakdown: e.breakdown,
+      hasVisibleOrigin: Boolean(from),
+      crossfirePoints,
+      isReplay: this.replayMode,
+      damage: e.damage,
+      maxHp: victimInfo?.maxHp ?? 0,
+      overkill: 0,
+      crossfireCount,
+      distanceTiles: Math.round(distanceTiles * 10) / 10,
+      terrain: this.sink.getTileTerrain?.(e.at.x, e.at.y),
+      focusX: focus.x,
+      focusY: focus.y,
+      markerX: marker.x,
+      markerY: marker.y,
+      frameW,
+      frameH,
+      combo: 1,
+      travelMs: Math.max(0, flightMs),
+    };
+  }
+
+  private buildKillCamCue(
+    e: Extract<GameEvent, { kind: 'killed' }>,
+    events: GameEvent[],
+    flightMs: number,
+    rank: UnitRank,
+  ): KillCamCue | null {
+    if (this.killCamMode === 'OFF' || getPrefersReducedMotion()) return null;
+
+    let lethalHit: Extract<GameEvent, { kind: 'hit' }> | undefined;
+    let damage = 0;
+    for (const ev of events) {
+      if (ev.kind === 'hit' && ev.targetUnitId === e.unitId) {
+        damage += ev.damage;
+        // The last staged hit on a victim is the one that carries `isKill`, `from` and crossfire.
+        lethalHit = ev;
+      } else if (ev.kind === 'mineBlast' && ev.victimUnitId === e.unitId) {
+        damage += ev.damage;
+      }
+    }
+
+    const maxHp = rankAdjustedMaxHp(e.unitType, rank);
+    const focus = tileCenterPx(e.at);
+    const from = lethalHit?.from;
+    const marker = from ? tileCenterPx(from) : focus;
+    const frameW = Math.abs(marker.x - focus.x) + TILE_SIZE * 1.7;
+    const frameH = Math.abs(marker.y - focus.y) + TILE_SIZE * 1.5;
+    const distanceTiles = from ? Math.hypot(from.x - e.at.x, from.y - e.at.y) : 0;
+    const crossfirePoints: KillCamPoint[] | undefined =
+      lethalHit?.crossfireFrom && lethalHit.crossfireFrom.length > 0
+        ? lethalHit.crossfireFrom.map(tileCenterPx)
+        : undefined;
+    const crossfireCount = crossfirePoints?.length ?? 0;
+
+    // Wide triangulation box spanning shooter + victim + every Crossfire ally.
+    let triFrameW: number | undefined;
+    let triFrameH: number | undefined;
+    let triCenterX: number | undefined;
+    let triCenterY: number | undefined;
+    if (crossfirePoints && crossfirePoints.length > 0) {
+      const pts = [focus, marker, ...crossfirePoints];
+      let minX = pts[0].x;
+      let maxX = pts[0].x;
+      let minY = pts[0].y;
+      let maxY = pts[0].y;
+      for (let i = 1; i < pts.length; i++) {
+        if (pts[i].x < minX) minX = pts[i].x;
+        if (pts[i].x > maxX) maxX = pts[i].x;
+        if (pts[i].y < minY) minY = pts[i].y;
+        if (pts[i].y > maxY) maxY = pts[i].y;
+      }
+      triFrameW = maxX - minX + TILE_SIZE * 2.2;
+      triFrameH = maxY - minY + TILE_SIZE * 2.0;
+      triCenterX = (minX + maxX) / 2;
+      triCenterY = (minY + maxY) / 2;
+    }
+
+    const preHpBase = e.victimPreHp ?? maxHp;
+    const overkill = Math.max(0, damage - preHpBase);
+    const combo = events.filter(ev => ev.kind === 'killed').indexOf(e) + 1;
+    const weapon = lethalHit?.weapon;
+    const killerOwner = e.killerOwner ?? null;
+
+    // Emergent match-memory flags (skipped from mutating during POTM replays).
+    const isFirstBlood = !this.replayMode && !this.firstBloodClaimed;
+    if (!this.replayMode && !this.firstBloodClaimed) {
+      this.firstBloodClaimed = true;
+    }
+    const isVendetta =
+      killerOwner !== null && Boolean(this.slayersByUnitId.get(e.unitId)?.has(killerOwner));
+    if (!this.replayMode && e.killerUnitId && e.owner !== undefined) {
+      let slainOwners = this.slayersByUnitId.get(e.killerUnitId);
+      if (!slainOwners) {
+        slainOwners = new Set<number>();
+        this.slayersByUnitId.set(e.killerUnitId, slainOwners);
+      }
+      slainOwners.add(e.owner);
+    }
+
+    const cue: KillCamCue = {
+      id: this.nextFxSeq++,
+      tier: classifyKillTier({
+        rank,
+        cause: e.cause,
+        crossfireCount,
+        weapon,
+        distanceTiles,
+        overkill,
+        combo,
+        isMatchWinning: e.isMatchWinning,
+        zeroCpClutch: e.zeroCpClutch,
+        isVendetta,
+        isFirstBlood,
+        killerUnitType: e.killerUnitType,
+        victimUnitType: e.unitType,
+      }),
+      subject: 'KILL',
+      cause: e.cause,
+      weapon,
+      victimUnitId: e.unitId,
+      victimUnitType: e.unitType,
+      victimOwner: e.owner,
+      victimRank: rank,
+      victimName: UNIT_STATS[e.unitType]?.name ?? e.unitType,
+      victimPreHp: e.victimPreHp,
+      killerOwner,
+      killerUnitId: e.killerUnitId,
+      killerUnitType: e.killerUnitType,
+      breakdown: lethalHit?.breakdown,
+      zeroCpClutch: e.zeroCpClutch,
+      isMatchWinning: e.isMatchWinning,
+      isVendetta,
+      isFirstBlood,
+      hasVisibleOrigin: Boolean(from),
+      crossfirePoints,
+      isReplay: this.replayMode,
+      damage,
+      maxHp,
+      overkill,
+      crossfireCount,
+      distanceTiles: Math.round(distanceTiles * 10) / 10,
+      terrain: this.sink.getTileTerrain?.(e.at.x, e.at.y),
+      focusX: focus.x,
+      focusY: focus.y,
+      markerX: marker.x,
+      markerY: marker.y,
+      frameW,
+      frameH,
+      triFrameW,
+      triFrameH,
+      triCenterX,
+      triCenterY,
+      combo,
+      travelMs: Math.max(0, flightMs),
+    };
+    cue.cameraStyle = selectKillCamStyle(cue);
+    return cue;
   }
 
   /**
@@ -1007,33 +1426,51 @@ export class FxTimeline {
       }
     }
 
-    // Plan Land Mine detonation times along move path
+    // Plan Land Mine detonation times along move path (inserting a crisp ARM click beat on lethal mines).
     const mineDelayByEvent = new Map<GameEvent, number>();
+    const mineArmArriveByVictim = new Map<string, number>();
+    const mineArmRealMs =
+      this.killCamMode !== 'OFF' && !getPrefersReducedMotion()
+        ? getKillCamTiming('CINEMATIC', this.killCamMode, 'MINE_CLICK').armMs
+        : 0;
+    const mineArmCombatMs = mineArmRealMs > 0 ? Math.max(4, Math.round(mineArmRealMs * 0.04)) : 0;
     let firstMineDelayMs: number | null = null;
     for (const e of events) {
       if (e.kind !== 'mineBlast') continue;
-      let delay = Math.max(0, e.delayMs ?? 0);
+      let arriveDelay = Math.max(0, e.delayMs ?? 0);
       if (e.delayMs === undefined && moveEvt && (!e.victimUnitId || e.victimUnitId === moveEvt.unitId)) {
         const idx = findStepIndex(e.at);
         if (idx >= 1) {
           const extraPause = overwatchInterceptIdx >= 1 && idx > overwatchInterceptIdx ? overwatchPauseMs : 0;
-          delay = Math.round(idx * moveSegMs) + extraPause;
+          arriveDelay = Math.round(idx * moveSegMs) + extraPause;
         }
       }
-      mineDelayByEvent.set(e, delay);
-      if (firstMineDelayMs === null || delay < firstMineDelayMs) {
-        firstMineDelayMs = delay;
+      const detonateDelay = e.victimDead && mineArmCombatMs > 0 ? arriveDelay + mineArmCombatMs : arriveDelay;
+      if (e.victimDead && mineArmCombatMs > 0 && e.victimUnitId) {
+        mineArmArriveByVictim.set(e.victimUnitId, arriveDelay);
+      }
+      mineDelayByEvent.set(e, detonateDelay);
+      if (firstMineDelayMs === null || detonateDelay < firstMineDelayMs) {
+        firstMineDelayMs = detonateDelay;
       }
       if (e.victimUnitId) {
         const prevVictim = impactByVictimId.get(e.victimUnitId);
-        if (prevVictim === undefined || delay > prevVictim) {
-          impactByVictimId.set(e.victimUnitId, delay);
+        if (prevVictim === undefined || detonateDelay > prevVictim) {
+          impactByVictimId.set(e.victimUnitId, detonateDelay);
         }
       }
     }
 
     const hasMineBlast = mineDelayByEvent.size > 0;
     const hasDestroyedStructure = events.some(e => e.kind === 'structureHit' && e.destroyed);
+    const hasKilledInBatch = events.some(e => e.kind === 'killed');
+    const hasHeistInBatch = events.some(e => e.kind === 'heist');
+    const nonLethalUnitHitCount = events.reduce(
+      (n, e) => n + (e.kind === 'hit' && !e.isKill && e.damage > 0 ? 1 : 0),
+      0,
+    );
+    // Single-target non-lethal combat hits earn a crisp, non-blocking micro action-cam punch-in.
+    const allowAttackMicroCam = !hasKilledInBatch && !hasHeistInBatch && !hasDestroyedStructure && nonLethalUnitHitCount === 1;
     const hasProjectile = projectilePlans.size > 0;
     const healEvt = events.find((e): e is Extract<GameEvent, { kind: 'heal' }> => e.kind === 'heal');
     const hasOverwatchSet = events.some(e => e.kind === 'overwatchSet');
@@ -1048,6 +1485,18 @@ export class FxTimeline {
       if (activePlan) {
         if (unitId && activePlan.event.targetUnitId === unitId) return activePlan;
         if (activePlan.event.to.x === at.x && activePlan.event.to.y === at.y) return activePlan;
+      }
+      return null;
+    };
+
+    const findLaunchPlan = (at: TilePoint, unitId?: string): PlannedProjectile | null => {
+      const direct = matchingPlanForTile(at, unitId);
+      if (direct) return direct;
+      for (let i = plannedList.length - 1; i >= 0; i--) {
+        const p = plannedList[i];
+        if ((unitId && p.event.targetUnitId === unitId) || (p.event.to.x === at.x && p.event.to.y === at.y)) {
+          return p;
+        }
       }
       return null;
     };
@@ -1311,6 +1760,27 @@ export class FxTimeline {
           const isTankBlast = e.weapon === 'ASSAULTER';
           const blastScorchId = isTankBlast ? `tfx_${this.nextFxSeq++}` : null;
 
+          // Non-lethal single-target attacks get a crisp, non-blocking kinetic micro-cam punch-in.
+          const attackCamCue =
+            allowAttackMicroCam && !e.isKill && e.damage > 0
+              ? this.buildAttackCamCue(
+                  e,
+                  paired ? paired.travelMs : Math.max(0, delay - lockStartMs),
+                  paired?.event.attackerId,
+                  Boolean(moveEvt),
+                )
+              : null;
+          if (attackCamCue && attackCamCue.travelMs > 40) {
+            this.schedule(
+              lockStartMs,
+              () => {
+                const realMs = this.killCam.preRoll(attackCamCue, getPrefersReducedMotion());
+                if (realMs > 0) this.sink.onWake?.(realMs + 950);
+              },
+              'attack-cam-preroll',
+            );
+          }
+
           // Crossfire tactical lock sightlines from supporting allies
           if (e.crossfireFrom && e.crossfireFrom.length > 0) {
             const lockId = `xfire_${this.nextFxSeq++}`;
@@ -1412,6 +1882,17 @@ export class FxTimeline {
               }
               if (e.isKill || e.isCrit || isTankBlast) {
                 this.triggerHitStop(e.isKill ? 42 : isTankBlast ? 34 : 32);
+              }
+              if (attackCamCue) {
+                if (this.killCam.impact(attackCamCue)) {
+                  this.sink.onWake?.(attackCamCue.cameraStyle === 'GRAZE_FAKEOUT' ? 1600 : 1200);
+                  if (attackCamCue.cameraStyle === 'GRAZE_FAKEOUT') {
+                    // Sync the metallic armor ricochet + heartbeat right at the crimson->amber flip.
+                    const gTiming = getKillCamTiming('ATTACK', this.killCamMode, 'GRAZE_FAKEOUT');
+                    const flipCombatMs = Math.max(8, Math.round(gTiming.slamMs * gTiming.slamScale));
+                    this.schedule(flipCombatMs, () => this.sink.playGrazeSurvive?.(), 'graze-survive-sfx');
+                  }
+                }
               }
             },
             'hit-impact',
@@ -1521,10 +2002,44 @@ export class FxTimeline {
           const tileY = e.at.y * TILE_SIZE;
           const scorchId = e.destroyed ? `tfx_${this.nextFxSeq++}` : null;
           const scorchMs = e.structureType === 'BASE' ? 2000 : 1450;
+          // Only genuinely big moments: the structure goes down, or it is breached for the first
+          // time this match. Routine siege damage must not hijack the camera every turn.
+          const breachKey = `${e.structureType}:${e.owner ?? 'x'}:${e.at.x},${e.at.y}`;
+          const isFirstBreach = !this.breachedStructures.has(breachKey);
+          this.breachedStructures.add(breachKey);
+          const isSiegeTarget = e.structureType === 'BASE' || e.structureType === 'BANK';
+          const structureTitle =
+            e.structureType === 'BANK' && e.destroyed
+              ? 'BANK DEMOLISHED'
+              : e.structureType === 'BASE' && e.destroyed
+                ? 'HEADQUARTERS DESTROYED'
+                : isFirstBreach && isSiegeTarget && e.damage > 0
+                  ? e.structureType === 'BANK'
+                    ? 'VAULT PENETRATED'
+                    : 'HQ BREACHED'
+                  : null;
+          const structureCue = structureTitle
+            ? this.buildStructureCue(
+                structureTitle,
+                `${e.structureType === 'BANK' ? 'VAULT' : 'COMMAND BASE'} TOOK ${e.damage} DAMAGE`,
+                e.structureType,
+                e.at,
+                e.attackerOwner ?? null,
+                e.owner ?? null,
+                e.damage,
+                Boolean(e.isMatchWinning),
+              )
+            : null;
 
           this.schedule(
             delay,
             () => {
+              if (structureCue) {
+                if (this.killCam.impact(structureCue)) {
+                  this.sink.playKillCamSting?.('HIT', structureCue.tier);
+                  this.sink.onWake?.(3400);
+                }
+              }
               if (e.destroyed && e.structureType === 'BASE') {
                 if (scorchId) {
                   this.activeVisualCount++;
@@ -1543,7 +2058,8 @@ export class FxTimeline {
                 this.triggerHitStop(48);
                 this.sink.playKillConfirm?.();
                 const ownerLabel = e.owner !== undefined && e.owner !== null ? `Player ${e.owner + 1} HQ` : 'Command Base';
-                this.sink.showCallout?.({
+                // The structure cut already carries the headline.
+                if (!structureCue) this.sink.showCallout?.({
                   id: `callout_${this.nextFxSeq++}`,
                   headline: 'BASE BREACHED!',
                   subtext: `${ownerLabel} Destroyed · Faction Eliminated`,
@@ -1554,9 +2070,11 @@ export class FxTimeline {
                 });
                 this.schedule(110, () => {
                   this.sink.emitParticles?.({ preset: 'explosion', x: atPx.x - 16, y: atPx.y - 10, scale: 1.1 });
+                  this.addTrauma(0.45);
                 }, 'base-secondary-1');
                 this.schedule(220, () => {
                   this.sink.emitParticles?.({ preset: 'explosion', x: atPx.x + 14, y: atPx.y + 12, scale: 1.15 });
+                  this.addTrauma(0.58);
                 }, 'base-secondary-2');
               } else if (e.destroyed && e.structureType === 'BARRIER') {
                 if (scorchId) {
@@ -1594,9 +2112,9 @@ export class FxTimeline {
         }
 
         case 'killed': {
-          const pairedKill = matchingPlanForTile(e.at, e.unitId);
+          const launchPlan = findLaunchPlan(e.at, e.unitId);
           const killImpactMs =
-            e.delayMs ?? pairedKill?.impactMs ?? impactByVictimId.get(e.unitId) ?? projectileImpactByTile.get(tileKey(e.at)) ?? 0;
+            e.delayMs ?? launchPlan?.impactMs ?? impactByVictimId.get(e.unitId) ?? projectileImpactByTile.get(tileKey(e.at)) ?? 0;
           const atPx = tileCenterPx(e.at);
           const tileX = e.at.x * TILE_SIZE;
           const tileY = e.at.y * TILE_SIZE;
@@ -1604,6 +2122,59 @@ export class FxTimeline {
           const scorchId = `tfx_${this.nextFxSeq++}`;
           const scorchDurationMs = 1650;
           const safeRank = (Math.max(0, Math.min(3, e.rank)) as UnitRank);
+          const isSurpriseTrap = e.cause === 'MINE' || e.cause === 'LAVA' || e.cause === 'BASE_FALL';
+          const preRollStartMs = launchPlan ? launchPlan.startMs : 0;
+          const flightMs = isSurpriseTrap
+            ? 0
+            : launchPlan
+              ? launchPlan.travelMs
+              : Math.max(0, killImpactMs - preRollStartMs);
+          const killCamCue = this.buildKillCamCue(e, events, flightMs, safeRank);
+          const mineArmArrive = e.cause === 'MINE' ? mineArmArriveByVictim.get(e.unitId) : undefined;
+          // Land Mine "*click* ... BOOM": freeze for 150ms on the pressure plate before detonation.
+          if (killCamCue && e.cause === 'MINE' && mineArmArrive !== undefined) {
+            this.schedule(
+              mineArmArrive,
+              () => {
+                const armMs = this.killCam.arm(killCamCue, getPrefersReducedMotion());
+                if (armMs > 0) {
+                  this.sink.playMineClick?.();
+                  this.sink.onWake?.(armMs + 3200);
+                }
+              },
+              'killcam-mine-arm',
+            );
+          }
+          // Start the push-in only when the lethal shot actually leaves the barrel — never at t=0
+          // before a unit reaches an Overwatch trigger, and never before a hidden Land Mine blows.
+          if (killCamCue && !isSurpriseTrap && flightMs > 60) {
+            this.schedule(
+              preRollStartMs,
+              () => {
+                const activeCue = this.killCam.getCue();
+                if (activeCue && activeCue.tier !== 'ATTACK') return;
+                const realFlightMs = this.killCam.preRoll(killCamCue, getPrefersReducedMotion());
+                if (realFlightMs > 0) {
+                  if (e.cause === 'OVERWATCH') {
+                    this.sink.playOverwatchStatic?.();
+                  }
+                  this.sink.playKillCamSting?.('IN', killCamCue.tier, realFlightMs);
+                  this.sink.onWake?.(realFlightMs + 2800);
+                }
+              },
+              'killcam-preroll',
+            );
+          }
+
+          // Directional incoming vector for physical death knockback tumble.
+          const hitForAngle = events.find(
+            (ev): ev is Extract<GameEvent, { kind: 'hit' }> => ev.kind === 'hit' && ev.targetUnitId === e.unitId && Boolean(ev.from),
+          );
+          const incomingAngle = hitForAngle?.from
+            ? Math.atan2(e.at.y - hitForAngle.from.y, e.at.x - hitForAngle.from.x)
+            : launchPlan
+              ? Math.atan2(e.at.y - launchPlan.event.from.y, e.at.x - launchPlan.event.from.x)
+              : undefined;
 
           // Keep dying unit visibly present (and marching if killed mid-move!) until lethal blow arrives
           if (killImpactMs > 0) {
@@ -1616,8 +2187,10 @@ export class FxTimeline {
                 totalIncomingDmg += other.damage;
               }
             }
-            const approxPreHp = Math.max(1, totalIncomingDmg);
+            const approxPreHp = e.victimPreHp ?? Math.max(1, totalIncomingDmg);
             const startTile = moveEvt && moveEvt.unitId === e.unitId ? moveEvt.path[0] : e.at;
+            const liveUnitInfo = this.sink.getUnitInfo?.(e.unitId);
+            const fallbackMaxAmmo = UNIT_STATS[e.unitType]?.maxAmmo ?? 6;
             this.activeVisualCount++;
             this.sink.addPendingDeath?.({
               unitId: e.unitId,
@@ -1629,6 +2202,9 @@ export class FxTimeline {
               endTileX: e.at.x,
               endTileY: e.at.y,
               displayHp: approxPreHp,
+              ammo: liveUnitInfo?.ammo ?? fallbackMaxAmmo,
+              maxAmmo: liveUnitInfo?.maxAmmo ?? fallbackMaxAmmo,
+              facingRad: incomingAngle !== undefined ? incomingAngle + Math.PI : undefined,
             });
           }
 
@@ -1652,6 +2228,7 @@ export class FxTimeline {
                 y: tileY,
                 cause: e.cause,
                 durationMs: DEATH_GHOST_DURATION_MS,
+                incomingAngle,
               });
               this.sink.spawnTileEffect?.({
                 id: scorchId,
@@ -1675,6 +2252,13 @@ export class FxTimeline {
               }
 
               this.sink.playKillConfirm?.();
+              if (killCamCue) {
+                if (this.killCam.impact(killCamCue)) {
+                  this.sink.playKillCamSting?.('HIT', killCamCue.tier);
+                  // Keep the renderer awake through the full cut so scorch decals finish cleanly.
+                  this.sink.onWake?.(5200);
+                }
+              }
 
               const unitName = UNIT_STATS[e.unitType]?.name ?? e.unitType;
               const isAce = safeRank >= 3;
@@ -1688,15 +2272,19 @@ export class FxTimeline {
               const subtext = isAce
                 ? `P${e.owner + 1} Ace ${unitName} · +€${VETERANCY_CONFIG.ACE_BOUNTY_GOLD} Bounty`
                 : `P${e.owner + 1} ${unitName} · ${killCauseSubtitle(e.cause)}`;
-              this.sink.showCallout?.({
-                id: `callout_${this.nextFxSeq++}`,
-                headline,
-                subtext,
-                accentPlayer: e.killerOwner ?? null,
-                tone: isAce ? 'ace' : 'kill',
-                priority: isAce ? 3 : 1,
-                durationMs: isAce ? 2000 : 1550,
-              });
+              // When the kill cam is active (both MICRO and CINEMATIC), its overlay already carries
+              // the headline — only fall back to TacticalBanner when the kill cam is disabled/reduced.
+              if (!killCamCue) {
+                this.sink.showCallout?.({
+                  id: `callout_${this.nextFxSeq++}`,
+                  headline,
+                  subtext,
+                  accentPlayer: e.killerOwner ?? null,
+                  tone: isAce ? 'ace' : 'kill',
+                  priority: isAce ? 3 : 1,
+                  durationMs: isAce ? 2000 : 1550,
+                });
+              }
             },
             'death-ghost-start',
           );
@@ -1798,10 +2386,25 @@ export class FxTimeline {
 
         case 'heist': {
           const atPx = tileCenterPx(e.at);
+          const heistCue = this.buildStructureCue(
+            'VAULT BREACHED',
+            `PLAYER ${e.playerId + 1} EMPTIED THE BANK`,
+            'BANK',
+            e.at,
+            e.playerId,
+            null,
+            0,
+          );
           this.schedule(0, () => {
+            if (heistCue) {
+              if (this.killCam.impact(heistCue)) {
+                this.sink.playKillCamSting?.('HIT', heistCue.tier);
+                this.sink.onWake?.(3400);
+              }
+            }
             this.sink.emitParticles?.({ preset: 'goldBurst', x: atPx.x, y: atPx.y, scale: 1.3 });
             this.sink.emitParticles?.({ preset: 'shockwaveRing', x: atPx.x, y: atPx.y, color: 0xFBBF24, scale: 1.15 });
-            this.sink.showCallout?.({
+            if (!heistCue) this.sink.showCallout?.({
               id: `callout_${this.nextFxSeq++}`,
               headline: 'VAULT BREACHED!',
               subtext: `Player ${e.playerId + 1} Raided the Bank`,

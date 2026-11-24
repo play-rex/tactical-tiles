@@ -1,7 +1,17 @@
 /** Wire types shared by the server and the web client. */
-import type { BuildingSubType, GameSettings, TerrainType } from './types';
+import type { BuildingSubType, GameSettings, TerrainType, Unit } from './types';
 import type { GameEvent } from './game/state';
 import type { PlayerGameView } from './game/view';
+
+/** Fog-honest record of one opponent action that occurred while this player was away. */
+export interface MissedActionBatch {
+  seq: number;
+  actorSeat: number;
+  round: number;
+  /** Visible units right before this action ran, so fast-forward recap never teleports sprites. */
+  preUnits: Unit[];
+  events: GameEvent[];
+}
 
 export const ROOM_NAME = 'table';
 export const MIN_PLAYERS = 2;
@@ -126,6 +136,8 @@ export interface TableView {
    * Empty on a resend of the same state (a reconnect, a seat change).
    */
   events: GameEvent[];
+  /** Fog-filtered opponent actions missed since the client's `lastSeq` (for While-You-Were-Away recap). */
+  missedActions?: MissedActionBatch[];
   /** Goes up with every game change, so a client can tell a new view from a resend. */
   seq: number;
 }

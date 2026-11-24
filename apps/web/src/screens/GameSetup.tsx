@@ -121,6 +121,7 @@ export const GameSetup: React.FC = () => {
   const openEditor = useGameStore(state => state.openEditor);
   const loadMapIntoEditor = useGameStore(state => state.loadMapIntoEditor);
   const openTutorial = useGameStore(state => state.openTutorial);
+  const openDevMaps = useGameStore(state => state.openDevMaps);
   const openOnline = useGameStore(state => state.openOnline);
   const setGameSettings = useGameStore(state => state.setGameSettings);
 
@@ -319,6 +320,9 @@ export const GameSetup: React.FC = () => {
               </GeoButton>
               <GeoButton variant="softBlue" onClick={openEditor} coreStyle={{ padding: '7px 14px' }}>
                 OPEN MAP EDITOR
+              </GeoButton>
+              <GeoButton onClick={openDevMaps} coreStyle={{ padding: '7px 14px' }} title="Sandbox: generate a board and test any event">
+                DEV MAP
               </GeoButton>
             </div>
           }

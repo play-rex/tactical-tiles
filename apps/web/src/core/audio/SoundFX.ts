@@ -25,6 +25,8 @@ const MUTE_STORAGE_KEY = 'tactical_tiles_muted';
 class SoundFXManager {
     private ctx: AudioContext | null = null;
     private masterIn: GainNode | null = null;
+    private compressorOut: DynamicsCompressorNode | null = null;
+    private captureDest: MediaStreamAudioDestinationNode | null = null;
     private reverbSend: GainNode | null = null;
     private whiteNoise: AudioBuffer | null = null;
     private pinkNoise: AudioBuffer | null = null;
@@ -71,6 +73,7 @@ class SoundFXManager {
         master.gain.setValueAtTime(0.95, ctx.currentTime);
         master.connect(compressor);
         compressor.connect(ctx.destination);
+        this.compressorOut = compressor;
         this.masterIn = master;
 
         // Synthesize realistic outdoor battlefield impulse response (early ground bounces + air decay)
@@ -782,6 +785,144 @@ class SoundFXManager {
             this.playFilteredNoise({
                 ctx, out, delay: 0.08, attack: 0.001, duration: 0.036,
                 filterType: 'bandpass', freqStart: 3600, freqEnd: 2400, q: 7.0, gain: 0.12,
+            });
+        } catch {
+            // Never disrupt gameplay
+        }
+    }
+
+    /**
+     * Exposes a live MediaStream audio tap from the master compressor so Play-of-the-Match WebM
+     * exports capture full procedural gunfire, blasts, and kill-cam stings.
+     */
+    public getAudioCaptureStream(): MediaStream | null {
+        try {
+            const bus = this.ensureAudio();
+            if (!bus || !this.compressorOut) return null;
+            if (typeof bus.ctx.createMediaStreamDestination !== 'function') return null;
+            if (!this.captureDest) {
+                this.captureDest = bus.ctx.createMediaStreamDestination();
+                this.compressorOut.connect(this.captureDest);
+            }
+            return this.captureDest.stream;
+        } catch {
+            return null;
+        }
+    }
+
+    /** Crisp metallic land-mine pressure-plate detent "*click*" right before detonation. */
+    public playMineClick(): void {
+        try {
+            const bus = this.ensureAudio();
+            if (!bus) return;
+            const { ctx, out } = bus;
+            // Tight mechanical pin snap
+            this.playFilteredNoise({
+                ctx, out, delay: 0, attack: 0.0005, duration: 0.018,
+                filterType: 'bandpass', freqStart: 5600, freqEnd: 3400, q: 9.0, gain: 0.24,
+            });
+            // Subtle spring latch ping 26ms later
+            this.playFilteredNoise({
+                ctx, out, delay: 0.026, attack: 0.0005, duration: 0.024,
+                filterType: 'bandpass', freqStart: 4200, freqEnd: 2900, q: 11.0, gain: 0.16,
+            });
+        } catch {
+            // Never disrupt gameplay
+        }
+    }
+
+    /** Brief comms-static glitch snap when an Overwatch ambusher breaks stealth. */
+    public playOverwatchStatic(): void {
+        try {
+            const bus = this.ensureAudio();
+            if (!bus) return;
+            const { ctx, out } = bus;
+            this.playFilteredNoise({
+                ctx, out, delay: 0, attack: 0.001, duration: 0.065,
+                filterType: 'bandpass', freqStart: 3100, freqEnd: 1650, q: 2.8, gain: 0.17, saturate: true,
+            });
+            this.playFilteredNoise({
+                ctx, out, delay: 0.032, attack: 0.001, duration: 0.03,
+                filterType: 'highpass', freqStart: 4800, freqEnd: 3200, q: 4.0, gain: 0.11,
+            });
+        } catch {
+            // Never disrupt gameplay
+        }
+    }
+
+    /** 1-HP Graze survival cue: metallic armor ricochet ping + damped double heartbeat thud. */
+    public playGrazeSurvive(): void {
+        try {
+            const bus = this.ensureAudio();
+            if (!bus) return;
+            const { ctx, out, reverb } = bus;
+            // High armor deflection ricochet ring
+            this.playPressurePunch({
+                ctx, out, reverb, reverbMix: 0.24,
+                delay: 0, freqStart: 2250, freqEnd: 940, duration: 0.12, gain: 0.14, type: 'triangle',
+            });
+            this.playFilteredNoise({
+                ctx, out, delay: 0, attack: 0.001, duration: 0.065,
+                filterType: 'bandpass', freqStart: 4400, freqEnd: 2600, q: 6.5, gain: 0.16,
+            });
+            // Damped heartbeat "lub-dub" confirming survival at 1 HP
+            this.playPressurePunch({
+                ctx, out, delay: 0.09, freqStart: 78, freqEnd: 38, duration: 0.09, gain: 0.34,
+            });
+            this.playPressurePunch({
+                ctx, out, delay: 0.24, freqStart: 68, freqEnd: 34, duration: 0.11, gain: 0.26,
+            });
+        } catch {
+            // Never disrupt gameplay
+        }
+    }
+
+    /**
+     * Cinematic kill-cam sting.
+     * `IN`  — a filtered riser + sub-tension swell matched to the real flight window (cuts ~45ms
+     *         before impact for a crisp inhale -> silence -> sub-drop curve).
+     * `HIT` — a saturated sub drop plus a metallic shell crack on impact.
+     * Non-lethal `ATTACK` micro-cams stay quiet so the weapon Foley owns them and real kills pop.
+     */
+    public playKillCamSting(
+        stage: 'IN' | 'HIT',
+        tier: 'ATTACK' | 'MICRO' | 'CINEMATIC' | 'STRUCTURE' = 'CINEMATIC',
+        flightRealMs?: number,
+    ): void {
+        if (tier === 'ATTACK') return;
+        try {
+            const bus = this.ensureAudio();
+            if (!bus) return;
+            const { ctx, out, reverb } = bus;
+            const weight = tier === 'MICRO' ? 0.55 : 1;
+
+            if (stage === 'IN') {
+                // Stretch the tension swell across the actual dilated flight, ducking right before impact.
+                const rawSec = (flightRealMs ?? 480) / 1000;
+                const swellSec = Math.max(0.16, Math.min(1.85, rawSec - 0.045));
+                this.playFilteredNoise({
+                    ctx, out, delay: 0, attack: Math.min(0.28, swellSec * 0.35), duration: swellSec,
+                    filterType: 'bandpass', freqStart: 320, freqEnd: 2600, q: 1.4, gain: 0.055 * weight,
+                });
+                this.playPressurePunch({
+                    ctx, out, reverb, reverbMix: 0.14,
+                    delay: 0, freqStart: 54, freqEnd: 122, duration: swellSec, gain: 0.075 * weight,
+                });
+                return;
+            }
+
+            this.playPressurePunch({
+                ctx, out, reverb, reverbMix: 0.34,
+                delay: 0, freqStart: 134, freqEnd: 28, duration: 0.34, gain: 0.4 * weight,
+            });
+            this.playFilteredNoise({
+                ctx, out, reverb, reverbMix: 0.3, pink: true,
+                delay: 0, attack: 0.001, duration: 0.26,
+                filterType: 'lowpass', freqStart: 2400, freqEnd: 140, q: 0.9, gain: 0.22 * weight, saturate: true,
+            });
+            this.playFilteredNoise({
+                ctx, out, delay: 0.008, attack: 0.001, duration: 0.09,
+                filterType: 'highpass', freqStart: 5200, freqEnd: 2400, q: 1.0, gain: 0.12 * weight,
             });
         } catch {
             // Never disrupt gameplay

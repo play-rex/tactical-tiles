@@ -7,8 +7,10 @@ import {
   eventsFor,
   getAttackBlocker,
   getCrossfireSupporters,
+  getSpawnTiles,
   getSupplyDropTargets,
   prepareAction,
+  spawnUnitsForPlayers,
   viewFor,
   visibleSet,
   DEFAULT_GAME_SETTINGS,
@@ -978,4 +980,159 @@ test('HARD AI skips a second tunnel next to an open lane, but still breaches dou
   const second = botAction(thick, 'HARD');
   assert.equal(second.type, 'BUILD');
   assert.equal((second as { itemKey: string }).itemKey, 'TUNNEL');
+});
+
+test('units cannot move onto, pass through, or spawn on Bank, Base, or Barrier tiles', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'NOSTND', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => {
+    if (t.id === '2,2') return { ...t, type: 'BASE' as const, owner: 0, hp: 50, maxHp: 50, hazardState: undefined };
+    if (t.id === '2,3') return { ...t, type: 'BANK' as const, hp: 15, maxHp: 15, hackProgress: 0, hazardState: undefined };
+    if (t.id === '3,2') return { ...t, type: 'BANK' as const, hp: 0, maxHp: 15, hackProgress: 100, hazardState: undefined };
+    if (t.id === '4,3') return { ...t, type: 'BARRIER' as const, hp: 10, maxHp: 10, hazardState: undefined };
+    if (t.id === '5,3') return { ...t, type: 'BASE' as const, owner: 1, hp: 50, maxHp: 50, hazardState: undefined };
+    return { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined };
+  });
+
+  const scout = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '3,3', completed: false, hasMoved: false };
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [scout],
+    graveyard: [{ id: 'dead_sc', type: 'SOLDIER', owner: 0, turnsUntilRespawn: 0 }],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerGold: { 0: 500, 1: 500 },
+    playerRespawns: { 0: 0, 1: 0 },
+  };
+
+  for (const blockedId of ['2,2', '2,3', '3,2', '4,3', '5,3']) {
+    const t = map.find(x => x.id === blockedId)!;
+    assert.equal(getStepCost(t, 'SOLDIER', 0, state.weather, 0), null, `${t.type} at ${blockedId} is impassable`);
+    assert.equal(moveCostsFor(state, scout).has(blockedId), false, `moveCostsFor excludes ${t.type} at ${blockedId}`);
+    assert.equal(prepareAction(state, 0, { type: 'MOVE', unitId: scout.id, targetTileId: blockedId, cost: 0 }).ok, false);
+  }
+
+  // Corridors blocked by Bank/Base/Barrier cannot be stepped through (even if surrounded by PLAINS)
+  const spawnTiles = getSpawnTiles(state, 0);
+  assert.equal(spawnTiles.includes('2,2'), false, 'spawn tiles exclude Base');
+  assert.equal(spawnTiles.includes('2,3'), false, 'spawn tiles exclude active Bank');
+  assert.equal(spawnTiles.includes('3,2'), false, 'spawn tiles exclude breached Bank');
+  for (const badSpawn of ['2,2', '2,3', '3,2']) {
+    assert.equal(
+      prepareAction(state, 0, { type: 'SPAWN', unitType: 'SOLDIER', tileId: badSpawn, cost: 0, goldCost: 50, deadUnitId: 'dead_sc' }).ok,
+      false,
+    );
+    assert.ok(
+      applyAction(state, { type: 'SPAWN', unitType: 'SOLDIER', tileId: badSpawn, cost: 0, goldCost: 50, deadUnitId: 'dead_sc' }).rejected,
+    );
+  }
+
+  // Initial squad spawning also skips Base, Bank, and Barrier tiles
+  const startingUnits = spawnUnitsForPlayers(
+    map,
+    { SOLDIER: 3, ASSAULTER: 2, SNIPER: 1 },
+    [{ x: 2, y: 2, owner: 0 }],
+  );
+  for (const u of startingUnits) {
+    const t = map.find(x => x.id === u.tileId)!;
+    assert.notEqual(t.type, 'BASE');
+    assert.notEqual(t.type, 'BANK');
+    assert.notEqual(t.type, 'BARRIER');
+  }
+});
+
+test('ATTACK emits DamageBreakdown, zeroCpClutch, victimPreHp, and isMatchWinning, and eventsFor redacts hidden shooters', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'BRKDWN', fogOfWar: true, victoryMode: 'DEATHMATCH', playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => {
+    if (t.id === '3,3') return { ...t, type: 'BUILDING' as const, subType: 'WATCHTOWER' as const, owner: 0, height: 2, hazardState: undefined };
+    if (t.id === '3,7') return { ...t, type: 'FOREST' as const, subType: undefined, owner: undefined, height: 1, hazardState: undefined };
+    return { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, height: 1, hazardState: undefined };
+  });
+  const sniper: Unit = {
+    ...base.units.find(u => u.owner === 0 && u.type === 'SNIPER')!,
+    id: 'p0_sniper',
+    tileId: '3,3',
+    hp: 15,
+    maxHp: 15,
+    ammo: 3,
+    maxAmmo: 3,
+    hasMoved: false,
+    completed: false,
+    rank: 0,
+  };
+  const ally: Unit = {
+    ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!,
+    id: 'p0_ally',
+    tileId: '4,7',
+    hp: 15,
+    maxHp: 15,
+    ammo: 4,
+    maxAmmo: 4,
+    hasMoved: false,
+    completed: false,
+    rank: 0,
+  };
+  const victim: Unit = {
+    ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!,
+    id: 'p1_victim',
+    tileId: '3,7',
+    hp: 6,
+    maxHp: 15,
+    ammo: 4,
+    maxAmmo: 4,
+    hasMoved: false,
+    completed: false,
+    rank: 0,
+  };
+  const attackCost = getUnitAttackCost(sniper);
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [sniper, ally, victim],
+    currentPlayer: 0,
+    playerCp: { 0: attackCost, 1: 10 },
+    playerGold: { 0: 100, 1: 0 },
+    playerRespawns: { 0: 0, 1: 99 },
+  };
+
+  const res = applyAction(state, { type: 'ATTACK', attackerId: sniper.id, targetUnitId: victim.id, cost: attackCost });
+  assert.equal(res.rejected, undefined);
+  assert.equal(res.state.winner, 0);
+
+  const hitEv = res.events.find((e): e is Extract<typeof e, { kind: 'hit' }> => e.kind === 'hit');
+  const killEv = res.events.find((e): e is Extract<typeof e, { kind: 'killed' }> => e.kind === 'killed');
+  assert.ok(hitEv?.breakdown, 'hit event carries deterministic DamageBreakdown');
+  assert.equal(hitEv!.breakdown!.watchtowerBoosted, true);
+  assert.equal(hitEv!.breakdown!.coverTerrain, 'FOREST');
+  assert.ok(hitEv!.breakdown!.coverPct > 0);
+  assert.ok(hitEv!.breakdown!.crossfireBonus > 0);
+
+  assert.ok(killEv, 'kill event emitted');
+  assert.equal(killEv!.killerUnitId, sniper.id);
+  assert.equal(killEv!.killerUnitType, 'SNIPER');
+  assert.equal(killEv!.victimPreHp, 6);
+  assert.equal(killEv!.zeroCpClutch, true, 'spending last CP on a kill flags zeroCpClutch');
+  assert.equal(killEv!.isMatchWinning, true, 'eliminating final enemy flags isMatchWinning');
+
+  // Under Fog of War, a viewer who only sees the victim tile (3,7) and NOT the watchtower sniper (3,3)
+  // must NOT be leaked `from`, `watchtowerBoosted`, `killerUnitId`, or `killerUnitType`.
+  const onlyTargetSight = new Set(['3,7']);
+  const fogged = eventsFor(res.events, true, onlyTargetSight, onlyTargetSight);
+  const fogHit = fogged.find((e): e is Extract<typeof e, { kind: 'hit' }> => e.kind === 'hit');
+  const fogKill = fogged.find((e): e is Extract<typeof e, { kind: 'killed' }> => e.kind === 'killed');
+  assert.equal(fogHit?.from, undefined, 'unseen attacker origin stripped');
+  assert.equal(fogHit?.breakdown?.watchtowerBoosted, false, 'unseen watchtower bonus redacted under fog');
+  assert.equal(fogKill?.killerUnitId, undefined, 'unseen killerUnitId redacted under fog');
+  assert.equal(fogKill?.killerUnitType, undefined, 'unseen killerUnitType redacted under fog');
+  assert.equal(fogKill?.isMatchWinning, true, 'match-winning flag stays intact');
+
+  // When the attacker origin IS visible, all metadata survives intact.
+  const fullSight = new Set(['3,3', '3,7', '4,7']);
+  const visible = eventsFor(res.events, true, fullSight, fullSight);
+  const visHit = visible.find((e): e is Extract<typeof e, { kind: 'hit' }> => e.kind === 'hit');
+  const visKill = visible.find((e): e is Extract<typeof e, { kind: 'killed' }> => e.kind === 'killed');
+  assert.deepEqual(visHit?.from, { x: 3, y: 3 });
+  assert.equal(visHit?.breakdown?.watchtowerBoosted, true);
+  assert.equal(visKill?.killerUnitId, sniper.id);
+  assert.equal(visKill?.killerUnitType, 'SNIPER');
 });

@@ -16,10 +16,39 @@ import {
   type TileEffectRequest,
 } from '../core/graphics/fxTimeline';
 import { SoundFX } from '../core/audio/SoundFX';
+import type { KillCamMode } from '../core/graphics/killCam';
 
 export type FxMode = 'ECO' | 'LIVE';
 
 const FX_MODE_STORAGE_KEY = 'tactical_tiles_fx_mode';
+const KILL_CAM_MODE_STORAGE_KEY = 'tactical_tiles_killcam_mode';
+
+const readSavedKillCamMode = (): KillCamMode => {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(KILL_CAM_MODE_STORAGE_KEY);
+      if (raw === 'FULL' || raw === 'SHORT' || raw === 'OFF') {
+        return raw;
+      }
+    }
+  } catch {
+    // Ignore storage unavailability
+  }
+  return 'FULL';
+};
+
+const saveKillCamMode = (mode: KillCamMode): void => {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(KILL_CAM_MODE_STORAGE_KEY, mode);
+    }
+  } catch {
+    // Ignore storage quota or private browsing errors
+  }
+};
+
+const initialKillCamMode = readSavedKillCamMode();
+fxTimeline.setKillCamMode(initialKillCamMode);
 
 const readSavedFxMode = (): FxMode => {
   try {
@@ -101,9 +130,14 @@ interface EffectStore {
   promotionBursts: PromotionBurst[];
   activeCallout: TacticalCallout | null;
   fxMode: FxMode;
+  killCamMode: KillCamMode;
+  /** Live boolean synced on `IDLE <-> ACTIVE` transitions (used to defer modals without per-frame re-renders). */
+  killCamActive: boolean;
 
   toggleFxMode: () => void;
   setFxMode: (mode: FxMode) => void;
+  cycleKillCamMode: () => void;
+  setKillCamMode: (mode: KillCamMode) => void;
 
   spawnPopup: (popup: PopupSpawnRequest) => void;
   addDamagePopup: (x: number, y: number, value: string, color?: string) => void;
@@ -155,6 +189,8 @@ export const useEffectStore = create<EffectStore>((set, get) => ({
   promotionBursts: [],
   activeCallout: null,
   fxMode: readSavedFxMode(),
+  killCamMode: initialKillCamMode,
+  killCamActive: fxTimeline.isKillCamActive(),
 
   toggleFxMode: () =>
     set(state => {
@@ -165,6 +201,18 @@ export const useEffectStore = create<EffectStore>((set, get) => ({
   setFxMode: (mode) => {
     saveFxMode(mode);
     set({ fxMode: mode });
+  },
+  cycleKillCamMode: () => {
+    const cur = get().killCamMode;
+    const next: KillCamMode = cur === 'FULL' ? 'SHORT' : cur === 'SHORT' ? 'OFF' : 'FULL';
+    saveKillCamMode(next);
+    fxTimeline.setKillCamMode(next);
+    set({ killCamMode: next });
+  },
+  setKillCamMode: (mode) => {
+    saveKillCamMode(mode);
+    fxTimeline.setKillCamMode(mode);
+    set({ killCamMode: mode });
   },
 
   spawnProjectile: (proj) => {
@@ -319,6 +367,9 @@ export const useEffectStore = create<EffectStore>((set, get) => ({
   },
 
   clearAllFx: () => {
+    // Match-scoped: only match start / reset / exit reach here, so the first-breach milestones
+    // can be re-armed here and nowhere else.
+    fxTimeline.resetMatchMemory();
     fxTimeline.clear();
   },
 }));
@@ -383,6 +434,10 @@ fxTimeline.configure({
     }
   },
   playKillConfirm: () => SoundFX.playKillConfirm(),
+  playKillCamSting: (stage, tier, flightRealMs) => SoundFX.playKillCamSting(stage, tier, flightRealMs),
+  playMineClick: () => SoundFX.playMineClick(),
+  playOverwatchStatic: () => SoundFX.playOverwatchStatic(),
+  playGrazeSurvive: () => SoundFX.playGrazeSurvive(),
   spawnProjectile: (proj) => useEffectStore.getState().spawnProjectile(proj),
   removeProjectile: (id) => useEffectStore.getState().removeProjectile(id),
   spawnCrossfire: (lock) => useEffectStore.getState().spawnCrossfire(lock),
@@ -431,4 +486,10 @@ fxTimeline.configure({
       });
     }
   },
+});
+
+fxTimeline.subscribeKillCamActive((active) => {
+  if (useEffectStore.getState().killCamActive !== active) {
+    useEffectStore.setState({ killCamActive: active });
+  }
 });

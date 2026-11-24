@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { isUnitVisible } from '@tactical/engine';
 import { useGameStore, viewerSeat } from '../../store/useGameStore';
+import { useEffectStore } from '../../store/useEffectStore';
 import { useOnline } from '../../net/useOnline';
 import { useCopyState } from '../../hooks/useCopyState';
 import { getHoverMoveResolution, computeUnitAttackPreview, getHoveredEnemyBlocker } from '../../core/hoverMovePreview';
@@ -36,6 +37,8 @@ import {
 } from '@tactical/engine/rules/CombatRules';
 import { GeoButton, GeoCard, GeoChip, GeoWell, PLAYER_UI_THEME, playerDisplayName } from './GeoPrimitives';
 import { ActiveTurnClock } from '../game/ui/TurnClock';
+import { highlightRecorder } from '../../core/graphics/highlightRecorder';
+import { recapPlayer } from '../../core/graphics/recapPlayer';
 
 /**
  * How loudly a log line is shown: the turn passing is a divider, routine moves and purchases
@@ -800,8 +803,13 @@ export const BankRewardModal: React.FC = () => {
   const mapData = useGameStore(state => state.mapData);
   const gridSize = useGameStore(state => state.gridSize);
   const mutators = useGameStore(state => state.settings.mutators);
+  const killCamActive = useEffectStore(state => state.killCamActive);
+  const [recapActive, setRecapActive] = useState(() => recapPlayer.isActive());
 
-  if (!bankRewardPending || bankRewardPending.playerId !== currentPlayer) return null;
+  useEffect(() => recapPlayer.subscribe(s => setRecapActive(s.active)), []);
+
+  // Let the VAULT BREACHED cut or reconnect Turn Recap finish before presenting the reward picker.
+  if (killCamActive || recapActive || !bankRewardPending || bankRewardPending.playerId !== currentPlayer) return null;
   const bankTile = getTileByIdFast(mapData, bankRewardPending.tileId, gridSize);
   const { gold: goldReward, cp: cpReward } = getEffectiveBankRewards(bankTile, mutators);
 
@@ -1519,6 +1527,8 @@ export const WinnerOverlay: React.FC = () => {
   const winner = useGameStore(state => state.winner);
   const resetGame = useGameStore(state => state.resetGame);
   const retryCurrentMatch = useGameStore(state => state.retryCurrentMatch);
+  const playPlayOfTheMatch = useGameStore(state => state.playPlayOfTheMatch);
+  const exportPlayOfTheMatch = useGameStore(state => state.exportPlayOfTheMatch);
   const victoryMode = useGameStore(state => state.settings.victoryMode);
   const matchSummary = useGameStore(state => state.matchSummary);
   const activeSeed = useGameStore(state => state.activeSeed);
@@ -1527,17 +1537,34 @@ export const WinnerOverlay: React.FC = () => {
   const mySeat = useGameStore(state => state.mySeat);
   const onlineView = useOnline(state => state.view);
   const rematch = useOnline(state => state.rematch);
+  const killCamActive = useEffectStore(state => state.killCamActive);
+  const localNames = useGameStore(state => state.settings.playerNames);
+  const [recapActive, setRecapActive] = useState(() => recapPlayer.isActive());
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
 
-  if (winner === null) return null;
+  useEffect(() => recapPlayer.subscribe(s => setRecapActive(s.active)), []);
+
+  // Let the final HQ destruction / match-winning kill cam or POTM replay finish before showing the scoreboard.
+  if (winner === null || killCamActive || recapActive) return null;
   const online = mode === 'ONLINE';
   const isDraw = winner === 'DRAW';
   const isHost = Boolean(onlineView?.seats[mySeat]?.isHost);
-  const localNames = useGameStore(state => state.settings.playerNames);
   const winnerName = isDraw
     ? 'Nobody'
     : playerDisplayName(winner, localNames, online ? onlineView?.seats[winner]?.name : undefined);
   const seedValue = matchSummary?.seed || activeSeed;
   const pTheme = (!isDraw && PLAYER_UI_THEME[winner as number]) || PLAYER_UI_THEME[0];
+  const highlight = highlightRecorder.getBest();
+
+  const handleExport = async () => {
+    if (exportStatus) return;
+    setExportStatus('RECORDING…');
+    const result = await exportPlayOfTheMatch(msg => setExportStatus(msg));
+    setExportStatus(
+      result === 'webm' ? 'CLIP SAVED (.WEBM)' : result === 'png' ? 'CARD SAVED (.PNG)' : 'UNAVAILABLE',
+    );
+    setTimeout(() => setExportStatus(null), 2400);
+  };
 
   return (
     <div
@@ -1587,6 +1614,36 @@ export const WinnerOverlay: React.FC = () => {
 
           {matchSummary && (
             <MatchScorecardSummary matchSummary={matchSummary} winner={winner} seedValue={seedValue} />
+          )}
+
+          {highlight && (
+            <GeoWell coreStyle={{ padding: '9px 11px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', fontWeight: 900 }}>
+                <span style={{ color: 'var(--acc-amber-ink)', letterSpacing: '0.12em' }}>★ PLAY OF THE MATCH</span>
+                <span style={{ color: 'var(--op-ink-muted)', fontFamily: 'monospace' }}>
+                  TURN {highlight.turn} · {highlight.headline}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <GeoButton
+                  variant="softAmber"
+                  fullWidth
+                  onClick={() => playPlayOfTheMatch()}
+                  coreStyle={{ padding: '8px 10px', fontSize: '12px' }}
+                >
+                  ▶ REPLAY HIGHLIGHT
+                </GeoButton>
+                <GeoButton
+                  variant="softBlue"
+                  fullWidth
+                  onClick={() => void handleExport()}
+                  disabled={Boolean(exportStatus)}
+                  coreStyle={{ padding: '8px 10px', fontSize: '12px' }}
+                >
+                  {exportStatus ?? '⬇ EXPORT CLIP'}
+                </GeoButton>
+              </div>
+            </GeoWell>
           )}
 
           {online ? (

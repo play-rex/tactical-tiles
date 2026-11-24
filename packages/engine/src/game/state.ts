@@ -16,6 +16,7 @@ import type {
   MatchSummary,
   MissionConfig,
   PendingDrop,
+  TerrainType,
   Tile,
   Unit,
   UnitType,
@@ -95,6 +96,19 @@ export type WeaponVisual = 'SOLDIER' | 'ASSAULTER' | 'SNIPER' | 'TURRET' | 'ARTI
 
 export type KillCause = 'COMBAT' | 'OVERWATCH' | 'MINE' | 'TURRET' | 'ARTILLERY' | 'LAVA' | 'BASE_FALL';
 
+/** Deterministic damage decomposition carried on combat hits for the Tactical Receipt. */
+export interface DamageBreakdown {
+  baseDamage: number;
+  watchtowerBoosted: boolean;
+  /** Terrain defense fraction (e.g. 0.4 for Forest, -0.1 for exposed Sand). */
+  coverPct: number;
+  coverTerrain?: TerrainType;
+  /** True when Elite Breacher cover armor (-2 DMG) reduced the hit. */
+  coverArmorApplied: boolean;
+  crossfireBonus: number;
+  isOverwatch?: boolean;
+}
+
 /**
  * What an action looked and sounded like, for the client to play back. Positions are tile
  * coordinates, so the server can leave out what a player can't see.
@@ -127,6 +141,7 @@ export type GameEvent =
       isCrit?: boolean;
       suppressed?: boolean;
       crossfireFrom?: TilePoint[];
+      breakdown?: DamageBreakdown;
       delayMs?: number;
     }
   | {
@@ -137,6 +152,11 @@ export type GameEvent =
       rank: number;
       at: TilePoint;
       killerOwner?: number;
+      killerUnitId?: string;
+      killerUnitType?: UnitType;
+      victimPreHp?: number;
+      zeroCpClutch?: boolean;
+      isMatchWinning?: boolean;
       cause: KillCause;
       delayMs?: number;
     }
@@ -156,6 +176,7 @@ export type GameEvent =
       destroyed: boolean;
       owner?: number | null;
       attackerOwner?: number;
+      isMatchWinning?: boolean;
       delayMs?: number;
     }
   | { kind: 'heist'; at: TilePoint; playerId: number }
