@@ -44,7 +44,7 @@ export const DEFAULT_MAP_GEN_KNOBS: MapGenKnobs = {
   mountainPct: 12,
   desertPct: 0,
   buildingPct: 4,
-  lootPct: 4,
+  lootPct: 0,
   banks: 2,
   roads: true,
   symmetry: 'ORGANIC',
@@ -78,7 +78,7 @@ export const MAP_GEN_PRESETS: readonly MapPresetMeta[] = [
       mountainPct: 12,
       desertPct: 0,
       buildingPct: 4,
-      lootPct: 4,
+      lootPct: 0,
       banks: 2,
       roads: true,
       symmetry: 'ORGANIC',
@@ -99,7 +99,7 @@ export const MAP_GEN_PRESETS: readonly MapPresetMeta[] = [
       mountainPct: 14,
       desertPct: 0,
       buildingPct: 3,
-      lootPct: 8,
+      lootPct: 0,
       banks: 2,
       roads: true,
       symmetry: 'ORGANIC',
@@ -120,7 +120,7 @@ export const MAP_GEN_PRESETS: readonly MapPresetMeta[] = [
       mountainPct: 8,
       desertPct: 0,
       buildingPct: 3,
-      lootPct: 8,
+      lootPct: 0,
       banks: 2,
       roads: false,
       symmetry: 'ORGANIC',
@@ -141,7 +141,7 @@ export const MAP_GEN_PRESETS: readonly MapPresetMeta[] = [
       mountainPct: 20,
       desertPct: 85,
       buildingPct: 5,
-      lootPct: 6,
+      lootPct: 0,
       banks: 2,
       roads: false,
       symmetry: 'ORGANIC',
@@ -162,7 +162,7 @@ export const MAP_GEN_PRESETS: readonly MapPresetMeta[] = [
       mountainPct: 28,
       desertPct: 0,
       buildingPct: 10,
-      lootPct: 2,
+      lootPct: 0,
       banks: 1,
       roads: true,
       symmetry: 'ORGANIC',
@@ -183,7 +183,7 @@ export const MAP_GEN_PRESETS: readonly MapPresetMeta[] = [
       mountainPct: 12,
       desertPct: 50,
       buildingPct: 4,
-      lootPct: 4,
+      lootPct: 0,
       banks: 2,
       roads: true,
       symmetry: 'ORGANIC',
@@ -204,7 +204,7 @@ export const MAP_GEN_PRESETS: readonly MapPresetMeta[] = [
       mountainPct: 16,
       desertPct: 0,
       buildingPct: 4,
-      lootPct: 6,
+      lootPct: 0,
       banks: 2,
       roads: false,
       symmetry: 'ORGANIC',
@@ -225,7 +225,7 @@ export const MAP_GEN_PRESETS: readonly MapPresetMeta[] = [
       mountainPct: 4,
       desertPct: 10,
       buildingPct: 2,
-      lootPct: 8,
+      lootPct: 0,
       banks: 2,
       roads: true,
       symmetry: 'ORGANIC',
@@ -371,7 +371,7 @@ export const rollWildcardKnobs = (rng: () => number = Math.random): MapGenKnobs 
     mountainPct: 6 + Math.floor(rng() * 24),
     desertPct,
     buildingPct: 2 + Math.floor(rng() * 8),
-    lootPct: Math.floor(rng() * 15),
+    lootPct: 0,
     banks: 1 + Math.floor(rng() * 3),
     roads: waterStyle !== 'ISLANDS' && rng() < 0.75,
     symmetry: rng() < 0.35 ? 'MIRRORED' : 'ORGANIC',
@@ -536,6 +536,163 @@ const makeValueNoise = (seedText: string) => {
   };
   return (x: number, y: number): number =>
     sample(x, y) * 0.62 + sample(x * 2.05 + 17.3, y * 2.05 - 9.1) * 0.38;
+};
+
+/**
+ * Places exactly 1 starting supply crate per player (2 for 2P, 4 for 4P, etc.) at equal
+ * Manhattan distance from each player's HQ with the same opening item type (`AMMO` or `FIRST_AID`).
+ * Supports exact 180° symmetry in mirrored 2P/4P matches.
+ */
+export const placeFairStartingLoot = (
+  map: Tile[],
+  size: number,
+  baseLocations: ReadonlyArray<{ x: number; y: number; owner: number }>,
+  rng: () => number,
+  mirrored = false,
+): Tile[] => {
+  if (baseLocations.length === 0) return [];
+  const at = (x: number, y: number): Tile | null =>
+    x >= 0 && y >= 0 && x < size && y < size ? map[y * size + x] : null;
+  const dist = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+    Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  const center = (size - 1) / 2;
+
+  // Reachability BFS from HQ 0 so crates never spawn on isolated slivers
+  const reachable = new Set<string>();
+  const queue: Tile[] = [];
+  for (const [dx, dy] of DIRS_4) {
+    const nb = at(baseLocations[0].x + dx, baseLocations[0].y + dy);
+    if (nb && isFootPassable(nb)) {
+      reachable.add(nb.id);
+      queue.push(nb);
+    }
+  }
+  let head = 0;
+  while (head < queue.length) {
+    const cur = queue[head++];
+    for (const [dx, dy] of DIRS_4) {
+      const nb = at(cur.x + dx, cur.y + dy);
+      if (!nb || reachable.has(nb.id) || !isFootPassable(nb)) continue;
+      reachable.add(nb.id);
+      queue.push(nb);
+    }
+  }
+
+  const isEligible = (t: Tile | null): t is Tile =>
+    !!t &&
+    (t.type === 'PLAINS' || t.type === 'SAND' || t.type === 'FOREST' || t.type === 'ROAD' || t.type === 'ROAD_H') &&
+    !t.loot &&
+    reachable.has(t.id) &&
+    baseLocations.every(b => Math.abs(t.x - b.x) > 2 || Math.abs(t.y - b.y) > 2);
+
+  // Shared opening crate item so no side gets an unfair RNG advantage on Turn 1
+  const sharedItem: SupplyLootType = rng() < 0.55 ? 'AMMO' : 'FIRST_AID';
+  const idealDist = Math.max(4, Math.round(size * 0.30));
+  const placed: Tile[] = [];
+
+  // Partition eligible tiles by closest HQ (Voronoi sector)
+  const sectorMap = new Map<number, Tile[]>();
+  for (const b of baseLocations) sectorMap.set(b.owner, []);
+  for (const t of map) {
+    if (!isEligible(t)) continue;
+    let closestOwner = baseLocations[0].owner;
+    let minD = Infinity;
+    for (const b of baseLocations) {
+      const d = dist(t, b);
+      if (d < minD) {
+        minD = d;
+        closestOwner = b.owner;
+      }
+    }
+    sectorMap.get(closestOwner)?.push(t);
+  }
+
+  const canMirror = mirrored && (baseLocations.length === 2 || baseLocations.length === 4);
+  if (canMirror) {
+    const pairs: Array<[number, number]> = baseLocations.length === 2 ? [[0, 1]] : [[0, 1], [2, 3]];
+    for (const [aIdx, bIdx] of pairs) {
+      const baseA = baseLocations[aIdx];
+      const baseB = baseLocations[bIdx];
+      if (!baseA || !baseB) continue;
+      const bucket = sectorMap.get(baseA.owner) ?? [];
+      const best = bucket
+        .filter(t => {
+          if (!isEligible(t)) return false;
+          const mt = at(size - 1 - t.x, size - 1 - t.y);
+          if (!isEligible(mt) || mt.id === t.id) return false;
+          return dist(t, baseA) === dist(mt, baseB) && placed.every(p => dist(t, p) >= 3 && dist(mt, p) >= 3);
+        })
+        .map(t => ({
+          t,
+          score:
+            -Math.abs(dist(t, baseA) - idealDist) * 3.0 -
+            Math.hypot(t.x - center, t.y - center) * 0.25 +
+            (t.type === 'PLAINS' || t.type === 'SAND' ? 1.0 : 0) +
+            rng() * 0.6,
+        }))
+        .sort((a, b) => b.score - a.score)[0];
+
+      if (best) {
+        const mt = at(size - 1 - best.t.x, size - 1 - best.t.y)!;
+        best.t.loot = sharedItem;
+        mt.loot = sharedItem;
+        placed.push(best.t, mt);
+      }
+    }
+    if (placed.length === baseLocations.length) return placed;
+  }
+
+  // Organic equal-distance selection: search outward from idealDist for an exact shared Manhattan distance
+  const distOrder: number[] = [idealDist];
+  for (let delta = 1; delta < size; delta++) {
+    if (idealDist - delta >= 3) distOrder.push(idealDist - delta);
+    if (idealDist + delta <= size - 2) distOrder.push(idealDist + delta);
+  }
+
+  let sharedDist: number | null = null;
+  for (const d of distOrder) {
+    const allHave = baseLocations.every(b =>
+      (sectorMap.get(b.owner) ?? []).some(t => isEligible(t) && dist(t, b) === d),
+    );
+    if (allHave) {
+      sharedDist = d;
+      break;
+    }
+  }
+
+  for (const b of baseLocations) {
+    // Skip seats already filled by partial mirror pass
+    if (placed.some(p => {
+      let closestOwner = baseLocations[0].owner;
+      let minD = Infinity;
+      for (const other of baseLocations) {
+        const d = dist(p, other);
+        if (d < minD) { minD = d; closestOwner = other.owner; }
+      }
+      return closestOwner === b.owner;
+    })) {
+      continue;
+    }
+    const bucket = (sectorMap.get(b.owner) ?? []).filter(isEligible);
+    const pool = sharedDist !== null ? bucket.filter(t => dist(t, b) === sharedDist) : bucket;
+    const candidates = (pool.length > 0 ? pool : bucket)
+      .map(t => ({
+        t,
+        score:
+          -Math.abs(dist(t, b) - (sharedDist ?? idealDist)) * 3.0 -
+          Math.hypot(t.x - center, t.y - center) * 0.25 +
+          (t.type === 'PLAINS' || t.type === 'SAND' ? 1.0 : 0) +
+          (placed.some(p => dist(t, p) < 3) ? -10 : 0) +
+          rng() * 0.6,
+      }))
+      .sort((a, b) => b.score - a.score);
+    if (candidates[0]) {
+      candidates[0].t.loot = sharedItem;
+      placed.push(candidates[0].t);
+    }
+  }
+
+  return placed;
 };
 
 /**
@@ -1257,36 +1414,7 @@ export const generateConfiguredMap = (
     }
   }
 
-  // ── 12. Loose Supply Loot on reachable open land
-  const lootTarget = Math.round((totalTiles * knobs.lootPct) / 100);
-  if (lootTarget > 0) {
-    const lootEligible = map.filter(
-      t =>
-        (t.type === 'PLAINS' || t.type === 'SAND' || t.type === 'FOREST') &&
-        !inBasePlaza(t.x, t.y, 2) &&
-        !t.loot &&
-        reachableIds.has(t.id),
-    );
-    shuffle(lootEligible);
-    let placedLoot = 0;
-    for (const t of lootEligible) {
-      if (placedLoot >= lootTarget) break;
-      if (t.loot) continue;
-      const item = LOOT_TYPES[Math.floor(rng() * LOOT_TYPES.length)];
-      if (mirrored) {
-        const mt = mirrorOf(t);
-        if (mt.loot || !isFootPassable(mt) || inBasePlaza(mt.x, mt.y, 2)) continue;
-        t.loot = item;
-        mt.loot = item;
-        placedLoot += mt.id === t.id ? 1 : 2;
-      } else {
-        t.loot = item;
-        placedLoot++;
-      }
-    }
-  }
-
-  // ── 13. Final anchor check: guarantee every HQ and Bank is reachable on foot
+  // ── 12. Final anchor check: guarantee every HQ and Bank is reachable on foot
   const allAnchors = [...slots, ...bankList.map(b => ({ x: b.x, y: b.y }))];
   placeEdgeAwareBridges(map, size, {
     maxSpan: 6,
@@ -1306,6 +1434,38 @@ export const generateConfiguredMap = (
       if (nb && (nb.type === 'WATER' || nb.type === 'CANYON' || nb.type === 'MOUNTAIN')) {
         nb.type = baseGroundAt(nb.x, nb.y);
         nb.height = 1;
+      }
+    }
+  }
+
+  // ── 13. Fair starting loot (1 equal-distance crate per player) + optional extra loose loot
+  placeFairStartingLoot(map, size, baseLocations, rng, mirrored);
+
+  const extraLootTarget = Math.round((totalTiles * knobs.lootPct) / 100);
+  if (extraLootTarget > 0) {
+    const finalReachable = reachableFromHq0();
+    const lootEligible = map.filter(
+      t =>
+        (t.type === 'PLAINS' || t.type === 'SAND' || t.type === 'FOREST') &&
+        !inBasePlaza(t.x, t.y, 2) &&
+        !t.loot &&
+        finalReachable.has(t.id),
+    );
+    shuffle(lootEligible);
+    let placedLoot = 0;
+    for (const t of lootEligible) {
+      if (placedLoot >= extraLootTarget) break;
+      if (t.loot) continue;
+      const item = LOOT_TYPES[Math.floor(rng() * LOOT_TYPES.length)];
+      if (mirrored) {
+        const mt = mirrorOf(t);
+        if (mt.loot || !isFootPassable(mt) || inBasePlaza(mt.x, mt.y, 2)) continue;
+        t.loot = item;
+        mt.loot = item;
+        placedLoot += mt.id === t.id ? 1 : 2;
+      } else {
+        t.loot = item;
+        placedLoot++;
       }
     }
   }

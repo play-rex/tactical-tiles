@@ -222,3 +222,36 @@ test('createGeneratedGame honors mapGen presets, manual grid size, and static ar
     assert.equal(allAnchorsReachable(g.mapData, g.gridSize), true);
   }
 });
+
+test('all default presets start with exactly 1 fair crate per player at equal HQ distance', () => {
+  for (const preset of MAP_GEN_PRESETS) {
+    for (const playerCount of [2, 4]) {
+      const game = createGeneratedGame({
+        ...DEFAULT_GAME_SETTINGS,
+        playerCount,
+        mapSeed: `FAIR${playerCount}`,
+        mapGen: { preset: preset.id },
+      });
+      const lootTiles = game.mapData.filter(t => Boolean(t.loot));
+      assert.equal(
+        lootTiles.length,
+        playerCount,
+        `${preset.id} ${playerCount}P must spawn exactly ${playerCount} starting crates (got ${lootTiles.length})`,
+      );
+      // Every starting crate carries the exact same item type for opening fairness
+      const items = new Set(lootTiles.map(t => t.loot));
+      assert.equal(items.size, 1, `${preset.id} ${playerCount}P starting crates share identical item type`);
+
+      // Each crate sits at equal Manhattan distance from its closest HQ
+      const bases = game.mapData.filter(t => t.type === 'BASE');
+      const hqDists = lootTiles.map(lt =>
+        Math.min(...bases.map(b => Math.abs(lt.x - b.x) + Math.abs(lt.y - b.y))),
+      );
+      assert.equal(
+        new Set(hqDists).size,
+        1,
+        `${preset.id} ${playerCount}P starting crates must be equidistant from HQs (got ${hqDists.join(', ')})`,
+      );
+    }
+  }
+});

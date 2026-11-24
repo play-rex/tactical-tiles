@@ -16,7 +16,7 @@ import { getChallengeById } from '../assets/ChallengeOps';
 import { PRESET_MAPS } from '../assets/Presets';
 import { cloneMatchStats, createEmptyGameState, createLog, createUnit, type GameState, type InventoryItem, type PlayerStatus } from './state';
 import { gameSettingsFor, type MapTilePatch, type TableSettings } from '../protocol';
-import { generateConfiguredMap, isClassicDynamicConfig } from './mapPresets';
+import { generateConfiguredMap, isClassicDynamicConfig, placeFairStartingLoot } from './mapPresets';
 
 export const WEATHER_TYPES: WeatherType[] = ['CLEAR', 'SCORCHED', 'MONSOON', 'FOG', 'TAILWIND', 'SANDSTORM'];
 
@@ -1038,10 +1038,14 @@ export const createGeneratedGame = (settings: GameSettings): GameState => {
     }
     const mapRng = createSeededRng(activeSeed);
     const weatherRng = createSeededRng(`${activeSeed}_weather`);
-    const { map, size, baseLocations } = isClassicDynamicConfig(settings.mapGen)
+    const isClassic = isClassicDynamicConfig(settings.mapGen);
+    const { map, size, baseLocations } = isClassic
         ? generateDynamicMap(settings.playerCount, mapRng)
         : generateConfiguredMap(settings.playerCount, activeSeed, settings.mapGen!);
     const zonedMap = assignVoronoiZones(map, baseLocations);
+    if (isClassic) {
+        placeFairStartingLoot(zonedMap, size, baseLocations, createSeededRng(`${activeSeed}_startloot`), false);
+    }
     const units = spawnUnitsForPlayers(zonedMap, settings.unitCounts, baseLocations, settings.mutators);
     const players = startingPlayers(settings, weatherRng);
     initStructureHp(zonedMap, settings, false);

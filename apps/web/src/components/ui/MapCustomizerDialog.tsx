@@ -841,12 +841,12 @@ export const MapCustomizerDialog: React.FC<MapCustomizerDialogProps> = ({
                   </div>
                   <KnobSlider
                     id={`${baseId}-loot`}
-                    label="LOOSE SUPPLY LOOT"
+                    label="EXTRA LOOSE LOOT"
                     value={draftKnobs.lootPct}
                     min={0}
                     max={40}
                     suffix="%"
-                    hint="Ammo refills & medkits scattered on walkable ground"
+                    hint="0% = Fair start (1 crate per player at equal HQ distance)"
                     disabled={readOnly}
                     onChange={v => updateKnobs({ lootPct: v })}
                   />
