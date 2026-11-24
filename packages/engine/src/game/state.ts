@@ -42,7 +42,7 @@ export interface GameState {
   playerRespawns: Record<number, number>;
   playerStatus: Record<number, PlayerStatus>;
   playerInventory: Record<number, InventoryItem[]>;
-  winner: number | null;
+  winner: number | 'DRAW' | null;
   activeSeed: string;
   /** Local challenge ops only; online tables never carry one. */
   activeMission: MissionConfig | null;

@@ -1320,18 +1320,17 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     }
   }
 
-  // Deathmatch: a player with no units left and no way to redeploy is out
+  // Any mode: a side with no live units and no way to redeploy is out — it can never
+  // affect the game again, so leaving it "active" only produces infinite passing.
   const effectiveMaxRespawns = getEffectiveMaxRespawns(settings.mutators);
-  if (settings.victoryMode === 'DEATHMATCH') {
-    for (let pid = 0; pid < settings.playerCount; pid++) {
-      if (nextPlayerStatus[pid] === 'ELIMINATED') continue;
-      const aliveCount = newUnits.filter(u => u.owner === pid).length;
-      const hasRespawnAvailable =
-        (nextPlayerRespawns[pid] || 0) < effectiveMaxRespawns && newGraveyard.some(g => g.owner === pid);
-      if (aliveCount === 0 && !hasRespawnAvailable) {
-        nextPlayerStatus[pid] = 'ELIMINATED';
-        extraLogs.push(createLog(currentRound, -1, `Player ${pid + 1} eliminated!`, 'COMBAT'));
-      }
+  for (let pid = 0; pid < settings.playerCount; pid++) {
+    if (nextPlayerStatus[pid] === 'ELIMINATED') continue;
+    const aliveCount = newUnits.filter(u => u.owner === pid).length;
+    const hasRespawnAvailable =
+      (nextPlayerRespawns[pid] || 0) < effectiveMaxRespawns && newGraveyard.some(g => g.owner === pid);
+    if (aliveCount === 0 && !hasRespawnAvailable) {
+      nextPlayerStatus[pid] = 'ELIMINATED';
+      extraLogs.push(createLog(currentRound, -1, `Player ${pid + 1} eliminated!`, 'COMBAT'));
     }
   }
 
@@ -1341,6 +1340,32 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     .map(([pid]) => parseInt(pid, 10));
   if (activePlayers.length === 1) {
     newWinner = activePlayers[0];
+  } else if (activePlayers.length === 0 && newWinner === null) {
+    // Mutual annihilation: every army is gone, so surviving fortress strength decides.
+    // Highest total HQ HP wins — damaging the enemy fortress while dying is earned.
+    // An exact tie (e.g. both fortresses untouched) is an explicit draw, not a coin flip.
+    let bestPid = -1;
+    let bestHp = -1;
+    let tied = false;
+    for (let pid = 0; pid < settings.playerCount; pid++) {
+      const hqHp = newMap
+        .filter(t => t.type === 'BASE' && t.owner === pid)
+        .reduce((sum, t) => sum + (t.hp || 0), 0);
+      if (hqHp > bestHp) {
+        bestHp = hqHp;
+        bestPid = pid;
+        tied = false;
+      } else if (hqHp === bestHp) {
+        tied = true;
+      }
+    }
+    if (tied || bestPid === -1) {
+      newWinner = 'DRAW';
+      extraLogs.push(createLog(currentRound, -1, 'Mutual annihilation — both fortresses stand equal. Draw!', 'COMBAT'));
+    } else {
+      newWinner = bestPid;
+      extraLogs.push(createLog(currentRound, bestPid, `Mutual annihilation — Player ${bestPid + 1}'s fortress stands strongest!`, 'COMBAT'));
+    }
   }
 
   const actualNextPlayer = action.type === 'END_TURN'

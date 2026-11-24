@@ -156,7 +156,7 @@ export interface MatchPlayerStats {
 }
 
 export interface MatchSummary {
-  winner: number;
+  winner: number | 'DRAW';
   isHumanWin: boolean;
   rounds: number;
   parRounds: number;

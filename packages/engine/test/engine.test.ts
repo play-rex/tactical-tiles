@@ -731,10 +731,11 @@ test('mountain tunnel: blasts a mountain into a 1-CP passage for every unit type
     return { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined };
   });
   const breacher = { ...base.units.find(u => u.owner === 0 && u.type === 'ASSAULTER')!, tileId: '4,5', completed: false, hasMoved: false };
+  const p1Guard = { ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!, tileId: '1,1', completed: false, hasMoved: false };
   const state: GameState = {
     ...base,
     mapData: map,
-    units: [breacher],
+    units: [breacher, p1Guard],
     currentPlayer: 0,
     playerCp: { 0: 20, 1: 20 },
     playerGold: { 0: 500, 1: 500 },
@@ -829,10 +830,11 @@ test('bank raids: 15 HP vaults breached by siege, snipers barred, vaults randomi
   const raider = { ...base.units.find(u => u.owner === 0 && u.type === 'ASSAULTER')!, tileId: '5,4', completed: false, hasMoved: false };
   const sniper = { ...base.units.find(u => u.owner === 0 && u.type === 'SNIPER')!, tileId: '5,6', completed: false, hasMoved: false };
   const scout = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '2,3', completed: false, hasMoved: false };
+  const p1Lookout = { ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!, tileId: '9,9', completed: false, hasMoved: false };
   const live: GameState = {
     ...base,
     mapData: map,
-    units: [raider, sniper, scout],
+    units: [raider, sniper, scout, p1Lookout],
     currentPlayer: 0,
     playerCp: { 0: 20, 1: 20 },
     playerGold: { 0: 500, 1: 500 },
@@ -879,4 +881,101 @@ test('bank raids: 15 HP vaults breached by siege, snipers barred, vaults randomi
   assert.equal(dry.state.mapData.find(t => t.id === '2,2')!.hackProgress, 100);
   assert.equal(dry.state.bankRewardPending, null);
   assert.equal(dry.state.playerCp[0], 20 - getUnitAttackCost(scout) + 12);
+});
+
+test('mutual annihilation: stronger surviving fortress wins, exact tie is an explicit draw', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'ANNIH1', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => {
+    if (t.type === 'BASE' && t.owner === 0) return { ...t, hp: 10 };
+    if (t.type === 'BASE' && t.owner === 1) return { ...t, hp: 40 };
+    return t;
+  });
+  const empty: GameState = {
+    ...base,
+    mapData: map,
+    units: [],
+    graveyard: [],
+    playerRespawns: { 0: 99, 1: 99 },
+  };
+  const prep = prepareAction(empty, empty.currentPlayer, { type: 'END_TURN' });
+  assert.ok(prep.ok);
+  const result = applyAction(empty, prep.action);
+  assert.equal(result.rejected, undefined);
+  assert.equal(result.state.winner, 1);
+  assert.equal(result.state.matchSummary?.winner, 1);
+
+  // Exact tie: both fortresses untouched — an explicit draw, not a coin flip.
+  const tiedMap: Tile[] = base.mapData.map(t =>
+    t.type === 'BASE' ? { ...t, hp: 50 } : t,
+  );
+  const tied: GameState = { ...empty, mapData: tiedMap };
+  const tiedPrep = prepareAction(tied, tied.currentPlayer, { type: 'END_TURN' });
+  assert.ok(tiedPrep.ok);
+  const drawn = applyAction(tied, tiedPrep.action);
+  assert.equal(drawn.rejected, undefined);
+  assert.equal(drawn.state.winner, 'DRAW');
+  assert.equal(drawn.state.matchSummary?.winner, 'DRAW');
+});
+
+test('HARD AI skips a second tunnel next to an open lane, but still breaches double-thick walls', () => {
+  const aiBase = createGeneratedGame(settings({ mapSeed: 'AITUN2', fogOfWar: false, playerCount: 2 }));
+  const wallMap: Tile[] = aiBase.mapData.map(t =>
+    t.x === 8
+      ? { ...t, type: 'MOUNTAIN' as const, height: 2, subType: undefined, owner: undefined, hazardState: undefined }
+      : { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined }
+  );
+  const aiBreacher = { ...aiBase.units.find(u => u.owner === 1 && u.type === 'ASSAULTER')!, tileId: '7,7', completed: false, hasMoved: false };
+  const enemyScout = { ...aiBase.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '14,7', completed: false, hasMoved: false };
+  const mkState = (tunnelAt: string | null): GameState => ({
+    ...aiBase,
+    mapData: tunnelAt
+      ? wallMap.map(t => (t.id === tunnelAt ? { ...t, type: 'TUNNEL' as const, height: 1 } : t))
+      : wallMap,
+    units: [aiBreacher, enemyScout],
+    currentPlayer: 1,
+    playerCp: { 0: 20, 1: 20 },
+    playerGold: { 0: 500, 1: 500 },
+    mines: [
+      { id: 'm1', tileId: '7,6', owner: 1 },
+      { id: 'm2', tileId: '6,7', owner: 1 },
+    ],
+  });
+
+  // Control: no open lane — the AI pays for the breach at 8,7.
+  const control = botAction(mkState(null), 'HARD');
+  assert.equal(control.type, 'BUILD');
+  assert.equal((control as { itemKey: string }).itemKey, 'TUNNEL');
+  assert.equal((control as { tileId: string }).tileId, '8,7');
+
+  // A lane two tiles south already reaches the enemy the long way: no second blast.
+  const served = botAction(mkState('8,9'), 'HARD');
+  assert.ok(
+    !(served.type === 'BUILD' && (served as { itemKey: string }).itemKey === 'TUNNEL'),
+    `expected no second tunnel, got ${JSON.stringify(served)}`,
+  );
+
+  // Double-thick wall (still unreachable): the adjacent second blast is still allowed.
+  const thickBase = createGeneratedGame(settings({ mapSeed: 'AITUN3', fogOfWar: false, playerCount: 2 }));
+  const thickMap: Tile[] = thickBase.mapData.map(t =>
+    t.x === 8 || t.x === 9
+      ? { ...t, type: t.id === '8,9' ? ('TUNNEL' as const) : ('MOUNTAIN' as const), height: t.id === '8,9' ? 1 : 2, subType: undefined, owner: undefined, hazardState: undefined }
+      : { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined }
+  );
+  const thickBreacher = { ...thickBase.units.find(u => u.owner === 1 && u.type === 'ASSAULTER')!, tileId: '7,7', completed: false, hasMoved: false };
+  const thickEnemy = { ...thickBase.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '14,7', completed: false, hasMoved: false };
+  const thick: GameState = {
+    ...thickBase,
+    mapData: thickMap,
+    units: [thickBreacher, thickEnemy],
+    currentPlayer: 1,
+    playerCp: { 0: 20, 1: 20 },
+    playerGold: { 0: 500, 1: 500 },
+    mines: [
+      { id: 'm1', tileId: '7,6', owner: 1 },
+      { id: 'm2', tileId: '6,7', owner: 1 },
+    ],
+  };
+  const second = botAction(thick, 'HARD');
+  assert.equal(second.type, 'BUILD');
+  assert.equal((second as { itemKey: string }).itemKey, 'TUNNEL');
 });

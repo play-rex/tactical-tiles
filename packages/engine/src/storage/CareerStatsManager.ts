@@ -10,6 +10,7 @@ export interface CareerStats {
     gamesPlayed: number;
     wins: number;
     losses: number;
+    draws: number;
     currentStreak: number;
     bestStreak: number;
     bestGrade: EfficiencyGrade | null;
@@ -26,6 +27,7 @@ const DEFAULT_CAREER: CareerStats = {
     gamesPlayed: 0,
     wins: 0,
     losses: 0,
+    draws: 0,
     currentStreak: 0,
     bestStreak: 0,
     bestGrade: null,
@@ -52,6 +54,7 @@ export const CareerStorage = {
     recordMatch(summary: MatchSummary): CareerStats {
         const cur = CareerStorage.get();
         const isWin = summary.isHumanWin;
+        const isDraw = summary.winner === 'DRAW';
         const nextStreak = isWin ? cur.currentStreak + 1 : 0;
 
         let nextBestGrade = cur.bestGrade;
@@ -78,7 +81,8 @@ export const CareerStorage = {
         const updated: CareerStats = {
             gamesPlayed: cur.gamesPlayed + 1,
             wins: cur.wins + (isWin ? 1 : 0),
-            losses: cur.losses + (isWin ? 0 : 1),
+            losses: cur.losses + (!isWin && !isDraw ? 1 : 0),
+            draws: (cur.draws ?? 0) + (isDraw ? 1 : 0),
             currentStreak: nextStreak,
             bestStreak: Math.max(cur.bestStreak, nextStreak),
             bestGrade: nextBestGrade,
@@ -101,7 +105,7 @@ export const CareerStorage = {
 };
 
 export const calculateMatchScorecard = (params: {
-    winner: number;
+    winner: number | 'DRAW';
     rounds: number;
     victoryMode: VictoryMode;
     gameMode: GameMode;
@@ -129,7 +133,7 @@ export const calculateMatchScorecard = (params: {
 
     const parRounds = parRoundsOverride ?? (victoryMode === 'CONQUER' ? 20 : 25);
     const isHumanWin = winner === 0;
-    const refStats = playerStats[winner] || {
+    const refStats = (typeof winner === 'number' ? playerStats[winner] : undefined) || {
         kills: 0,
         unitsLost: 0,
         damageDealt: 0,
@@ -164,8 +168,8 @@ export const calculateMatchScorecard = (params: {
             ? (grade === 'S' ? 'S' : grade === 'A' ? 'A' : 'B')
             : undefined;
 
-    // Pick MVP among surviving units of the winning player
-    const winnerUnits = units.filter(u => u.owner === winner);
+    // Pick MVP among surviving units of the winning player (none on a draw)
+    const winnerUnits = typeof winner === 'number' ? units.filter(u => u.owner === winner) : [];
     let mvp: MatchSummary['mvp'] = null;
     if (winnerUnits.length > 0) {
         const sorted = [...winnerUnits].sort((a, b) => {

@@ -79,7 +79,7 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
   if (mode === 'ONLINE' && reconnecting) {
     guidance = 'Connection lost — reconnecting to the table…';
   } else if (winner !== null) {
-    guidance = `Match complete — ${seatName(winner)} victorious.`;
+    guidance = winner === 'DRAW' ? 'Match complete — mutual annihilation. Draw.' : `Match complete — ${seatName(winner)} victorious.`;
   } else if (isAiTurn && mode === 'ONLINE') {
     const seat = seats?.[currentPlayer];
     guidance = seat?.isBot || seat?.autopilot

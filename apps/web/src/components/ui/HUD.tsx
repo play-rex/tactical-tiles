@@ -1431,11 +1431,11 @@ const GRADE_COLORS: Record<string, { bg: string; ink: string }> = {
 
 const MatchScorecardSummary: React.FC<{
   matchSummary: MatchSummary;
-  winner: number;
+  winner: number | 'DRAW';
   seedValue: string;
 }> = ({ matchSummary, winner, seedValue }) => {
   const { copied, copy } = useCopyState(1800);
-  const winnerStats = matchSummary.playerStats?.[winner];
+  const winnerStats = typeof winner === 'number' ? matchSummary.playerStats?.[winner] : undefined;
   const grade = GRADE_COLORS[matchSummary.grade];
 
   return (
@@ -1530,11 +1530,14 @@ export const WinnerOverlay: React.FC = () => {
 
   if (winner === null) return null;
   const online = mode === 'ONLINE';
+  const isDraw = winner === 'DRAW';
   const isHost = Boolean(onlineView?.seats[mySeat]?.isHost);
   const localNames = useGameStore(state => state.settings.playerNames);
-  const winnerName = playerDisplayName(winner, localNames, online ? onlineView?.seats[winner]?.name : undefined);
+  const winnerName = isDraw
+    ? 'Nobody'
+    : playerDisplayName(winner, localNames, online ? onlineView?.seats[winner]?.name : undefined);
   const seedValue = matchSummary?.seed || activeSeed;
-  const pTheme = PLAYER_UI_THEME[winner] || PLAYER_UI_THEME[0];
+  const pTheme = (!isDraw && PLAYER_UI_THEME[winner as number]) || PLAYER_UI_THEME[0];
 
   return (
     <div
@@ -1554,19 +1557,23 @@ export const WinnerOverlay: React.FC = () => {
         <div style={{ padding: '24px 28px', textAlign: 'center', display: 'flex', flexDirection: 'column', gap: '14px' }}>
           <div>
             <div style={{ fontSize: '40px', marginBottom: '4px' }}>
-              {activeMission ? (winner === 0 ? '🎖️' : '💀') : online && winner !== mySeat ? '💀' : '🏆'}
+              {isDraw ? '🤝' : activeMission ? (winner === 0 ? '🎖️' : '💀') : online && winner !== mySeat ? '💀' : '🏆'}
             </div>
             <h1 style={{ color: pTheme.ink, fontSize: '28px', fontWeight: 900, margin: '0 0 4px 0' }}>
-              {activeMission
-                ? winner === 0 ? 'OPERATION COMPLETE!' : 'OPERATION FAILED'
-                : online
-                  ? winner === mySeat ? 'VICTORY!' : `${winnerName.toUpperCase()} WINS`
-                  : `${winnerName.toUpperCase()} WINS!`}
+              {isDraw
+                ? 'DRAW!'
+                : activeMission
+                  ? winner === 0 ? 'OPERATION COMPLETE!' : 'OPERATION FAILED'
+                  : online
+                    ? winner === mySeat ? 'VICTORY!' : `${winnerName.toUpperCase()} WINS`
+                    : `${winnerName.toUpperCase()} WINS!`}
             </h1>
             <p style={{ color: 'var(--op-ink-muted)', fontSize: '13px', margin: 0, fontWeight: 600 }}>
-              {activeMission
-                ? `${activeMission.title} • ${activeMission.subtitle}`
-                : victoryMode === 'CONQUER' ? 'Enemy Headquarters Destroyed' : 'All Enemy Units Eliminated'}
+              {isDraw
+                ? 'Mutual annihilation — both fortresses stand equal'
+                : activeMission
+                  ? `${activeMission.title} • ${activeMission.subtitle}`
+                  : victoryMode === 'CONQUER' ? 'Enemy Headquarters Destroyed' : 'All Enemy Units Eliminated'}
             </p>
           </div>
 

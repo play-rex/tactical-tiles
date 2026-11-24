@@ -263,12 +263,23 @@ test('Store: AI bank breach auto-resolves without softlocking player turn', () =
         hasMoved: false,
         completed: false
     };
+    const p0Guard: Unit = {
+        id: 'p0_1',
+        type: 'SOLDIER',
+        tileId: '7,7',
+        hp: 15,
+        ammo: 10,
+        maxAmmo: 10,
+        owner: 0,
+        hasMoved: false,
+        completed: false
+    };
 
     useGameStore.setState({
         currentScreen: 'GAME',
         mapData: map,
         gridSize: 8,
-        units: [aiUnit],
+        units: [aiUnit, p0Guard],
         graveyard: [],
         currentPlayer: 1,
         isAiTurn: true,

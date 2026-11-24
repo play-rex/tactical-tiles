@@ -54,6 +54,43 @@ interface GameStateProxy {
 const BFS_DIRS = [[0, -1], [0, 1], [-1, 0], [1, 0]] as const;
 
 /**
+ * BFS step-distances from a start tile over ground-walkable terrain, treating every
+ * mountain as blocked except one blasted gap tile (a candidate tunnel). -1 = unreachable.
+ */
+const bfsFromWithGap = (
+    mapData: Tile[],
+    gridSize: number,
+    startId: string,
+    gapId: string | null,
+): Int32Array | null => {
+    const start = mapData.find(t => t.id === startId);
+    if (!start) return null;
+    const dists = new Int32Array(gridSize * gridSize).fill(-1);
+    const sIdx = start.y * gridSize + start.x;
+    dists[sIdx] = 0;
+    const q: number[] = [sIdx];
+    let head = 0;
+    while (head < q.length) {
+        const cur = q[head++];
+        const cx = cur % gridSize;
+        const cy = (cur / gridSize) | 0;
+        for (let i = 0; i < 4; i++) {
+            const nx = cx + BFS_DIRS[i][0];
+            const ny = cy + BFS_DIRS[i][1];
+            if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
+            const nIdx = ny * gridSize + nx;
+            if (dists[nIdx] !== -1) continue;
+            const t = mapData[nIdx];
+            if (!t || t.hazardState === 'LAVA' || TERRAIN_COSTS[t.type] >= 90 || t.type === 'BUILDING') continue;
+            if (t.type === 'MOUNTAIN' && t.id !== gapId) continue;
+            dists[nIdx] = dists[cur] + 1;
+            q.push(nIdx);
+        }
+    }
+    return dists;
+};
+
+/**
  * Multi-source BFS over walkable terrain so AI units navigate around rivers, canyons, and walls via bridges.
  */
 const computePathDistanceField = (
@@ -320,23 +357,43 @@ const checkShop = (gameState: GameStateProxy, myUnits: Unit[], visibleUnits: Uni
         const objectives = [...enemyTiles, ...enemyBaseTiles, ...bankTiles, ...capturableTiles];
         if (objectives.length === 0) return null;
         const buildCtx = { playerId: currentPlayer, mapData, mines };
+        const openTunnels = mapData.filter(t => t.type === 'TUNNEL');
         for (const unit of myUnits) {
             if (unit.type === 'SNIPER') continue; // Snipers already cross mountains
             const uTile = getTileByIdFast(mapData, unit.tileId, gridSize);
             if (!uTile) continue;
-            for (const ridge of getNeighbors(uTile, mapData, gridSize)) {
-                if (ridge.type !== 'MOUNTAIN') continue;
-                if (!canConstructOnTile('TUNNEL', ridge, visibleUnits, buildCtx)) continue;
-                // Objective on the far side of this ridge (beyond it, not beside the unit)?
-                const target = objectives.find(o =>
-                    getManhattanDistance(o, ridge) <= 2 && getManhattanDistance(o, uTile) > 1
-                );
-                if (!target) continue;
-                // Only blast when walking around is impossible or a long (>6 tile) detour.
-                const field = computePathDistanceField([target], mapData, gridSize, false);
-                const dist = field ? field[uTile.y * gridSize + uTile.x] : -1;
-                if (dist !== -1 && dist <= 6) continue;
-                return { type: 'BUILD', itemKey: 'TUNNEL', tileId: ridge.id, cost: 0 };
+            const nearObjectives = objectives
+                .map(o => ({ o, d: getManhattanDistance(uTile, o) }))
+                .sort((a, b) => a.d - b.d)
+                .slice(0, 4);
+            // Ridges near the unit are the visible, plausible blasting zone.
+            const ridges = mapData
+                .filter(t =>
+                    t.type === 'MOUNTAIN' &&
+                    getManhattanDistance(uTile, t) <= 5 &&
+                    canConstructOnTile('TUNNEL', t, visibleUnits, buildCtx)
+                )
+                .sort((a, b) => getManhattanDistance(uTile, a) - getManhattanDistance(uTile, b))
+                .slice(0, 10);
+            if (ridges.length === 0) continue;
+            const walkNow = bfsFromWithGap(mapData, gridSize, uTile.id, null);
+            if (!walkNow) continue;
+            for (const { o: target } of nearObjectives) {
+                const tIdx = target.y * gridSize + target.x;
+                const dNow = walkNow[tIdx];
+                if (dNow !== -1 && dNow <= 8) continue; // already a short walk away
+                for (const ridge of ridges) {
+                    // A nearby open lane already serves this reachable objective: don't pay
+                    // 125€ for a second one. Unreachable objectives are exempt — punching
+                    // through a double-thick wall still needs its second blast.
+                    if (dNow !== -1 && openTunnels.some(t => getManhattanDistance(t, ridge) <= 3)) continue;
+                    const walkGap = bfsFromWithGap(mapData, gridSize, uTile.id, ridge.id);
+                    const dNew = walkGap ? walkGap[tIdx] : -1;
+                    if (dNew === -1) continue;
+                    if (dNow === -1 || dNew <= dNow - 3) {
+                        return { type: 'BUILD', itemKey: 'TUNNEL', tileId: ridge.id, cost: 0 };
+                    }
+                }
             }
         }
     }
@@ -411,8 +468,21 @@ const checkSpawn = (gameState: GameStateProxy): AIAction | null => {
 // --- MAIN AI LOOP ---
 
 export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
-  const { mapData, units, currentPlayer, playerCp, difficulty, weather, victoryMode, gridSize, settings, totalTurns } = gameState;
+  const { mapData, units, currentPlayer, playerCp, playerGold, playerRespawns, graveyard, difficulty, weather, victoryMode, gridSize, settings, totalTurns } = gameState;
   const myUnits = units.filter(u => u.owner === currentPlayer && !u.completed && !u.isRooted);
+
+  // --- LAST-STAND ENDGAME: every remaining side fields ≤1 unit and I cannot
+  // reinforce (no ready bodies, respawns exhausted, or nowhere to spawn). Normal
+  // positional play stalemates here (overwatch-camping + passing forever), so the
+  // unit below switches to a pure HQ hunt: no overwatch, no securing, march.
+  const aliveBySeat = new Map<number, number>();
+  for (const u of units) aliveBySeat.set(u.owner, (aliveBySeat.get(u.owner) ?? 0) + 1);
+  const usedRespawns = typeof playerRespawns === 'number' ? playerRespawns : 0;
+  const iCanReinforce =
+    (graveyard || []).some(g => g.owner === currentPlayer && (g.turnsUntilRespawn ?? 0) <= 0 && playerGold >= UNIT_COSTS[g.type]) &&
+    usedRespawns < getEffectiveMaxRespawns(settings.mutators) &&
+    getSpawnTiles(gameState, currentPlayer).length > 0;
+  const lastStand = aliveBySeat.size > 0 && !iCanReinforce && [...aliveBySeat.values()].every(n => n <= 1);
 
   // FOG OF WAR LOGIC: Filter visible enemies
   let enemyUnits = units.filter(u => u.owner !== currentPlayer);
@@ -524,7 +594,8 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
 
     // C. Secure Buildings (Avoid flipping building back and forth under active close threat)
     // Banks are breached by siege now (see E2 below), not by interaction.
-    if (playerCp >= 4) {
+    // Skipped in last stand: income is worthless with nothing left to buy.
+    if (playerCp >= 4 && !lastStand) {
         const nearbyThreat = hasTileWithinRange(uTile, enemyTiles, 3);
 
         const b = adj.find(t => t.type === 'BUILDING' && t.owner !== currentPlayer);
@@ -648,6 +719,29 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
             if (neighbors.some(n => n.type === 'BANK' && (n.hackProgress || 0) < 100)) moveValue += 18;
             if (neighbors.some(n => n.type === 'BUILDING' && n.owner !== currentPlayer)) moveValue += 12;
 
+            // Last stand: nothing matters but reaching a tile that can strike the final
+            // objective (enemy HQ, or the last enemy unit when there is no base to hunt).
+            // Marching closer dominates comfort (~65 for a sniper nest); standing on a tile
+            // that can actually fire dominates everything, so snipers stop pacing and settle.
+            if (lastStand) {
+                const hunt = targetBase ?? (enemyTiles.length > 0
+                    ? enemyTiles.reduce((best, cur) =>
+                        getManhattanDistance(uTile, cur) < getManhattanDistance(uTile, best) ? cur : best
+                    )
+                    : undefined);
+                if (hunt) {
+                    const canStrikeFrom = (t: Tile) =>
+                        canUnitAttackFromTile(unit, t) &&
+                        getManhattanDistance(t, hunt) <= getUnitRange(unit, mapData, weather, t) &&
+                        hasLineOfSight(t, hunt, mapData, unit.type, weather, gridSize);
+                    if (canStrikeFrom(destTile)) {
+                        moveValue += 500;
+                    } else {
+                        moveValue += (getManhattanDistance(uTile, hunt) - getManhattanDistance(destTile, hunt)) * 200;
+                    }
+                }
+            }
+
             // Respect visible enemy Overwatch on HARD difficulty (Elite Breachers resist pin)
             if (anyWatchedTileIds.size > 0 && pathTouchesOverwatch(tileId)) {
                 if (settings.fogOfWar && !teamVisPopulated) {
@@ -694,8 +788,8 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         }
     }
 
-    // --- OVERWATCH STANCE (Medium & Hard AI tactical zoning) ---
-    if (difficulty !== 'EASY' && canUnitEnterOverwatch(unit, uTile, playerCp)) {
+    // --- OVERWATCH STANCE (Medium & Hard AI tactical zoning; banned in last stand) ---
+    if (!lastStand && difficulty !== 'EASY' && canUnitEnterOverwatch(unit, uTile, playerCp)) {
         const uZoneWeather = uTile.zone !== undefined ? weather.playerZones[uTile.zone] || 'CLEAR' : 'CLEAR';
         if (uZoneWeather !== 'FOG' && uZoneWeather !== 'SANDSTORM') {
             const minEnemyDist = getMinManhattanDistance(uTile, enemyTiles);
