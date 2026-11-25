@@ -1,5 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { isUnitVisible } from '@tactical/engine';
+import {
+  computeTacticalPercentDamage,
+  isUnitVisible,
+  paradropDestinationBlocker,
+  TACTICAL_DAMAGE_PCT,
+  TACTICAL_ITEMS,
+  TACTICAL_MIN_HP_FLOOR,
+  tacticalBlocker,
+  tacticalDamagePctFor,
+  tacticalTilesFor,
+} from '@tactical/engine';
+import type { TacticalId } from '@tactical/engine/types';
 import {
   BANK_STATS,
   BARRIER_STATS,
@@ -100,10 +111,23 @@ export const MapHoverCard: React.FC = () => {
   const validDemolishTile = useGameStore(s => s.validDemolishTile);
   const placementMode = useGameStore(s => s.placementMode);
   const pendingDrops = useGameStore(s => s.pendingDrops);
+  const airDrops = useGameStore(s => s.airDrops) ?? [];
   const mines = useGameStore(s => s.mines);
+  const smokeZones = useGameStore(s => s.smokeZones);
+  const burningLines = useGameStore(s => s.burningLines);
+  const pendingTacticals = useGameStore(s => s.pendingTacticals);
+  const sensors = useGameStore(s => s.sensors);
+  const trapRevealRound = useGameStore(s => s.trapRevealRound);
+  const totalTurns = useGameStore(s => s.totalTurns);
+  const tacticalRound = useGameStore(s => s.tacticalRound);
+  const tacticalCooldowns = useGameStore(s => s.tacticalCooldowns);
+  const freeTacticalRound = useGameStore(s => s.freeTacticalRound);
+  const playerGold = useGameStore(s => s.playerGold);
+  const playerRespawns = useGameStore(s => s.playerRespawns);
   const mapRotation = useGameStore(s => s.mapRotation);
   const currentPlayer = useGameStore(s => s.currentPlayer);
   const playerCp = useGameStore(s => s.playerCp);
+  const playerStatus = useGameStore(s => s.playerStatus);
   const weather = useGameStore(s => s.weather);
   const settings = useGameStore(s => s.settings);
   const visibleTiles = useGameStore(s => s.visibleTiles);
@@ -111,6 +135,8 @@ export const MapHoverCard: React.FC = () => {
   const isAiTurn = useGameStore(s => s.isAiTurn);
   const winner = useGameStore(s => s.winner);
   const mode = useGameStore(s => s.mode);
+  const devSandbox = useGameStore(s => s.devSandbox);
+  const devFreeplay = useGameStore(s => s.devFreeplay);
   const onlineSeats = useOnline(s => s.view?.seats);
   const ownerLabel = (owner: number) =>
     playerDisplayName(owner, settings.playerNames, mode === 'ONLINE' ? onlineSeats?.[owner]?.name : undefined);
@@ -227,7 +253,7 @@ export const MapHoverCard: React.FC = () => {
         const reason = selectedUnit.completed
           ? 'Already acted this turn — cannot attack anymore'
           : getHoveredEnemyBlocker(
-              { mapData, units, weather, gridSize, settings, playerCp, currentPlayer },
+              { mapData, units, weather, gridSize, settings, playerCp, currentPlayer, smokeZones },
               selectedUnit,
               anchorTile,
               visibleTiles,
@@ -348,9 +374,20 @@ export const MapHoverCard: React.FC = () => {
           fogOfWar: settings.fogOfWar,
           maxBudget: currentCp,
           visibleTiles: settings.fogOfWar ? visibleTiles : null,
+          smokeZones,
         });
         if (ow.trigger) {
           tags.push(ow.trigger.pinResisted ? `OW -${ow.trigger.damage} (RESIST)` : `OW -${ow.trigger.damage} PINS!`);
+        }
+        if (burningLines.some(b => b.tiles.includes(anchorTile.id))) {
+          const nap = computeTacticalPercentDamage(selectedUnit, TACTICAL_DAMAGE_PCT.NAPALM_BURN);
+          tags.push(nap.atFloor ? 'NAPALM 0 (2 HP CAP)' : `NAPALM -${nap.dealt} DMG!`);
+        }
+        if (pendingTacticals.some(p => p.tiles.includes(anchorTile.id))) {
+          tags.push('INCOMING STRIKE!');
+        }
+        if (smokeZones.some(z => z.tiles.includes(anchorTile.id))) {
+          tags.push('SMOKE COVER');
         }
         if (activeBanks.some(b => getManhattanDistance(b, anchorTile) <= BANK_STATS.RANGE)) {
           tags.push(`TURRET -${BANK_STATS.DAMAGE}/t`);
@@ -369,6 +406,7 @@ export const MapHoverCard: React.FC = () => {
               gridSize,
               fogOfWar: settings.fogOfWar,
               visibleTiles: settings.fogOfWar ? visibleTiles : null,
+              smokeZones,
             }).length
           : 0;
         if (threatCount > 0) tags.push(`CAN SHOOT ${threatCount} AFTER`);
@@ -438,9 +476,254 @@ export const MapHoverCard: React.FC = () => {
       }
     }
 
-    // 6. Placement Mode (Build / Supply Drop)
+    // 6. Placement Mode (Tactical / Build / Supply Drop)
     if (placementMode?.active) {
       const valid = placementMode.validTiles.includes(anchorTile.id);
+      if (placementMode.kind === 'TACTICAL') {
+        const itemKey = placementMode.itemKey as TacticalId;
+        const def = TACTICAL_ITEMS[itemKey];
+        const axis = placementMode.tacticalAxis ?? 'H';
+        const priceLabel = placementMode.cost === 0 ? 'FREE' : `€${placementMode.cost}`;
+        const vis = settings.fogOfWar ? visibleTiles : null;
+
+        // Carpet Run (multi-target 1..3 enemy units, 50% current HP, min 2 HP)
+        if (def?.shape === 'UNITS3') {
+          const picked = placementMode.selectedTiles ?? [];
+          if (picked.includes(anchorTile.id)) {
+            return {
+              tone: 'amber',
+              headerLeft: `TARGET LOCKED (${picked.length}/3) • CLICK TO UNDO`,
+              headerRight: priceLabel,
+              body: 'Click to deselect, lock more enemy units, or click FIRE SALVO',
+              tags: ['50% HP EACH', 'MIN 2 HP'],
+            };
+          }
+          if (valid && visibleUnit && visibleUnit.owner !== currentPlayer) {
+            const { dealt, hpAfter } = computeTacticalPercentDamage(visibleUnit, tacticalDamagePctFor('CARPET_RUN'));
+            return {
+              tone: 'red',
+              headerLeft: `LOCK TARGET ${picked.length + 1}/3 • ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
+              headerRight: priceLabel,
+              body: `${hpAfter === TACTICAL_MIN_HP_FLOOR ? 'MIN 2 HP' : 'HIT'} -${dealt} DMG (${visibleUnit.hp} → ${hpAfter} HP)`,
+              tags: ['50% CURRENT HP', picked.length === 2 ? 'FIRES ON CLICK' : 'UP TO 3 UNITS'],
+            };
+          }
+          if (!valid && visibleUnit && visibleUnit.owner !== currentPlayer && visibleUnit.hp <= TACTICAL_MIN_HP_FLOOR) {
+            return {
+              tone: 'amber',
+              headerLeft: 'CARPET RUN • 2 HP FLOOR',
+              headerRight: `${visibleUnit.hp} HP`,
+              body: 'Already at ≤2 HP floor — finish with a unit',
+              tags: ['NON-LETHAL FLOOR'],
+            };
+          }
+          return {
+            tone: 'amber',
+            headerLeft: 'CARPET RUN • ENEMY UNIT ONLY',
+            headerRight: `${picked.length}/3`,
+            body: 'Click any highlighted visible enemy unit above 2 HP (up to 3 targets)',
+            tags: ['50% CURRENT HP · MIN 2 HP'],
+          };
+        }
+
+        // Paradrop (2-step airlift: pick any visible unit -> pick open ground tile)
+        if (def?.shape === 'RELOCATE') {
+          if (!placementMode.tacticalUnitId) {
+            if (valid && visibleUnit) {
+              const isOwn = visibleUnit.owner === currentPlayer;
+              return {
+                tone: 'cyan',
+                headerLeft: `AIRLIFT ${isOwn ? 'ALLY' : 'ENEMY'} ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
+                headerRight: priceLabel,
+                body: isOwn
+                  ? 'Click to select for instant airlift (marks moved, clears Root/OW)'
+                  : 'Click to relocate enemy unit away (cannot drop onto mines, napalm, lava, or HQ range)',
+                tags: isOwn ? ['STEP 1/2', 'OWN UNIT'] : ['STEP 1/2', 'ENEMY AIRLIFT'],
+              };
+            }
+            return {
+              tone: 'amber',
+              headerLeft: 'PARADROP • STEP 1/2',
+              headerRight: priceLabel,
+              body: 'Click any highlighted unit (yours or enemy) to airlift',
+              tags: ['INSTANT RELOCATE'],
+            };
+          }
+          const pickedUnit = units.find(u => u.id === placementMode.tacticalUnitId);
+          if (pickedUnit && anchorTile.id === pickedUnit.tileId) {
+            return {
+              tone: 'amber',
+              headerLeft: 'SELECTED UNIT • CLICK TO RE-PICK',
+              headerRight: priceLabel,
+              body: 'Click again to choose a different unit to airlift',
+              tags: ['STEP 2/2'],
+            };
+          }
+          if (valid && pickedUnit) {
+            return {
+              tone: 'cyan',
+              headerLeft: `DROP ${UNIT_STATS[pickedUnit.type].name.toUpperCase()} HERE`,
+              headerRight: priceLabel,
+              body: `Airlift onto (${anchorTile.x},${anchorTile.y}) — clears Root & Overwatch`,
+              tags: ['STEP 2/2', 'INSTANT AIRLIFT'],
+            };
+          }
+          const reason = pickedUnit
+            ? paradropDestinationBlocker(
+                { mapData, units, burningLines, mines } as any,
+                currentPlayer,
+                pickedUnit.owner,
+                pickedUnit.tileId,
+                anchorTile,
+                vis,
+              ) ?? 'Cannot drop here'
+            : 'Pick a highlighted landing tile';
+          return {
+            tone: 'amber',
+            headerLeft: 'PARADROP • BLOCKED LZ',
+            headerRight: priceLabel,
+            body: reason,
+            tags: ['STEP 2/2'],
+          };
+        }
+
+        // Single-enemy-unit direct strikes (Precision Strike 75% current HP, Hunter Drone 40% current HP, min 2 HP)
+        if (def?.shape === 'UNIT') {
+          const pct = tacticalDamagePctFor(itemKey);
+          const pctLabel = Math.round(pct * 100);
+          if (valid && visibleUnit && visibleUnit.owner !== currentPlayer) {
+            const { dealt, hpAfter } = computeTacticalPercentDamage(visibleUnit, pct);
+            const tags: string[] = [`${pctLabel}% CURRENT HP`, 'MIN 2 HP'];
+            if (itemKey === 'RECON_DRONE' && settings.fogOfWar) tags.push('+3R SENSOR');
+            if (itemKey === 'PRECISION_STRIKE') tags.push('ORBITAL JDAM');
+            return {
+              tone: itemKey === 'PRECISION_STRIKE' ? 'red' : 'cyan',
+              headerLeft: `LOCK ${def.name.toUpperCase()} • ${UNIT_STATS[visibleUnit.type].name.toUpperCase()}`,
+              headerRight: priceLabel,
+              body: `${hpAfter === TACTICAL_MIN_HP_FLOOR ? 'MIN 2 HP' : 'HIT'} -${dealt} DMG (${visibleUnit.hp} → ${hpAfter} HP)`,
+              tags,
+            };
+          }
+          if (!valid && visibleUnit && visibleUnit.owner !== currentPlayer && visibleUnit.hp <= TACTICAL_MIN_HP_FLOOR) {
+            return {
+              tone: 'amber',
+              headerLeft: `${def.name.toUpperCase()} • 2 HP FLOOR`,
+              headerRight: `${visibleUnit.hp} HP`,
+              body: 'Already at ≤2 HP floor — finish with a unit',
+              tags: ['NON-LETHAL FLOOR'],
+            };
+          }
+          return {
+            tone: 'amber',
+            headerLeft: `${def.name.toUpperCase()} • ENEMY UNIT ONLY`,
+            headerRight: priceLabel,
+            body: 'Click any highlighted visible enemy unit above 2 HP',
+            tags: [`${pctLabel}% CURRENT HP · MIN 2 HP`],
+          };
+        }
+
+        // Sabotage: enemy HQ base (-8 CP from that player) or specialized enemy building (strip)
+        if (itemKey === 'SABOTAGE' && valid) {
+          if (anchorTile.type === 'BASE' && typeof anchorTile.owner === 'number') {
+            const targetSeat = anchorTile.owner;
+            const beforeCp = playerCp[targetSeat] ?? 0;
+            const afterCp = Math.max(0, beforeCp - 8);
+            const drained = beforeCp - afterCp;
+            return {
+              tone: 'cyan',
+              headerLeft: `SABOTAGE • ${ownerLabel(targetSeat).toUpperCase()} HQ`,
+              headerRight: priceLabel,
+              body: `Drain -${drained} CP (${beforeCp} → ${afterCp} CP)`,
+              tags: ['ENEMY HQ BATTERY', 'INSTANT EMP'],
+            };
+          }
+          if (anchorTile.type === 'BUILDING' && anchorTile.subType && anchorTile.subType !== 'NONE') {
+            const subLabel = anchorTile.subType === 'WATCHTOWER' ? 'Watchtower' : 'Bunker';
+            return {
+              tone: 'cyan',
+              headerLeft: `SABOTAGE • STRIP ${subLabel.toUpperCase()}`,
+              headerRight: priceLabel,
+              body: `Remove ${subLabel} specialization from ${ownerLabel(anchorTile.owner ?? 0)}`,
+              tags: ['STRIP SPECIALIZATION', 'INSTANT EMP'],
+            };
+          }
+        }
+
+        if (!valid) {
+          const sandboxFree = devSandbox && devFreeplay;
+          const reason =
+            tacticalBlocker(
+              {
+                mapData,
+                gridSize,
+                units,
+                settings,
+                totalTurns: sandboxFree ? Math.max(totalTurns, 9) : totalTurns,
+                tacticalRound: sandboxFree ? {} : tacticalRound,
+                tacticalCooldowns: sandboxFree ? {} : tacticalCooldowns,
+                freeTacticalRound,
+                playerGold: sandboxFree ? { ...playerGold, [currentPlayer]: 5000 } : playerGold,
+                playerRespawns,
+                playerStatus,
+                burningLines,
+                mines,
+              } as any,
+              currentPlayer,
+              itemKey,
+              {
+                tileId: anchorTile.id,
+                axis,
+                width: def?.shape === 'LANE' ? 2 : undefined,
+                visible: vis,
+              },
+            ) ?? 'Cannot target this tile';
+          return {
+            tone: 'amber',
+            headerLeft: `${def?.name.toUpperCase() ?? 'TACTICAL'} • BLOCKED`,
+            headerRight: priceLabel,
+            body: reason,
+            tags: def?.shape === 'LANE' ? [`2×10 ${axis}`] : def?.shape === 'LINE4' ? [`1×4 ${axis}`] : [],
+          };
+        }
+
+        const footprint = tacticalTilesFor(mapData, gridSize, itemKey, anchorTile.id, axis, 2) ?? [anchorTile];
+        const footprintIds = new Set(footprint.map(t => t.id));
+        const visibleInZone = units.filter(
+          u => footprintIds.has(u.tileId) && isUnitVisible(u, viewer, settings.fogOfWar, visibleTiles),
+        );
+        const enemiesInZone = visibleInZone.filter(u => u.owner !== currentPlayer).length;
+        const alliesInZone = visibleInZone.filter(u => u.owner === currentPlayer).length;
+        const friendlyFireWeapon = itemKey === 'NAPALM_LINE' || itemKey === 'ARTILLERY_BARRAGE';
+
+        const shapeTag =
+          def?.shape === 'LANE'
+            ? `2×10 ${axis}`
+            : def?.shape === 'LINE4'
+              ? `1×4 ${axis}`
+              : def?.shape === 'ZONE3'
+                ? '3×3 CLOUD'
+                : 'SINGLE TILE';
+        const tacTags: string[] = [shapeTag];
+        if (enemiesInZone > 0) tacTags.push(`${enemiesInZone} ENEMY IN ZONE`);
+        if (friendlyFireWeapon && alliesInZone > 0) tacTags.push(`⚠ ${alliesInZone} ALLY FF`);
+        if (itemKey === 'ARTILLERY_BARRAGE') {
+          tacTags.push('50% HP · MIN 2 HP · FF ON');
+        } else if (itemKey === 'NAPALM_LINE') {
+          tacTags.push('40% + 20% BURN (CAP 60%) · MIN 2 HP · FF ON');
+        } else if (itemKey === 'SMOKE_SCREEN') {
+          tacTags.push('BLOCKS LOS & OW · 2R');
+        } else if (itemKey === 'SABOTAGE') {
+          tacTags.push('HQ -8 CP OR STRIP BLDG');
+        }
+
+        return {
+          tone: friendlyFireWeapon && alliesInZone > 0 ? 'amber' : itemKey === 'ARTILLERY_BARRAGE' || itemKey === 'NAPALM_LINE' ? 'red' : 'cyan',
+          headerLeft: `LOCK ${def?.name.toUpperCase() ?? 'TACTICAL'}`,
+          headerRight: priceLabel,
+          body: `Click to fire at (${anchorTile.x},${anchorTile.y}) — ${def?.blurb ?? ''}`,
+          tags: tacTags,
+        };
+      }
       if (placementMode.kind === 'DROP') {
         return {
           tone: valid ? 'cyan' : 'slate',
@@ -545,9 +828,58 @@ export const MapHoverCard: React.FC = () => {
     const def = Math.round((TERRAIN_DEFENSE[anchorTile.type] || 0) * 100);
     if (def > 0) tags.push(`+${def}% DEF`);
     else if (def < 0) tags.push(`${def}% EXPOSED`);
-    const formatLootTag = (item: string) => (item === 'FIRST_AID' ? 'FIRST AID' : item);
+    const formatLootTag = (item: string) =>
+      item === 'FIRST_AID'
+        ? 'FIRST AID'
+        : item === 'FIELD_SUPPLY'
+          ? 'MYSTERY FIELD CRATE (LOOT TO REVEAL)'
+          : item === 'TACTICAL_SUPPLY'
+            ? 'MYSTERY TACTICAL CRATE (LOOT TO REVEAL)'
+            : item;
     const ownMine = (mines ?? []).find(m => m.tileId === anchorTile.id && m.owner === viewer);
     if (ownMine) tags.push(`ARMED MINE (${LAND_MINE_STATS.DAMAGE} DMG)`);
+    const roundNow = totalTurns + 1;
+    const canSeeEnemyMines = mode === 'ONLINE' || (trapRevealRound?.[viewer] ?? 0) >= roundNow;
+    const enemyMine = canSeeEnemyMines
+      ? (mines ?? []).find(m => m.tileId === anchorTile.id && m.owner !== viewer)
+      : undefined;
+    if (enemyMine) tags.push(`REVEALED ENEMY MINE (${LAND_MINE_STATS.DAMAGE} DMG)`);
+    const smokeHere = smokeZones.find(z => z.tiles.includes(anchorTile.id));
+    if (smokeHere) tags.push(`SMOKE: BLOCKS LOS (${smokeHere.roundsLeft}R)`);
+    const burnHere = burningLines.find(b => b.tiles.includes(anchorTile.id));
+    if (burnHere) tags.push(`NAPALM: -20% HP · MIN 2 HP (${burnHere.roundsLeft}R)`);
+    const strikeHere = pendingTacticals.find(p => p.tiles.includes(anchorTile.id));
+    if (strikeHere) tags.push(`INCOMING ${TACTICAL_ITEMS[strikeHere.itemKey].name.toUpperCase()} (-${strikeHere.damage})`);
+    const sensorHere = sensors.find(s => s.tileId === anchorTile.id);
+    if (sensorHere) {
+      tags.push(
+        sensorHere.owner === viewer
+          ? `RECON DRONE (${sensorHere.roundsLeft}R)`
+          : `ENEMY DRONE (${sensorHere.roundsLeft}R — STEP TO DESTROY)`,
+      );
+    }
+    const flareHere = airDrops.find(d => d.phase === 'FLARE' && d.tileId === anchorTile.id);
+    if (flareHere) {
+      tags.push(
+        flareHere.kind === 'TACTICAL'
+          ? 'TACTICAL SUPPLY FLARE (DROPS NEXT ROUND)'
+          : 'FIELD SUPPLY FLARE (DROPS NEXT ROUND)',
+      );
+    } else {
+      const sectorHere = airDrops.find(
+        d =>
+          d.phase === 'DISPATCH' &&
+          Math.abs(d.sectorCenter.x - anchorTile.x) <= 2 &&
+          Math.abs(d.sectorCenter.y - anchorTile.y) <= 2,
+      );
+      if (sectorHere) {
+        tags.push(
+          sectorHere.kind === 'TACTICAL'
+            ? 'TACTICAL DROP SECTOR (2 ROUNDS)'
+            : 'FIELD DROP SECTOR (2 ROUNDS)',
+        );
+      }
+    }
     if (pendingDrop) tags.push(`INCOMING ${formatLootTag(pendingDrop.item)}`);
     if (anchorTile.loot) tags.push(`LOOT: ${formatLootTag(anchorTile.loot)}`);
     if (anchorTile.hazardState) tags.push(anchorTile.hazardState);
@@ -600,8 +932,23 @@ export const MapHoverCard: React.FC = () => {
     enemyBases,
     placementMode,
     pendingDrops,
+    airDrops,
     mines,
+    smokeZones,
+    burningLines,
+    pendingTacticals,
+    sensors,
+    trapRevealRound,
+    totalTurns,
+    tacticalRound,
+    tacticalCooldowns,
+    freeTacticalRound,
+    playerGold,
+    playerRespawns,
+    playerStatus,
     mode,
+    devSandbox,
+    devFreeplay,
     onlineSeats,
   ]);
 

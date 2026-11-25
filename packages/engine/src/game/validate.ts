@@ -9,6 +9,8 @@ import { getManhattanDistance, getValidMovesWithParents, hasLineOfSight } from '
 import { canConstructOnTile, canUnitAttackFromTile, canUnitEnterOverwatch, getEffectiveCpRules, getUnitAttackCost, getUnitRange } from '../rules/CombatRules';
 import { isPerkForClass } from '../constants/Perks';
 import { SPECTATOR_EFFECTS } from './SpectatorOps';
+import { tacticalBlocker } from '../tactical/rules';
+import { smokeBlocksLine } from '../tactical/geometry';
 import {
   INTERACT_COST,
   dropTilesFor,
@@ -135,7 +137,8 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
       if (
         getManhattanDistance(attTile, tarTile) > range ||
         (vis && !vis.has(tarTile.id)) ||
-        !hasLineOfSight(attTile, tarTile, state.mapData, unit.type, state.weather, state.gridSize)
+        !hasLineOfSight(attTile, tarTile, state.mapData, unit.type, state.weather, state.gridSize) ||
+        smokeBlocksLine(state.smokeZones, attTile, tarTile)
       ) {
         return fail("That target isn't in range");
       }
@@ -167,7 +170,8 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
       if (
         getManhattanDistance(attTile, tarTile) > range ||
         (vis && !vis.has(tarTile.id)) ||
-        !hasLineOfSight(attTile, tarTile, state.mapData, unit.type, state.weather, state.gridSize)
+        !hasLineOfSight(attTile, tarTile, state.mapData, unit.type, state.weather, state.gridSize) ||
+        smokeBlocksLine(state.smokeZones, attTile, tarTile)
       ) {
         return fail("That target isn't in range");
       }
@@ -242,12 +246,20 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
 
     case 'BUILD': {
       if (!isConstruct(action.itemKey)) return fail('Not something you can build');
-      if (gold < SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS].cost) return fail('Not enough Euros');
+      const hasShopVoucher = (state.playerShopVouchers?.[seat] ?? []).includes(action.itemKey as any);
+      if (!hasShopVoucher && gold < SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS].cost) {
+        return fail('Not enough Euros');
+      }
       const vis = action.itemKey === 'LAND_MINE' ? getVisible() : null;
       const unitsForBuild = vis
         ? state.units.filter(u => u.owner === seat || vis.has(u.tileId))
         : state.units;
-      const ctx = { playerId: seat, mapData: state.mapData, mines: state.mines };
+      const flareTileIds = new Set(
+        (state.airDrops ?? [])
+          .filter(d => d.phase === 'FLARE' && d.tileId)
+          .map(d => d.tileId!),
+      );
+      const ctx = { playerId: seat, mapData: state.mapData, mines: state.mines, flareTileIds };
 
       if (action.itemKey === 'BARRIER') {
         const targetIds = action.tileIds && action.tileIds.length > 0
@@ -272,6 +284,27 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
     case 'BANK_REWARD': {
       if (!pending || pending.playerId !== seat) return fail('No vault to claim');
       return ok({ type: 'BANK_REWARD', choice: action.choice === 'CP' ? 'CP' : 'GOLD' });
+    }
+
+    case 'USE_TACTICAL': {
+      const blocked = tacticalBlocker(state, seat, action.itemKey, {
+        tileId: action.tileId,
+        tileIds: action.tileIds,
+        unitId: action.unitId,
+        axis: action.axis,
+        width: action.width,
+        visible: getVisible(),
+      });
+      if (blocked) return fail(blocked);
+      return ok({
+        type: 'USE_TACTICAL',
+        itemKey: action.itemKey,
+        tileId: action.tileId,
+        tileIds: action.tileIds,
+        unitId: action.unitId,
+        axis: action.axis,
+        width: action.width,
+      });
     }
   }
   return fail('Unknown action');

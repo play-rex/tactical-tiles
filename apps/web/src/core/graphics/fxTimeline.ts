@@ -13,7 +13,22 @@
  * Pure TypeScript with zero React/Pixi runtime imports so it can be unit-tested in Node.
  */
 import { PLAYER_COLORS, TILE_SIZE, UNIT_STATS, VETERANCY_CONFIG } from '@tactical/engine/constants/Config';
-import type { GameEvent, KillCause, SoundName, SupplyLootType, TerrainType, TilePoint, UnitRank, UnitType, WeaponVisual } from '@tactical/engine';
+import type {
+  AirDropKind,
+  GameEvent,
+  KillCause,
+  SoundName,
+  SupplyLootType,
+  TacticalAxis,
+  TacticalFxPhase,
+  TacticalId,
+  TerrainType,
+  TilePoint,
+  UnitRank,
+  UnitType,
+  WeaponVisual,
+} from '@tactical/engine';
+import { computeAirDropFlight, type AirDropFlightKinematics } from './airDropFlight';
 import {
   classifyKillTier,
   getKillCamTiming,
@@ -42,7 +57,15 @@ export type ParticlePresetKind =
   | 'shockwaveRing'
   | 'overwatchRing'
   | 'constructionDust'
-  | 'lavaSplash';
+  | 'lavaSplash'
+  | 'sonarPing'
+  | 'smokeBloom'
+  | 'napalmFlame'
+  | 'empArc'
+  | 'orbitalBeam'
+  | 'overclockSurge'
+  | 'brassCasing'
+  | 'concreteDebris';
 
 export interface ParticleEmitRequest {
   preset: ParticlePresetKind;
@@ -155,6 +178,14 @@ export interface SupplyDropAnimRequest {
   durationMs: number;
 }
 
+export interface AirDropAnimRequest {
+  id: string;
+  tileId: string;
+  kinematics: AirDropFlightKinematics;
+  /** Switches to 1x real time once the crate has landed so the plane's exit tail never blocks play. */
+  ambientOnly?: boolean;
+}
+
 export interface PromotionBurstRequest {
   id: string;
   unitId: string;
@@ -164,6 +195,30 @@ export interface PromotionBurstRequest {
   rank: UnitRank;
   label: string;
   durationMs: number;
+}
+
+export interface TacticalFxAnimRequest {
+  id: string;
+  itemKey: TacticalId;
+  phase: TacticalFxPhase;
+  owner: number;
+  anchor: TilePoint;
+  tiles: TilePoint[];
+  pings?: TilePoint[];
+  axis?: TacticalAxis;
+  width?: 1 | 2;
+  meta?: {
+    sabotageKind?: 'CP' | 'STRIP';
+    cpDrained?: number;
+    victimOwner?: number;
+    hitsCount?: number;
+    from?: TilePoint;
+    unitType?: UnitType;
+  };
+  /** Combat/camera phase duration driven by `fxTimeline` clock. */
+  durationMs: number;
+  /** Optional non-blocking real-time exit cruise tail so aircraft clear the far edge during live play. */
+  ambientTailMs?: number;
 }
 
 export interface UnitImpulseInput {
@@ -241,6 +296,12 @@ export interface TimelineSink {
   playTurretSwivel?: () => void;
   playUnitMove?: (unitType: UnitType, durationMs: number, terrain?: TerrainType) => void;
   playTacticalFoley?: (kind: 'reload' | 'overwatch' | 'heal' | 'build') => void;
+  playTacticalSound?: (
+    itemKey: TacticalId,
+    phase: TacticalFxPhase,
+    meta?: { steps?: number; pings?: number; sabotageKind?: 'CP' | 'STRIP' },
+  ) => void;
+  playAirDrop?: (kind: AirDropKind, stage: 'FLYOVER' | 'DROP' | 'TOUCHDOWN') => void;
   playKillConfirm?: () => void;
   /** `IN` = shot in flight (riser matched to `flightRealMs`), `HIT` = lethal impact (sub drop + shell). */
   playKillCamSting?: (stage: 'IN' | 'HIT', tier: KillCamTier, flightRealMs?: number) => void;
@@ -273,8 +334,18 @@ export interface TimelineSink {
   removeTileEffect?: (id: string) => void;
   spawnSupplyDrop?: (drop: SupplyDropAnimRequest) => void;
   removeSupplyDrop?: (id: string) => void;
+  spawnAirDrop?: (anim: AirDropAnimRequest) => void;
+  completeAirDropTouchdown?: (id: string) => void;
+  removeAirDrop?: (id: string) => void;
+  addPendingAirDropTile?: (tileId: string) => void;
+  removePendingAirDropTile?: (tileId: string) => void;
+  getGridSize?: () => number;
   spawnPromotionBurst?: (burst: PromotionBurstRequest) => void;
   removePromotionBurst?: (id: string) => void;
+  spawnTacticalEffect?: (fx: TacticalFxAnimRequest) => void;
+  /** Called when combat/camera phase finishes; browser keeps ambient exit tail gliding non-blocking. */
+  completeTacticalCombat?: (id: string, ambientTailMs?: number) => void;
+  removeTacticalEffect?: (id: string) => void;
   showCallout?: (callout: TacticalCalloutRequest) => void;
   getTileTerrain?: (x: number, y: number) => TerrainType | undefined;
   emitParticles?: (req: ParticleEmitRequest) => void;
@@ -332,6 +403,8 @@ const killCauseSubtitle = (cause: KillCause): string => {
       return 'Doomsday Magma';
     case 'BASE_FALL':
       return 'Command Base Lost';
+    case 'TACTICAL':
+      return 'Tactical Strike';
     default:
       return 'Direct Combat';
   }
@@ -1088,6 +1161,131 @@ export class FxTimeline {
     };
   }
 
+  private buildTacticalCamCue(
+    e: Extract<GameEvent, { kind: 'tacticalFx' }>,
+    flightMs: number,
+    batchEvents: GameEvent[],
+  ): KillCamCue | null {
+    if (this.killCamMode === 'OFF' || getPrefersReducedMotion()) return null;
+    const tiles = e.tiles.length > 0 ? e.tiles : [e.anchor];
+    const startPt = e.itemKey === 'PARADROP' && e.meta?.from ? tileCenterPx(e.meta.from) : tileCenterPx(tiles[0]);
+    const endPt = e.itemKey === 'PARADROP' ? tileCenterPx(e.anchor) : tileCenterPx(tiles[tiles.length - 1]);
+    const anchorPx = tileCenterPx(e.anchor);
+    const isCorridor =
+      e.itemKey === 'CARPET_RUN' ||
+      e.itemKey === 'ARTILLERY_BARRAGE' ||
+      e.itemKey === 'NAPALM_LINE' ||
+      (e.itemKey === 'PARADROP' && Boolean(e.meta?.from));
+    const marker = isCorridor ? startPt : anchorPx;
+    const focus = isCorridor ? endPt : anchorPx;
+    const waypoints: KillCamPoint[] | undefined =
+      e.itemKey === 'CARPET_RUN' && tiles.length >= 2
+        ? tiles.map(tileCenterPx)
+        : e.itemKey === 'PARADROP' && e.meta?.from
+          ? [startPt, endPt]
+          : undefined;
+    const spanX = Math.abs(focus.x - marker.x);
+    const spanY = Math.abs(focus.y - marker.y);
+    const frameW = Math.max(TILE_SIZE * 4.6, Math.min(TILE_SIZE * 9.6, spanX + TILE_SIZE * 3.4));
+    const frameH = Math.max(TILE_SIZE * 4.2, Math.min(TILE_SIZE * 8.6, spanY + TILE_SIZE * 3.0));
+    const weapon: WeaponVisual | undefined =
+      e.itemKey === 'PRECISION_STRIKE'
+        ? 'TACTICAL_STRIKE'
+        : e.itemKey === 'CARPET_RUN'
+          ? 'TACTICAL_CARPET'
+          : e.itemKey === 'ARTILLERY_BARRAGE'
+            ? 'TACTICAL_BARRAGE'
+            : e.itemKey === 'NAPALM_LINE'
+              ? 'TACTICAL_NAPALM'
+              : e.itemKey === 'RECON_DRONE'
+                ? 'TACTICAL_DRONE'
+                : undefined;
+
+    const tacHits = batchEvents.filter(
+      (ev): ev is Extract<GameEvent, { kind: 'hit' }> => ev.kind === 'hit' && ev.damage > 0,
+    );
+    const totalDmg = tacHits.reduce((s, h) => s + h.damage, 0);
+    const primaryHit = tacHits[0];
+    const victimInfo = primaryHit?.targetUnitId ? this.sink.getUnitInfo?.(primaryHit.targetUnitId) : undefined;
+
+    const cue: KillCamCue = {
+      id: this.nextFxSeq++,
+      tier: 'ATTACK',
+      subject: 'ATTACK',
+      cause: 'TACTICAL',
+      weapon,
+      tacticalItemKey: e.itemKey,
+      killerOwner: e.owner,
+      victimUnitId: primaryHit?.targetUnitId,
+      victimUnitType: victimInfo?.type,
+      victimOwner: victimInfo?.owner,
+      victimName:
+        tacHits.length > 1
+          ? `${tacHits.length} UNITS`
+          : victimInfo
+            ? (UNIT_STATS[victimInfo.type]?.name ?? victimInfo.type)
+            : undefined,
+      remainingHp: tacHits.length === 1 ? victimInfo?.hp : undefined,
+      isReplay: this.replayMode,
+      hasVisibleOrigin: isCorridor,
+      waypoints,
+      damage: totalDmg,
+      maxHp: tacHits.length === 1 ? (victimInfo?.maxHp ?? 0) : 0,
+      overkill: 0,
+      crossfireCount: 0,
+      distanceTiles: Math.round(Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y) / TILE_SIZE),
+      focusX: focus.x,
+      focusY: focus.y,
+      markerX: marker.x,
+      markerY: marker.y,
+      frameW,
+      frameH,
+      combo: 1,
+      travelMs: Math.max(0, flightMs),
+    };
+    cue.cameraStyle = selectKillCamStyle(cue);
+    return cue;
+  }
+
+  private buildMineAttackCamCue(
+    e: Extract<GameEvent, { kind: 'mineBlast' }>,
+  ): KillCamCue | null {
+    if (this.killCamMode === 'OFF' || getPrefersReducedMotion()) return null;
+    const focus = tileCenterPx(e.at);
+    const victimInfo = e.victimUnitId ? this.sink.getUnitInfo?.(e.victimUnitId) : undefined;
+    const cue: KillCamCue = {
+      id: this.nextFxSeq++,
+      tier: 'ATTACK',
+      subject: 'ATTACK',
+      cause: 'MINE',
+      victimUnitId: e.victimUnitId,
+      victimUnitType: victimInfo?.type,
+      victimOwner: victimInfo?.owner,
+      victimRank: victimInfo?.rank,
+      victimName: victimInfo ? (UNIT_STATS[victimInfo.type]?.name ?? victimInfo.type) : undefined,
+      remainingHp: victimInfo ? victimInfo.hp : undefined,
+      killerOwner: e.mineOwner ?? null,
+      isReplay: this.replayMode,
+      hasVisibleOrigin: false,
+      damage: e.damage,
+      maxHp: victimInfo?.maxHp ?? 0,
+      overkill: 0,
+      crossfireCount: 0,
+      distanceTiles: 0,
+      terrain: this.sink.getTileTerrain?.(e.at.x, e.at.y),
+      focusX: focus.x,
+      focusY: focus.y,
+      markerX: focus.x,
+      markerY: focus.y,
+      frameW: TILE_SIZE * 2.35,
+      frameH: TILE_SIZE * 2.1,
+      combo: 1,
+      travelMs: 0,
+    };
+    cue.cameraStyle = selectKillCamStyle(cue);
+    return cue;
+  }
+
   private buildAttackCamCue(
     e: Extract<GameEvent, { kind: 'hit' }>,
     flightMs: number,
@@ -1175,10 +1373,21 @@ export class FxTimeline {
 
     const maxHp = rankAdjustedMaxHp(e.unitType, rank);
     const focus = tileCenterPx(e.at);
-    const from = lethalHit?.from;
+    const matchingTacFx =
+      e.cause === 'TACTICAL'
+        ? events.find(
+            (ev): ev is Extract<GameEvent, { kind: 'tacticalFx' }> =>
+              ev.kind === 'tacticalFx' && (ev.phase === 'RESOLVE' || ev.phase === 'BURN' || ev.phase === 'ACTIVATE'),
+          )
+        : undefined;
+    const from = lethalHit?.from ?? (matchingTacFx && matchingTacFx.tiles.length > 1 ? matchingTacFx.tiles[0] : undefined);
     const marker = from ? tileCenterPx(from) : focus;
-    const frameW = Math.abs(marker.x - focus.x) + TILE_SIZE * 1.7;
-    const frameH = Math.abs(marker.y - focus.y) + TILE_SIZE * 1.5;
+    const tacWaypoints: KillCamPoint[] | undefined =
+      matchingTacFx && matchingTacFx.itemKey === 'CARPET_RUN' && matchingTacFx.tiles.length >= 2
+        ? matchingTacFx.tiles.map(tileCenterPx)
+        : undefined;
+    const frameW = Math.abs(marker.x - focus.x) + TILE_SIZE * (matchingTacFx ? 3.4 : 1.7);
+    const frameH = Math.abs(marker.y - focus.y) + TILE_SIZE * (matchingTacFx ? 3.0 : 1.5);
     const distanceTiles = from ? Math.hypot(from.x - e.at.x, from.y - e.at.y) : 0;
     const crossfirePoints: KillCamPoint[] | undefined =
       lethalHit?.crossfireFrom && lethalHit.crossfireFrom.length > 0
@@ -1251,6 +1460,7 @@ export class FxTimeline {
       subject: 'KILL',
       cause: e.cause,
       weapon,
+      tacticalItemKey: matchingTacFx?.itemKey,
       victimUnitId: e.unitId,
       victimUnitType: e.unitType,
       victimOwner: e.owner,
@@ -1267,6 +1477,7 @@ export class FxTimeline {
       isFirstBlood,
       hasVisibleOrigin: Boolean(from),
       crossfirePoints,
+      waypoints: tacWaypoints,
       isReplay: this.replayMode,
       damage,
       maxHp,
@@ -1327,12 +1538,46 @@ export class FxTimeline {
 
     const projectileImpactByTile = new Map<string, number>();
     const projectileStartByTile = new Map<string, number>();
+    const tacticalImpactByTile = new Map<string, number>();
     const impactByVictimId = new Map<string, number>();
     let firstProjectileImpactMs = 0;
     let maxWakeMs = 0;
     const noteWake = (ms: number) => {
       if (ms > maxWakeMs) maxWakeMs = ms;
     };
+
+    // Pre-scan resolving/instant tactical strikes so per-tile hits/kills/popups/shakes align cleanly with
+    // Hunter Drone (280ms), JDAM plunge (420ms), Napalm jet drop (220+i*110ms), Carpet Run (280+i*200ms), and 2x10 Barrage!
+    for (const e of events) {
+      if (e.kind !== 'tacticalFx') continue;
+      const baseDelay = Math.max(0, e.delayMs ?? 0);
+      if (e.itemKey === 'RECON_DRONE' && (e.phase === 'RESOLVE' || e.phase === 'ACTIVATE')) {
+        const targets = e.tiles.length > 0 ? e.tiles : [e.anchor];
+        for (const pt of targets) {
+          tacticalImpactByTile.set(tileKey(pt), baseDelay + 280);
+        }
+      } else if (e.itemKey === 'PRECISION_STRIKE' && e.phase === 'RESOLVE') {
+        const targets = e.tiles.length > 0 ? e.tiles : [e.anchor];
+        for (const pt of targets) {
+          tacticalImpactByTile.set(tileKey(pt), baseDelay + 420);
+        }
+      } else if (e.itemKey === 'CARPET_RUN' && e.phase === 'RESOLVE') {
+        for (let i = 0; i < e.tiles.length; i++) {
+          tacticalImpactByTile.set(tileKey(e.tiles[i]), baseDelay + 280 + i * 200);
+        }
+      } else if (e.itemKey === 'NAPALM_LINE' && e.phase === 'ACTIVATE') {
+        for (let i = 0; i < e.tiles.length; i++) {
+          tacticalImpactByTile.set(tileKey(e.tiles[i]), baseDelay + 220 + i * 110);
+        }
+      } else if (e.itemKey === 'ARTILLERY_BARRAGE' && e.phase === 'RESOLVE') {
+        const w = 2;
+        for (let i = 0; i < e.tiles.length; i++) {
+          const step = Math.floor(i / w);
+          const stagger = i % 2 === 1 ? 32 : 0;
+          tacticalImpactByTile.set(tileKey(e.tiles[i]), baseDelay + 200 + step * 85 + stagger);
+        }
+      }
+    }
 
     // Pass 0: inspect compound MOVE path so Overwatch shots & Land Mines synchronize with tile arrival
     const moveEvt = events.find((e): e is Extract<GameEvent, { kind: 'movePath' }> => e.kind === 'movePath' && e.path.length >= 2);
@@ -1449,14 +1694,21 @@ export class FxTimeline {
       }
     }
 
-    // Plan Land Mine detonation times along move path (inserting a crisp ARM click beat on lethal mines).
+    // Plan Land Mine detonation times along move path (inserting a crisp ARM click beat for both
+    // lethal mines and non-lethal Land Mine micro-cams).
+    const hasKilledInBatch = events.some(e => e.kind === 'killed');
     const mineDelayByEvent = new Map<GameEvent, number>();
     const mineArmArriveByVictim = new Map<string, number>();
-    const mineArmRealMs =
-      this.killCamMode !== 'OFF' && !getPrefersReducedMotion()
-        ? getKillCamTiming('CINEMATIC', this.killCamMode, 'MINE_CLICK').armMs
-        : 0;
-    const mineArmCombatMs = mineArmRealMs > 0 ? Math.max(4, Math.round(mineArmRealMs * 0.04)) : 0;
+    const mineArmArriveByEvent = new Map<GameEvent, number>();
+    const canMineCam = this.killCamMode !== 'OFF' && !getPrefersReducedMotion();
+    const lethalMineArmRealMs = canMineCam
+      ? getKillCamTiming('CINEMATIC', this.killCamMode, 'MINE_CLICK').armMs
+      : 0;
+    const attackMineArmRealMs = canMineCam
+      ? getKillCamTiming('ATTACK', this.killCamMode, 'MINE_CLICK').armMs
+      : 0;
+    const lethalMineArmCombatMs = lethalMineArmRealMs > 0 ? Math.max(4, Math.round(lethalMineArmRealMs * 0.04)) : 0;
+    const attackMineArmCombatMs = attackMineArmRealMs > 0 ? Math.max(4, Math.round(attackMineArmRealMs * 0.04)) : 0;
     let firstMineDelayMs: number | null = null;
     for (const e of events) {
       if (e.kind !== 'mineBlast') continue;
@@ -1468,9 +1720,14 @@ export class FxTimeline {
           arriveDelay = Math.round(idx * moveSegMs) + extraPause;
         }
       }
-      const detonateDelay = e.victimDead && mineArmCombatMs > 0 ? arriveDelay + mineArmCombatMs : arriveDelay;
-      if (e.victimDead && mineArmCombatMs > 0 && e.victimUnitId) {
+      const useLethalArm = Boolean(e.victimDead) && lethalMineArmCombatMs > 0;
+      const useAttackArm = !e.victimDead && !hasKilledInBatch && attackMineArmCombatMs > 0;
+      const armCombatMs = useLethalArm ? lethalMineArmCombatMs : useAttackArm ? attackMineArmCombatMs : 0;
+      const detonateDelay = arriveDelay + armCombatMs;
+      if (useLethalArm && e.victimUnitId) {
         mineArmArriveByVictim.set(e.victimUnitId, arriveDelay);
+      } else if (useAttackArm) {
+        mineArmArriveByEvent.set(e, arriveDelay);
       }
       mineDelayByEvent.set(e, detonateDelay);
       if (firstMineDelayMs === null || detonateDelay < firstMineDelayMs) {
@@ -1486,14 +1743,21 @@ export class FxTimeline {
 
     const hasMineBlast = mineDelayByEvent.size > 0;
     const hasDestroyedStructure = events.some(e => e.kind === 'structureHit' && e.destroyed);
-    const hasKilledInBatch = events.some(e => e.kind === 'killed');
     const hasHeistInBatch = events.some(e => e.kind === 'heist');
+    const hasTacticalFxInBatch = events.some(e => e.kind === 'tacticalFx' && e.phase !== 'MARK');
     const nonLethalUnitHitCount = events.reduce(
       (n, e) => n + (e.kind === 'hit' && !e.isKill && e.damage > 0 ? 1 : 0),
       0,
     );
     // Single-target non-lethal combat hits earn a crisp, non-blocking micro action-cam punch-in.
-    const allowAttackMicroCam = !hasKilledInBatch && !hasHeistInBatch && !hasDestroyedStructure && nonLethalUnitHitCount === 1;
+    // Land mine blasts and tactical weapon batches use their own dedicated camera cues instead.
+    const allowAttackMicroCam =
+      !hasKilledInBatch &&
+      !hasMineBlast &&
+      !hasHeistInBatch &&
+      !hasDestroyedStructure &&
+      !hasTacticalFxInBatch &&
+      nonLethalUnitHitCount === 1;
     const hasProjectile = projectilePlans.size > 0;
     const healEvt = events.find((e): e is Extract<GameEvent, { kind: 'heal' }> => e.kind === 'heal');
     const hasOverwatchSet = events.some(e => e.kind === 'overwatchSet');
@@ -1661,9 +1925,35 @@ export class FxTimeline {
                   y: fromPx.y + Math.sin(angle) * 14,
                   angle: angle + Math.PI,
                   color: 0x94A3B8,
-                  scale: 1.2,
+                  scale: 1.35,
+                });
+                // Backblast pressure dust behind cannon breech
+                this.sink.emitParticles?.({
+                  preset: 'dustPuff',
+                  x: fromPx.x - Math.cos(angle) * 12,
+                  y: fromPx.y - Math.sin(angle) * 12,
+                  angle,
+                  color: 0xCBD5E1,
+                  scale: 0.9,
                 });
                 this.addTrauma(0.16);
+              } else if (e.weapon === 'SOLDIER') {
+                // Crisp ejected brass casings for Scout carbine 3-round burst
+                this.sink.emitParticles?.({
+                  preset: 'brassCasing',
+                  x: fromPx.x + Math.cos(angle) * 6,
+                  y: fromPx.y + Math.sin(angle) * 6,
+                  angle,
+                  scale: 1.1,
+                });
+              } else if (isBaseMg) {
+                this.sink.emitParticles?.({
+                  preset: 'brassCasing',
+                  x: fromPx.x,
+                  y: fromPx.y,
+                  angle,
+                  scale: 1.3,
+                });
               }
 
               if (isBaseMg) {
@@ -1775,7 +2065,12 @@ export class FxTimeline {
 
         case 'hit': {
           const paired = matchingPlanForTile(e.at, e.targetUnitId);
-          const delay = e.delayMs ?? paired?.impactMs ?? projectileImpactByTile.get(tileKey(e.at)) ?? 0;
+          const delay =
+            e.delayMs ??
+            paired?.impactMs ??
+            projectileImpactByTile.get(tileKey(e.at)) ??
+            tacticalImpactByTile.get(tileKey(e.at)) ??
+            0;
           const lockStartMs = paired?.startMs ?? projectileStartByTile.get(tileKey(e.at)) ?? 0;
           const atPx = tileCenterPx(e.at);
           const fromPx = e.from ? tileCenterPx(e.from) : null;
@@ -1941,6 +2236,9 @@ export class FxTimeline {
           const tileY = e.at.y * TILE_SIZE;
           const flashId = `tfx_${this.nextFxSeq++}`;
           const scorchId = `tfx_${this.nextFxSeq++}`;
+          const mineFlashMs = 560;
+          const mineAttackCue = !e.victimDead && !hasKilledInBatch ? this.buildMineAttackCamCue(e) : null;
+          const mineAttackArmArrive = mineAttackCue ? mineArmArriveByEvent.get(e) : undefined;
 
           if (e.victimUnitId && !e.victimDead && e.damage > 0 && delay > 0) {
             const vid = e.victimUnitId;
@@ -1949,9 +2247,30 @@ export class FxTimeline {
             this.schedule(delay, () => this.sink.clearDeferredHp?.(vid, dmg), 'mine-deferred-hp-release');
           }
 
+          // Non-lethal Land Mine short micro-cam: freeze briefly on the pressure plate (*click*) before bomb blast.
+          if (mineAttackCue && mineAttackArmArrive !== undefined) {
+            this.schedule(
+              mineAttackArmArrive,
+              () => {
+                const armMs = this.killCam.arm(mineAttackCue, getPrefersReducedMotion());
+                if (armMs > 0) {
+                  this.sink.playMineClick?.();
+                  this.sink.onWake?.(armMs + 1800);
+                }
+              },
+              'killcam-mine-attack-arm',
+            );
+          }
+
           this.schedule(
             delay,
             () => {
+              if (mineAttackCue) {
+                if (this.killCam.impact(mineAttackCue)) {
+                  this.sink.playKillCamSting?.('HIT', mineAttackCue.tier);
+                  this.sink.onWake?.(2200);
+                }
+              }
               this.activeVisualCount += 2;
               this.sink.spawnTileEffect?.({
                 id: flashId,
@@ -1959,7 +2278,8 @@ export class FxTimeline {
                 x: tileX,
                 y: tileY,
                 color: 0xEF4444,
-                durationMs: 360,
+                durationMs: mineFlashMs,
+                scale: e.victimDead ? 1.25 : 1.12,
               });
               this.sink.spawnTileEffect?.({
                 id: scorchId,
@@ -1968,29 +2288,36 @@ export class FxTimeline {
                 y: tileY,
                 color: 0xEA580C,
                 durationMs: 1750,
-                scale: 1.25,
+                scale: 1.28,
               });
               this.sink.emitParticles?.({
                 preset: 'explosion',
                 x: atPx.x,
                 y: atPx.y,
-                scale: e.victimDead ? 1.25 : 1.05,
+                scale: e.victimDead ? 1.32 : 1.18,
               });
               this.sink.emitParticles?.({
                 preset: 'shockwaveRing',
                 x: atPx.x,
                 y: atPx.y,
-                color: 0xF97316,
-                scale: 1.5,
+                color: 0xFDE047,
+                scale: 1.35,
+              });
+              this.sink.emitParticles?.({
+                preset: 'concreteDebris',
+                x: atPx.x,
+                y: atPx.y,
+                scale: 1.15,
               });
               if (e.victimUnitId && !e.victimDead) {
                 this.triggerUnitImpulse(e.victimUnitId, {
                   recoilX: 0,
-                  recoilY: -7,
-                  flashColor: 0xFECACA,
-                  flashMs: 95,
-                  durationMs: 210,
+                  recoilY: -10,
+                  flashColor: 0xFEF08A,
+                  flashMs: 120,
+                  durationMs: 250,
                 });
+                this.triggerHitStop(30);
               }
               if (e.victimDead) {
                 this.triggerHitStop(45);
@@ -1998,8 +2325,22 @@ export class FxTimeline {
             },
             'mine-blast',
           );
+          // Secondary concussive blast ring slightly staggered after core flash
           this.schedule(
-            delay + 360,
+            delay + 45,
+            () => {
+              this.sink.emitParticles?.({
+                preset: 'shockwaveRing',
+                x: atPx.x,
+                y: atPx.y,
+                color: 0xF97316,
+                scale: e.victimDead ? 1.9 : 1.72,
+              });
+            },
+            'mine-blast-ring2',
+          );
+          this.schedule(
+            delay + mineFlashMs,
             () => {
               this.activeVisualCount = Math.max(0, this.activeVisualCount - 1);
               this.sink.removeTileEffect?.(flashId);
@@ -2019,7 +2360,11 @@ export class FxTimeline {
         }
 
         case 'structureHit': {
-          const delay = e.delayMs ?? projectileImpactByTile.get(tileKey(e.at)) ?? 0;
+          const delay =
+            e.delayMs ??
+            projectileImpactByTile.get(tileKey(e.at)) ??
+            tacticalImpactByTile.get(tileKey(e.at)) ??
+            0;
           const atPx = tileCenterPx(e.at);
           const tileX = e.at.x * TILE_SIZE;
           const tileY = e.at.y * TILE_SIZE;
@@ -2115,9 +2460,10 @@ export class FxTimeline {
                   });
                 }
                 this.sink.emitParticles?.({ preset: 'explosion', x: atPx.x, y: atPx.y, scale: 0.95 });
-                this.sink.emitParticles?.({ preset: 'constructionDust', x: atPx.x, y: atPx.y, scale: 1.2 });
+                this.sink.emitParticles?.({ preset: 'concreteDebris', x: atPx.x, y: atPx.y, scale: 1.25 });
               } else {
                 this.sink.emitParticles?.({ preset: 'impactSparks', x: atPx.x, y: atPx.y, color: 0xFB923C, scale: 1.1 });
+                this.sink.emitParticles?.({ preset: 'concreteDebris', x: atPx.x, y: atPx.y, scale: 0.72 });
               }
             },
             'structure-hit',
@@ -2139,7 +2485,12 @@ export class FxTimeline {
         case 'killed': {
           const launchPlan = findLaunchPlan(e.at, e.unitId);
           const killImpactMs =
-            e.delayMs ?? launchPlan?.impactMs ?? impactByVictimId.get(e.unitId) ?? projectileImpactByTile.get(tileKey(e.at)) ?? 0;
+            e.delayMs ??
+            launchPlan?.impactMs ??
+            impactByVictimId.get(e.unitId) ??
+            projectileImpactByTile.get(tileKey(e.at)) ??
+            tacticalImpactByTile.get(tileKey(e.at)) ??
+            0;
           const atPx = tileCenterPx(e.at);
           const tileX = e.at.x * TILE_SIZE;
           const tileY = e.at.y * TILE_SIZE;
@@ -2338,7 +2689,10 @@ export class FxTimeline {
           let delay = e.delayMs;
           if (delay === undefined) {
             const pairedPopup = matchingPlanForTile(e.at);
-            const impactMs = pairedPopup?.impactMs ?? projectileImpactByTile.get(tileKey(e.at));
+            const impactMs =
+              pairedPopup?.impactMs ??
+              projectileImpactByTile.get(tileKey(e.at)) ??
+              tacticalImpactByTile.get(tileKey(e.at));
             if (hasMineBlast && firstMineDelayMs !== null && (e.text === 'LAND MINE!' || e.text.startsWith('-'))) {
               if (impactMs !== undefined && Math.abs(impactMs - firstMineDelayMs) > 20 && e.text.startsWith('-') && minePopupCount === 0 && !events.some(ev => ev.kind === 'mineBlast' && ev.at.x === e.at.x && ev.at.y === e.at.y)) {
                 delay = impactMs;
@@ -2396,6 +2750,8 @@ export class FxTimeline {
               delay = pairedShake.impactMs;
             } else if (e.at && projectileImpactByTile.has(tileKey(e.at))) {
               delay = projectileImpactByTile.get(tileKey(e.at))!;
+            } else if (e.at && tacticalImpactByTile.has(tileKey(e.at))) {
+              delay = tacticalImpactByTile.get(tileKey(e.at))!;
             } else if (hasMineBlast && firstMineDelayMs !== null && !hasProjectile) {
               delay = firstMineDelayMs;
             } else if (hasProjectile) {
@@ -2605,6 +2961,337 @@ export class FxTimeline {
             'supply-drop-cleanup',
           );
           noteWake(SUPPLY_DROP_DURATION_MS + 240);
+          break;
+        }
+
+        case 'airDrop': {
+          const reduced = getPrefersReducedMotion();
+          const gridSz = this.sink.getGridSize?.() ?? 20;
+          const kinematics = computeAirDropFlight({
+            at: e.at,
+            headingRad: e.headingRad,
+            gridSize: gridSz,
+            dropKind: e.dropKind,
+            reducedMotion: reduced,
+          });
+          const animId = `airdrop_${this.nextFxSeq++}`;
+          const tileId = `${e.at.x},${e.at.y}`;
+          const stagger = Math.max(0, e.staggerMs ?? 0);
+          const atPx = tileCenterPx(e.at);
+          const accentColor = e.dropKind === 'TACTICAL' ? 0xFACC15 : 0x22D3EE;
+
+          // Hide grounded mystery crate sprite until parachute physically touches down (zero double crate!)
+          // Air Supply Drops run cleanly live on the board with ZERO camera movement/hijack.
+          this.sink.addPendingAirDropTile?.(tileId);
+
+          // Plane entry + overhead engine rumble (runs non-blocking on live real time)
+          this.schedule(
+            stagger,
+            () => {
+              this.activeVisualCount++;
+              this.sink.spawnAirDrop?.({
+                id: animId,
+                tileId,
+                kinematics,
+                ambientOnly: true,
+              });
+              this.sink.playAirDrop?.(e.dropKind, 'FLYOVER');
+            },
+            `airdrop-flyover-${e.dropKind}`,
+          );
+
+          // Cargo release + parachute bloom
+          this.schedule(
+            stagger + kinematics.releaseMs,
+            () => {
+              this.sink.playAirDrop?.(e.dropKind, 'DROP');
+              this.sink.emitParticles?.({
+                preset: 'dustPuff',
+                x: atPx.x,
+                y: atPx.y - 38,
+                color: accentColor,
+                scale: 0.65,
+              });
+            },
+            `airdrop-release-${e.dropKind}`,
+          );
+
+          // Crate touchdown -> reveal grounded mystery crate + dust/ring + hand off plane exit tail to ambient 1x!
+          this.schedule(
+            stagger + kinematics.touchdownMs,
+            () => {
+              this.sink.removePendingAirDropTile?.(tileId);
+              this.sink.completeAirDropTouchdown?.(animId);
+              this.sink.playAirDrop?.(e.dropKind, 'TOUCHDOWN');
+              this.sink.emitParticles?.({ preset: 'shockwaveRing', x: atPx.x, y: atPx.y, color: accentColor, scale: e.dropKind === 'TACTICAL' ? 1.45 : 1.15 });
+              this.sink.emitParticles?.({ preset: 'dustPuff', x: atPx.x, y: atPx.y, scale: e.dropKind === 'TACTICAL' ? 1.25 : 1.0 });
+              this.addTrauma(e.dropKind === 'TACTICAL' ? 0.28 : 0.18);
+            },
+            `airdrop-touchdown-${e.dropKind}`,
+          );
+
+          // Cleanup plane + chute once exit tail clears opposite map edge
+          this.schedule(
+            stagger + kinematics.totalMs,
+            () => {
+              this.activeVisualCount = Math.max(0, this.activeVisualCount - 1);
+              this.sink.removePendingAirDropTile?.(tileId);
+              this.sink.removeAirDrop?.(animId);
+            },
+            `airdrop-cleanup-${e.dropKind}`,
+          );
+          noteWake(stagger + kinematics.totalMs + 220);
+          break;
+        }
+
+        case 'tacticalFx': {
+          const baseDelay = Math.max(0, e.delayMs ?? 0);
+          const fxId = `tacfx_${this.nextFxSeq++}`;
+          const w = 2;
+          const barrageSteps = e.itemKey === 'ARTILLERY_BARRAGE' ? Math.max(1, Math.ceil(e.tiles.length / w)) : 1;
+          const carpetCount = e.itemKey === 'CARPET_RUN' ? Math.max(1, Math.min(3, e.tiles.length)) : 1;
+
+          const durationMs =
+            e.itemKey === 'MINEFIELD_SNAPSHOT'
+              ? 880
+              : e.itemKey === 'RECON_DRONE'
+                ? 820
+                : e.itemKey === 'SMOKE_SCREEN'
+                  ? 920
+                  : e.itemKey === 'RADAR_SWEEP'
+                    ? 1020
+                    : e.itemKey === 'PRECISION_STRIKE'
+                      ? e.phase === 'MARK'
+                        ? 420
+                        : 1240
+                      : e.itemKey === 'SABOTAGE'
+                        ? 760
+                        : e.itemKey === 'NAPALM_LINE'
+                          ? e.phase === 'BURN'
+                            ? 520
+                            : 1080
+                          : e.itemKey === 'PARADROP'
+                            ? 1080
+                            : e.itemKey === 'CARPET_RUN'
+                              ? e.phase === 'MARK'
+                                ? 480
+                                : 280 + (carpetCount - 1) * 200 + 660
+                              : e.itemKey === 'ARTILLERY_BARRAGE'
+                                ? e.phase === 'MARK'
+                                  ? 560
+                                  : 200 + barrageSteps * 85 + 620
+                                : 840;
+
+          // Non-blocking real-time ambient flight tail so planes/drones finish gliding off the far map edge during live play.
+          const ambientTailMs =
+            e.itemKey === 'PARADROP'
+              ? 3600
+              : e.itemKey === 'CARPET_RUN' && e.phase !== 'MARK'
+                ? 3400
+                : e.itemKey === 'NAPALM_LINE' && e.phase !== 'BURN'
+                  ? 2800
+                  : e.itemKey === 'RECON_DRONE'
+                    ? 1800
+                    : 0;
+
+          this.schedule(
+            baseDelay,
+            () => {
+              this.activeVisualCount++;
+              this.sink.spawnTacticalEffect?.({
+                id: fxId,
+                itemKey: e.itemKey,
+                phase: e.phase,
+                owner: e.owner,
+                anchor: e.anchor,
+                tiles: e.tiles,
+                pings: e.pings,
+                axis: e.axis,
+                width: e.itemKey === 'ARTILLERY_BARRAGE' ? 2 : e.width,
+                meta: e.meta,
+                durationMs,
+                ambientTailMs,
+              });
+              this.sink.playTacticalSound?.(e.itemKey, e.phase, {
+                steps: e.itemKey === 'CARPET_RUN' ? carpetCount : barrageSteps,
+                pings: e.pings?.length,
+                sabotageKind: e.meta?.sabotageKind,
+              });
+            },
+            `tactical-fx-start-${e.itemKey}`,
+          );
+
+          // Synchronized per-weapon particle bursts & trauma choreography
+          const anchorPx = tileCenterPx(e.anchor);
+          if (e.itemKey === 'MINEFIELD_SNAPSHOT') {
+            this.schedule(baseDelay + 60, () => {
+              this.sink.emitParticles?.({ preset: 'sonarPing', x: anchorPx.x, y: anchorPx.y, scale: 1.2 });
+              for (const p of e.pings ?? []) {
+                const pp = tileCenterPx(p);
+                this.sink.emitParticles?.({ preset: 'sonarPing', x: pp.x, y: pp.y, color: 0xEF4444, scale: 0.78 });
+              }
+            }, 'tactical-snapshot-pings');
+          } else if (e.itemKey === 'RECON_DRONE') {
+            this.schedule(baseDelay + 280, () => {
+              this.sink.emitParticles?.({ preset: 'impactSparks', x: anchorPx.x, y: anchorPx.y, color: 0x38BDF8, scale: 1.2 });
+              this.sink.emitParticles?.({ preset: 'sonarPing', x: anchorPx.x, y: anchorPx.y, color: 0x38BDF8, scale: 1.05 });
+              this.addTrauma(0.32);
+            }, 'tactical-drone-strike');
+          } else if (e.itemKey === 'SMOKE_SCREEN') {
+            const smokeTargets = e.tiles.length > 0 ? e.tiles : [e.anchor];
+            this.schedule(baseDelay + 210, () => {
+              for (let i = 0; i < smokeTargets.length; i += 2) {
+                const sp = tileCenterPx(smokeTargets[i]);
+                this.sink.emitParticles?.({ preset: 'smokeBloom', x: sp.x, y: sp.y, scale: 0.95 });
+              }
+            }, 'tactical-smoke-bloom');
+          } else if (e.itemKey === 'RADAR_SWEEP') {
+            const pings = e.pings ?? [];
+            for (let i = 0; i < pings.length; i++) {
+              const pp = tileCenterPx(pings[i]);
+              this.schedule(baseDelay + 220 + i * 75, () => {
+                this.sink.emitParticles?.({ preset: 'sonarPing', x: pp.x, y: pp.y, color: 0x10B981, scale: 0.92 });
+              }, `tactical-radar-ping-${i}`);
+            }
+          } else if (e.itemKey === 'PRECISION_STRIKE' && e.phase === 'RESOLVE') {
+            this.schedule(baseDelay + 420, () => {
+              this.sink.emitParticles?.({ preset: 'orbitalBeam', x: anchorPx.x, y: anchorPx.y, scale: 1.4 });
+              this.sink.emitParticles?.({ preset: 'explosion', x: anchorPx.x, y: anchorPx.y, scale: 1.35 });
+              this.sink.emitParticles?.({ preset: 'concreteDebris', x: anchorPx.x, y: anchorPx.y, scale: 1.15 });
+              this.triggerHitStop(48);
+              this.addTrauma(0.76);
+            }, 'tactical-precision-impact');
+          } else if (e.itemKey === 'SABOTAGE') {
+            this.schedule(baseDelay + 200, () => {
+              this.sink.emitParticles?.({ preset: 'empArc', x: anchorPx.x, y: anchorPx.y, scale: 1.15 });
+              this.addTrauma(0.32);
+            }, 'tactical-sabotage-emp');
+          } else if (e.itemKey === 'NAPALM_LINE') {
+            if (e.phase === 'BURN') {
+              this.schedule(baseDelay + 30, () => {
+                this.sink.emitParticles?.({ preset: 'napalmFlame', x: anchorPx.x, y: anchorPx.y, scale: 1.05 });
+                this.addTrauma(0.28);
+              }, 'tactical-napalm-burn');
+            } else {
+              for (let i = 0; i < e.tiles.length; i++) {
+                const pt = tileCenterPx(e.tiles[i]);
+                this.schedule(baseDelay + 220 + i * 110, () => {
+                  this.sink.emitParticles?.({ preset: 'napalmFlame', x: pt.x, y: pt.y, scale: 1.2 });
+                  this.addTrauma(0.34);
+                }, `tactical-napalm-ignite-${i}`);
+              }
+            }
+          } else if (e.itemKey === 'PARADROP') {
+            if (e.meta?.from) {
+              const fromPx = tileCenterPx(e.meta.from);
+              this.schedule(baseDelay + 180, () => {
+                this.sink.emitParticles?.({ preset: 'dustPuff', x: fromPx.x, y: fromPx.y, scale: 1.0 });
+                this.sink.emitParticles?.({ preset: 'shockwaveRing', x: fromPx.x, y: fromPx.y, color: 0x34D399, scale: 0.85 });
+              }, 'tactical-paradrop-pickup');
+            }
+            this.schedule(baseDelay + 860, () => {
+              this.sink.emitParticles?.({ preset: 'dustPuff', x: anchorPx.x, y: anchorPx.y, scale: 1.25 });
+              this.sink.emitParticles?.({ preset: 'shockwaveRing', x: anchorPx.x, y: anchorPx.y, color: 0x34D399, scale: 1.1 });
+              this.addTrauma(0.24);
+            }, 'tactical-paradrop-land');
+          } else if (e.itemKey === 'CARPET_RUN' && e.phase === 'RESOLVE') {
+            for (let i = 0; i < e.tiles.length; i++) {
+              const pt = tileCenterPx(e.tiles[i]);
+              this.schedule(baseDelay + 280 + i * 200, () => {
+                this.sink.emitParticles?.({ preset: 'explosion', x: pt.x, y: pt.y, scale: 1.3 });
+                this.sink.emitParticles?.({ preset: 'shockwaveRing', x: pt.x, y: pt.y, color: 0xFB923C, scale: 1.4 });
+                this.sink.emitParticles?.({ preset: 'concreteDebris', x: pt.x, y: pt.y, scale: 1.0 });
+                this.addTrauma(0.58);
+              }, `tactical-carpet-blast-${i}`);
+            }
+          } else if (e.itemKey === 'ARTILLERY_BARRAGE' && e.phase === 'RESOLVE') {
+            for (let i = 0; i < e.tiles.length; i++) {
+              const step = Math.floor(i / w);
+              const stagger = i % 2 === 1 ? 32 : 0;
+              const pt = tileCenterPx(e.tiles[i]);
+              this.schedule(baseDelay + 200 + step * 85 + stagger, () => {
+                this.sink.emitParticles?.({ preset: 'explosion', x: pt.x, y: pt.y, scale: 0.96 });
+                if (i % w === 0) {
+                  this.sink.emitParticles?.({ preset: 'shockwaveRing', x: pt.x, y: pt.y, color: 0xEF4444, scale: 1.2 });
+                  this.addTrauma(0.45);
+                }
+              }, `tactical-barrage-shell-${i}`);
+            }
+          } else if (e.itemKey === 'OVERCLOCK_CORE') {
+            this.schedule(baseDelay + 80, () => {
+              this.sink.emitParticles?.({ preset: 'overclockSurge', x: anchorPx.x, y: anchorPx.y, scale: 1.25 });
+              for (const p of e.pings ?? []) {
+                const pp = tileCenterPx(p);
+                this.sink.emitParticles?.({ preset: 'overclockSurge', x: pp.x, y: pp.y, scale: 0.9 });
+              }
+            }, 'tactical-overclock-surge');
+          }
+
+          // Cinematic tactical camera choreography (3.5-4.0s in FULL mode; never overrides lethal kills or structure cuts)
+          if (!hasKilledInBatch && !hasDestroyedStructure && !hasHeistInBatch && e.phase !== 'MARK') {
+            const camImpactDelay =
+              e.itemKey === 'PRECISION_STRIKE'
+                ? 420
+                : e.itemKey === 'CARPET_RUN'
+                  ? 280 + Math.floor((carpetCount - 1) / 2) * 200
+                  : e.itemKey === 'ARTILLERY_BARRAGE'
+                    ? 460
+                    : e.itemKey === 'NAPALM_LINE'
+                      ? e.phase === 'BURN'
+                        ? 0
+                        : 330
+                      : e.itemKey === 'PARADROP'
+                        ? 860
+                        : e.itemKey === 'SABOTAGE'
+                          ? 200
+                          : e.itemKey === 'RECON_DRONE'
+                            ? 280
+                            : e.itemKey === 'SMOKE_SCREEN'
+                              ? 220
+                              : e.itemKey === 'MINEFIELD_SNAPSHOT'
+                                ? 120
+                                : e.itemKey === 'RADAR_SWEEP' || e.itemKey === 'OVERCLOCK_CORE'
+                                  ? 140
+                                  : -1;
+            if (camImpactDelay >= 0) {
+              const tacCue = this.buildTacticalCamCue(e, camImpactDelay, events);
+              if (tacCue) {
+                if (camImpactDelay > 80) {
+                  this.schedule(
+                    baseDelay,
+                    () => {
+                      const realMs = this.killCam.preRoll(tacCue, getPrefersReducedMotion());
+                      if (realMs > 0) this.sink.onWake?.(realMs + 2200);
+                    },
+                    `tactical-cam-preroll-${e.itemKey}`,
+                  );
+                }
+                this.schedule(
+                  baseDelay + camImpactDelay,
+                  () => {
+                    if (this.killCam.impact(tacCue)) {
+                      this.sink.onWake?.(2600);
+                    }
+                  },
+                  `tactical-cam-impact-${e.itemKey}`,
+                );
+              }
+            }
+          }
+
+          this.schedule(
+            baseDelay + durationMs,
+            () => {
+              this.activeVisualCount = Math.max(0, this.activeVisualCount - 1);
+              if (this.sink.completeTacticalCombat) {
+                this.sink.completeTacticalCombat(fxId, ambientTailMs);
+              } else {
+                this.sink.removeTacticalEffect?.(fxId);
+              }
+            },
+            `tactical-fx-cleanup-${e.itemKey}`,
+          );
+          noteWake(baseDelay + durationMs + ambientTailMs + 220);
           break;
         }
 

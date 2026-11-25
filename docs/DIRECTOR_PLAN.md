@@ -471,6 +471,34 @@ Idea under review: each player gets a **tactical weapon** — a single-use, map-
 (multi-target air strike, radar sweep, …) — either bought in the shop with Euros or granted
 free on a timer (e.g. every 10 turns you pick one).
 
+```chart
+{
+  "type": "bar",
+  "title": "Chart title",
+  "x": "label",
+  "series": [
+    {
+      "key": "value",
+      "label": "Value"
+    }
+  ],
+  "data": [
+    {
+      "label": "A",
+      "value": 3
+    },
+    {
+      "label": "B",
+      "value": 5
+    },
+    {
+      "label": "C",
+      "value": 4
+    }
+  ]
+}
+```
+
 ### 8.1 The verdict: shop, not a timer
 
 The economy already grants the timer, but the player holds the dial.
@@ -553,10 +581,13 @@ The other half of the fix is unchanged and still required:
 Priced against units (Scout 50, Breacher 150, Sniper 300) so buying a weapon always competes
 with buying a body — that competition is the whole decision.
 
-**Status: design only.** Nothing in §8 exists in the engine yet; this is the rules text to
-implement. Buying is using — a tactical resolves (or arms its telegraph) as part of the
-purchase, so there is no inventory to manage. Overclock Core is the one effect that is carried.
-The free round-2 pick draws from the Common row only; it is the one weapon that costs nothing.
+**Status: implemented.** The rules below live in `packages/engine/src/tactical/` — `catalog`
+(items, tiers, free pick), `geometry` (footprints, smoke LOS), `rules` (purchase legality),
+`resolve` (per-weapon effect) and `ticks` (telegraph and round-end hazards). The shop card is
+`apps/web/src/components/ui/TacticalShop.tsx`. FX animations are still to come. Buying is using
+— a tactical resolves (or arms its telegraph) as part of the purchase, so there is no inventory
+to manage. Overclock Core is the one effect that is carried. The free round-2 pick draws from
+the Common row only; it is the one weapon that costs nothing.
 
 **Common — opens at round 2**
 
@@ -581,8 +612,8 @@ The free round-2 pick draws from the Common row only; it is the one weapon that 
 | Weapon | Cost | Rules |
 | --- | --- | --- |
 | **Carpet Run** | 275 | 8 damage to three adjacent visible tiles, telegraphed 1 round. Friendly fire on. |
-| **Artillery Barrage** | 300 | 2×10 axis-aligned lane, telegraphed 1 round, then the shells walk it: 8 damage to every unit in the lane, once. Exact rules in §8.3a. |
-| **Overclock Core** | 300 | Your next three attacks cost 2 CP less, never below 1 CP. Expires when the third attack is made. |
+| **Artillery Barrage** | 300 | 10-tile axis-aligned lane, 1 or 2 wide, telegraphed 1 round, then the shells walk it: 8 damage to every unit in the lane, once. Exact rules in §8.3a. |
+| **Overclock Core** | 300 | Each of your next three attacks refunds 2 CP, never above the battery cap. |
 
 **Why the two cuts**
 
@@ -635,7 +666,8 @@ than in a table cell, and the engine should implement this text literally.
 
 **Artillery Barrage — the walking lane**
 
-- **Shape.** 2 tiles wide × 10 tiles long, axis-aligned, placed by anchor + orientation. It must
+- **Shape.** 10 tiles long, 1 or 2 tiles wide (the buyer picks), axis-aligned, placed by anchor
+  + orientation. The 10 is the run; the width is the only shape choice (1×10 or 2×10). It must
   fit entirely on the board.
 - **Placement legality.** The anchor must be visible. No tile of the lane may be an HQ tile or
   one of the 8 tiles around any HQ. No tile may be outside the live Doomsday ring.
@@ -718,8 +750,8 @@ Do this instead:
   wins the overlap.
 - The HQ exclusion (rule 10) doubles as respawn protection, because Deathmatch redeploys at the
   HQ.
-- In 4P/6P the 2×10 lane punishes clumped formations; the one-round telegraph and friendly fire
-  are the brakes. Do not shrink them for player count.
+- In 4P/6P the 10-tile lane punishes clumped formations; the one-round telegraph and friendly
+  fire are the brakes. Do not shrink them for player count.
 - Doomsday's CP escalation does not interact with weapons: they are gold-only.
 
 **Fog of War.**
@@ -745,7 +777,7 @@ Do this instead:
 
 - `Config.ts`: `TACTICAL_TIERS = { COMMON: 2, RARE: 5, EPIC: 10 }`; `SHOP_ITEMS` gains
   `TACTICAL` entries alongside `CONSUMABLE` / `CONSTRUCT`, each with `tier`, `shape` (`SINGLE` |
-  `LINE4` | `LANE_2x10` | `ZONE3` | `SELF`), `damage`, `telegraphRounds`, `burnRounds`,
+  `LINE4` | `LANE_10x1_2` | `ZONE3` | `SELF`), `damage`, `telegraphRounds`, `burnRounds`,
   `friendlyFire`, `hitsStructures`, `hitsObjectives: false`.
 - `validate.ts`: a `BUY_ITEM` / `USE_TACTICAL` case that checks gold, the tier round, the
   one-per-round and one-per-turn caps, anchor visibility, board fit, the HQ exclusion and the
@@ -758,8 +790,13 @@ Do this instead:
 - `view.ts`: telegraph marks are public; fog damage is summarised as a hit count for the
   attacker. Do not send hidden units or their tiles to the client — the server already strips
   them, and the new events must not undo that.
-- `AIBrain.ts`: buy the cheapest unlocked useful weapon when gold > cost + buffer, never before
-  its tier; prefer a lane or zone when 2+ enemies are adjacent; never target its own units.
+- **Bots (shipped):** `botAction` asks `chooseTacticalAction` (`tactical/ai.ts`) first. It shops
+  late in the turn (battery under 5 CP or every unit has acted), walks the unlocked list from
+  cheapest up, and takes the first weapon with a real target — mine reveal if enemy traps exist,
+  drone/radar only under fog, the lowest-HP unit for Precision, a structure or 8+ CP battery for
+  Sabotage, a 4-line/3-line/10-lane that catches enough enemies, a flank drop for Paradrop, and
+  Overclock only when the battery is low. One purchase per round, tier gates included. EASY
+  bots opt out; bots skip Smoke until their target picker models the LOS it removes.
 - `sim-playtest.ts`: add a weapon ledger (bought / used / payoff per weapon) so the lab can
   report weapons bought per match and payoff events per weapon. Success = weapons appear in
   ~60–80% of matches, and the dead-turn % does not rise (a weapon turn must still be a turn).
@@ -973,9 +1010,10 @@ variant. It also gives your drama somewhere to go after the match ends.
 
 ### 9.3 Add now, small
 
-- **AI must buy tactical weapons.** `AIBrain` currently issues only `BUY_DROP` (ammo) — but HARD
-  already buys mines at `gold >= 225` and tunnels at `gold >= cost + 100`, so the pattern exists.
-  Without this, every PvE match is asymmetric the moment weapons ship.
+- **AI buys tactical weapons (shipped).** `botAction` checks `chooseTacticalAction` before the
+  regular brain: cheapest useful unlocked weapon, once per round, late in the turn. It shares the
+  human tier gates and free round-2 pick. EASY bots still skip the shop; bots do not buy Smoke yet
+  because their target picker does not model its LOS block.
 - **A gold ledger in `sim-playtest.ts`** (see §8.8) — no gold is tracked there today, so economy
   tuning is currently unmeasurable.
 - **Colour-blind safe ownership.** Ownership is colour-coded (red/mint) and this is a game where

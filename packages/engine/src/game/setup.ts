@@ -19,6 +19,7 @@ import { cloneMatchStats, createEmptyGameState, createLog, createUnit, type Game
 import { gameSettingsFor, type MapTilePatch, type TableSettings } from '../protocol';
 import { generateConfiguredMap, isClassicDynamicConfig, placeFairStartingLoot } from './mapPresets';
 import { withOpeningContract } from './Contracts';
+import { initAirDropsForMatch } from './airDrops';
 
 export const WEATHER_TYPES: WeatherType[] = ['CLEAR', 'SCORCHED', 'MONSOON', 'FOG', 'TAILWIND', 'SANDSTORM'];
 
@@ -1073,17 +1074,27 @@ const freshGame = (
     units: Unit[],
     activeSeed: string,
     players: StartingPlayers
-): GameState => withOpeningContract({
-    ...createEmptyGameState(settings, gridSize),
-    mapData,
-    units,
-    ...players,
-    playerCpDebt: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
-    playerCpBorrowed: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
-    playerCpRefunded: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
-    activeSeed,
-    matchStats: cloneMatchStats(undefined, settings.playerCount),
-});
+): GameState => {
+    const baseState: GameState = {
+        ...createEmptyGameState(settings, gridSize),
+        mapData,
+        units,
+        ...players,
+        playerCpDebt: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
+        playerCpBorrowed: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
+        playerCpRefunded: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
+        playerShopVouchers: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, []])),
+        playerTacticalVouchers: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, []])),
+        activeSeed,
+        matchStats: cloneMatchStats(undefined, settings.playerCount),
+    };
+    const { airDrops, airDropMeta } = initAirDropsForMatch(baseState);
+    return withOpeningContract({
+        ...baseState,
+        airDrops,
+        airDropMeta,
+    });
+};
 
 /** A generated map from the settings' seed + optional `mapGen` preset/knobs (or a static arena). */
 export const createGeneratedGame = (settings: GameSettings): GameState => {

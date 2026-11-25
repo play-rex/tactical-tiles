@@ -20,6 +20,14 @@ import { CrossfireBeam } from './renderer/CrossfireLayer';
 import { ParticleLayer } from './renderer/ParticleLayer';
 import { DeathGhostLayer } from './renderer/DeathGhostLayer';
 import { TileEffectsLayer } from './renderer/TileEffectsLayer';
+import { TacticalGroundLayer, TacticalAirLayer } from './renderer/TacticalBoardLayer';
+import { TacticalFxLayer } from './renderer/TacticalFxLayer';
+import { AirDropGroundLayer, AirDropAirLayer } from './renderer/AirDropLayer';
+import {
+  isUnitPickTacticalMode,
+  TacticalSpotlightGroundLayer,
+  TacticalTargetingOverlayLayer,
+} from './renderer/TacticalTargetingLayer';
 import { WaterShimmerLayer } from './renderer/WaterShimmerLayer';
 import { LivingMapLayer } from './renderer/LivingMapLayer';
 import { DropAndPromoLayer } from './renderer/DropAndPromoLayer';
@@ -122,7 +130,7 @@ const drawCrosshairBrackets = (
 
 // 1. Grid & Highlights Layer
 const OverlayLayer = React.memo(({
-    mapData, tileById, units, viewer, settings, weather, visibleTiles,
+    mapData, tileById, units, viewer, settings, weather, visibleTiles, smokeZones,
     selectedUnit, currentPlayer,
     validMoveTiles, validAttackTargets, validSpawnTiles,
     selectedTileId, placementMode,
@@ -152,7 +160,8 @@ const OverlayLayer = React.memo(({
             drawTileBox(g, tile, color, alpha, border ? 0.95 : undefined, borderColor ?? color);
         };
 
-        if (placementMode && placementMode.active) {
+        // Non-tactical placement highlights (Tactical Weapons use the dedicated TacticalSpotlightGroundLayer + TacticalTargetingOverlayLayer)
+        if (placementMode && placementMode.active && placementMode.kind !== 'TACTICAL') {
             const selectedSet = new Set<string>(Array.isArray(placementMode.selectedTiles) ? placementMode.selectedTiles : []);
             if (Array.isArray(placementMode.validTiles) && placementMode.validTiles.length > 0) {
                 placementMode.validTiles.forEach((id: string) => {
@@ -223,7 +232,7 @@ const OverlayLayer = React.memo(({
                 isUnitVisible(u, viewer, Boolean(settings?.fogOfWar), visibleTiles)
             );
             if (selectedOverwatcher) {
-                const covered = getOverwatchCoverageTiles(selectedOverwatcher, mapData, weather, gridSize || 20);
+                const covered = getOverwatchCoverageTiles(selectedOverwatcher, mapData, weather, gridSize || 20, smokeZones);
                 covered.forEach((tid: string) => {
                     const t = tileById.get(tid);
                     if (t) drawTileBox(g, t, 0xFFB300, 0.14, 0.95);
@@ -252,7 +261,7 @@ const OverlayLayer = React.memo(({
         }
         g.lineStyle(0);
 
-    }, [mapData, tileById, units, viewer, settings, weather, visibleTiles, selectedUnit, currentPlayer, validMoveTiles, validAttackTargets, validSpawnTiles, selectedTileId, placementMode, validSecureTile, validSiegeTile, validDemolishTile, validLootTile, gridSize]);
+    }, [mapData, tileById, units, viewer, settings, weather, visibleTiles, smokeZones, selectedUnit, currentPlayer, validMoveTiles, validAttackTargets, validSpawnTiles, selectedTileId, placementMode, validSecureTile, validSiegeTile, validDemolishTile, validLootTile, gridSize]);
 
     return <Graphics draw={draw} eventMode="none" />;
 });
@@ -488,7 +497,14 @@ const UIMarkersLayer = React.memo<{
     }, [mapData, visibleTiles, fogOfWar, victoryMode, visibleDrops, visibleMines, mapRotation]);
 
     const lootTiles = useMemo(
-        () => mapData.filter(tile => Boolean(tile.loot) && (!fogOfWar || visibleTiles.has(tile.id))),
+        () =>
+            mapData.filter(
+                tile =>
+                    Boolean(tile.loot) &&
+                    tile.loot !== 'FIELD_SUPPLY' &&
+                    tile.loot !== 'TACTICAL_SUPPLY' &&
+                    (!fogOfWar || visibleTiles.has(tile.id)),
+            ),
         [mapData, fogOfWar, visibleTiles]
     );
 
@@ -607,6 +623,7 @@ const HoverOverlayLayer = React.memo<{
     const settings = useGameStore(state => state.settings);
     const playerCp = useGameStore(state => state.playerCp);
     const visibleTiles = useGameStore(state => state.visibleTiles);
+    const smokeZones = useGameStore(state => state.smokeZones);
 
     const selectedUnit = useMemo(
         () => (selectedUnitId ? units.find(u => u.id === selectedUnitId) : undefined),
@@ -633,15 +650,19 @@ const HoverOverlayLayer = React.memo<{
             fogOfWar: settings.fogOfWar,
             maxBudget: playerCp[currentPlayer] ?? 0,
             visibleTiles: settings.fogOfWar ? visibleTiles : null,
+            smokeZones,
         });
-    }, [selectedUnit, currentPlayer, hoveredTileId, validMoveCosts, validMoveParents, mapData, units, weather, gridSize, settings.fogOfWar, playerCp, visibleTiles]);
+    }, [selectedUnit, currentPlayer, hoveredTileId, validMoveCosts, validMoveParents, mapData, units, weather, gridSize, settings.fogOfWar, playerCp, visibleTiles, smokeZones]);
 
     const hoverPath = hoverMoveResolution?.path;
 
     useEffect(() => {
         let nextCursor = 'default';
         if (!isAiTurn && winner === null && hoveredTileId) {
-            if (hoveredEnemy || hoveredTileId === validSiegeTile || hoveredTileId === validDemolishTile) {
+            if (placementMode?.active && placementMode.kind === 'TACTICAL') {
+                const isSelectedTile = Boolean(placementMode.selectedTiles?.includes(hoveredTileId));
+                nextCursor = placementMode.validTiles.includes(hoveredTileId) || isSelectedTile ? 'crosshair' : 'not-allowed';
+            } else if (hoveredEnemy || hoveredTileId === validSiegeTile || hoveredTileId === validDemolishTile) {
                 nextCursor = 'crosshair';
             } else if (
                 validMoveTiles.includes(hoveredTileId) ||
@@ -656,13 +677,18 @@ const HoverOverlayLayer = React.memo<{
 
     useEffect(() => {
         wakeBattleRenderer(0);
-    }, [hoveredTileId, hoverPath, validAttackTargets]);
+    }, [hoveredTileId, hoverPath, validAttackTargets, placementMode]);
 
     const draw = useCallback((g: PIXI.Graphics) => {
         g.clear();
         if (!hoveredTileId) return;
 
         const ht = tileById.get(hoveredTileId);
+
+        // Tactical Weapon hover previews now render ABOVE units inside TacticalTargetingOverlayLayer.
+        if (placementMode?.active && placementMode.kind === 'TACTICAL') {
+            return;
+        }
         // Automated Turret / Base Artillery Danger Range Ring on Hover
         if (ht) {
             let dangerRange = 0;
@@ -700,7 +726,7 @@ const HoverOverlayLayer = React.memo<{
                 isUnitVisible(u, viewer, settings.fogOfWar, visibleTiles)
             );
             if (hoveredOverwatcher) {
-                const covered = getOverwatchCoverageTiles(hoveredOverwatcher, mapData, weather, gridSize);
+                const covered = getOverwatchCoverageTiles(hoveredOverwatcher, mapData, weather, gridSize, smokeZones);
                 covered.forEach((tid: string) => {
                     const t = tileById.get(tid);
                     if (t) drawTileBox(g, t, 0xFFB300, 0.14, 0.9);
@@ -832,6 +858,7 @@ const HoverOverlayLayer = React.memo<{
                         gridSize,
                         fogOfWar: settings.fogOfWar,
                         visibleTiles: settings.fogOfWar ? visibleTiles : null,
+                        smokeZones,
                     });
                     for (let i = 0; i < postMoveTargets.length; i++) {
                         const et = postMoveTargets[i];
@@ -863,7 +890,7 @@ const HoverOverlayLayer = React.memo<{
             g.drawRect(ht.x * TILE_SIZE + 1, ht.y * TILE_SIZE + 1, TILE_SIZE - 2, TILE_SIZE - 2);
             g.lineStyle(0);
         }
-    }, [hoveredTileId, selectedTileId, selectedUnit, hoveredEnemy, validSiegeTile, validDemolishTile, currentPlayer, units, settings.fogOfWar, settings.victoryMode, viewer, visibleTiles, mapData, weather, gridSize, tileById, hoverPath, hoverMoveResolution, validMoveCosts, playerCp]);
+    }, [hoveredTileId, selectedTileId, selectedUnit, hoveredEnemy, validSiegeTile, validDemolishTile, currentPlayer, units, settings.fogOfWar, settings.victoryMode, viewer, visibleTiles, smokeZones, placementMode, mapData, weather, gridSize, tileById, hoverPath, hoverMoveResolution, validMoveCosts, playerCp]);
 
     return <Graphics draw={draw} eventMode="none" />;
 });
@@ -928,9 +955,10 @@ const EffectsLayer = React.memo<{
     selectedUnitPos: { x: number; y: number } | null;
     fxMode: FxMode;
     mapRotation: BoardRotation;
+    gridSize: number;
     particlePoolRef: React.MutableRefObject<ParticlePool | null>;
 }>(
-    ({ selectedUnitPos, fxMode, mapRotation, particlePoolRef }) => {
+    ({ selectedUnitPos, fxMode, mapRotation, gridSize, particlePoolRef }) => {
         const damagePopups = useEffectStore(state => state.damagePopups);
         const projectiles = useEffectStore(state => state.projectiles);
         const crossfireLocks = useEffectStore(state => state.crossfireLocks);
@@ -945,6 +973,8 @@ const EffectsLayer = React.memo<{
                 {projectiles.map(proj => (
                     <ProjectileRenderer key={proj.id} data={proj} mapRotation={mapRotation} />
                 ))}
+                <TacticalFxLayer mapRotation={mapRotation} gridSize={gridSize} />
+                <AirDropAirLayer mapRotation={mapRotation} />
                 <ParticleLayer mapRotation={mapRotation} poolRef={particlePoolRef} />
                 <DropAndPromoLayer mapRotation={mapRotation} />
                 {damagePopups.map(popup => (
@@ -977,7 +1007,9 @@ const BattleRenderController: React.FC<{
     const hasDeathGhosts = useEffectStore(state => state.deathGhosts.length > 0);
     const hasTileEffects = useEffectStore(state => state.tileEffects.length > 0);
     const hasSupplyDrops = useEffectStore(state => state.supplyDrops.length > 0);
+    const hasAirDrops = useEffectStore(state => state.airDropAnims.length > 0);
     const hasPromotions = useEffectStore(state => state.promotionBursts.length > 0);
+    const hasTacticalEffects = useEffectStore(state => state.tacticalEffects.length > 0);
     const activeFx =
         hasProjectiles ||
         hasPopups ||
@@ -986,7 +1018,9 @@ const BattleRenderController: React.FC<{
         hasDeathGhosts ||
         hasTileEffects ||
         hasSupplyDrops ||
-        hasPromotions;
+        hasAirDrops ||
+        hasPromotions ||
+        hasTacticalEffects;
 
     const wakeUntilRef = useRef<number>(0);
     const singleRafRef = useRef<number | null>(null);
@@ -1217,7 +1251,15 @@ export const GameRenderer = () => {
     const currentPlayer = useGameStore(state => state.currentPlayer);
     const playerCp = useGameStore(state => state.playerCp);
     const pendingDrops = useGameStore(state => state.pendingDrops);
+    const airDrops = useGameStore(state => state.airDrops) ?? [];
     const mines = useGameStore(state => state.mines);
+    const pendingTacticals = useGameStore(state => state.pendingTacticals);
+    const burningLines = useGameStore(state => state.burningLines);
+    const smokeZones = useGameStore(state => state.smokeZones);
+    const sensors = useGameStore(state => state.sensors);
+    const overclockCharges = useGameStore(state => state.overclockCharges);
+    const trapRevealRound = useGameStore(state => state.trapRevealRound);
+    const totalTurns = useGameStore(state => state.totalTurns);
     const isAiTurn = useGameStore(state => state.isAiTurn);
     const winner = useGameStore(state => state.winner);
     const visibleTiles = useGameStore(state => state.visibleTiles);
@@ -1265,6 +1307,12 @@ export const GameRenderer = () => {
         () => (mines ?? []).filter(m => m.owner === viewer),
         [mines, viewer]
     );
+    const revealedEnemyMines = useMemo(() => {
+        const round = totalTurns + 1;
+        const canSeeEnemyMines = mode === 'ONLINE' || (trapRevealRound?.[viewer] ?? 0) >= round;
+        if (!canSeeEnemyMines) return [];
+        return (mines ?? []).filter(m => m.owner !== viewer);
+    }, [mines, viewer, mode, trapRevealRound, totalTurns]);
 
     useEffect(() => {
         return () => {
@@ -1295,6 +1343,16 @@ export const GameRenderer = () => {
     );
     const aliveUnitIds = useMemo(() => new Set(units.map(u => u.id)), [units]);
 
+    const dimNonTargetUnits = isUnitPickTacticalMode(placementMode);
+    const tacticalBrightTiles = useMemo(() => {
+        const set = new Set<string>();
+        if (placementMode?.active && placementMode.kind === 'TACTICAL') {
+            for (const id of placementMode.validTiles) set.add(id);
+            for (const id of placementMode.selectedTiles ?? []) set.add(id);
+        }
+        return set;
+    }, [placementMode]);
+
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
             const targetTag = (e.target as HTMLElement | null)?.tagName;
@@ -1302,6 +1360,18 @@ export const GameRenderer = () => {
             if (e.key === 'Tab') {
                 e.preventDefault();
                 selectNextReadyUnit();
+            } else if ((e.key === ' ' || e.code === 'Space') && !fxTimeline.isKillCamActive()) {
+                const st = useGameStore.getState();
+                const pm = st.placementMode;
+                if (pm?.active && pm.kind === 'TACTICAL') {
+                    if (pm.itemKey === 'NAPALM_LINE' || pm.itemKey === 'ARTILLERY_BARRAGE') {
+                        e.preventDefault();
+                        st.setTacticalAxis(pm.tacticalAxis === 'V' ? 'H' : 'V');
+                    } else if (pm.itemKey === 'CARPET_RUN' && (pm.selectedTiles?.length ?? 0) > 0) {
+                        e.preventDefault();
+                        st.confirmTacticalStrike();
+                    }
+                }
             } else if ((e.key === 'o' || e.key === 'O') && !e.metaKey && !e.ctrlKey && !e.altKey) {
                 e.preventDefault();
                 enterOverwatch();
@@ -1501,6 +1571,12 @@ export const GameRenderer = () => {
                         validLootTile,
                         visiblePendingDrops,
                         visibleOwnMines,
+                        revealedEnemyMines,
+                        pendingTacticals,
+                        burningLines,
+                        smokeZones,
+                        sensors,
+                        overclockCharges,
                         playerCp,
                         currentPlayer,
                         isMyTurn,
@@ -1606,6 +1682,7 @@ export const GameRenderer = () => {
                             settings={settings}
                             weather={weather}
                             visibleTiles={visibleTiles}
+                            smokeZones={smokeZones}
                             selectedUnit={selectedUnit}
                             currentPlayer={currentPlayer}
                             validMoveTiles={validMoveTiles}
@@ -1619,6 +1696,10 @@ export const GameRenderer = () => {
                             validLootTile={validLootTile}
                             gridSize={gridSize}
                         />
+                        <TacticalSpotlightGroundLayer
+                            mapData={mapData}
+                            placementMode={placementMode}
+                        />
                         <HoverOverlayLayer
                             tileById={tileById}
                             hitPlaneRef={hitPlaneRef}
@@ -1627,6 +1708,32 @@ export const GameRenderer = () => {
 
                         {/* 3b. GROUND-PLANE TILE EFFECTS (scorch craters, mine flashes, capture waves, drop beams) */}
                         <TileEffectsLayer />
+
+                        {/* 3c. PERSISTENT TACTICAL GROUND HAZARDS (napalm flames, strike telegraphs, overclock halos, revealed mines) */}
+                        <TacticalGroundLayer
+                            tileById={tileById}
+                            pendingTacticals={pendingTacticals}
+                            burningLines={burningLines}
+                            overclockCharges={overclockCharges}
+                            revealedEnemyMines={revealedEnemyMines}
+                            units={units}
+                            viewer={viewer}
+                            fogOfWar={settings.fogOfWar}
+                            visibleTiles={visibleTiles}
+                            mapRotation={mapRotation}
+                            animate={fxMode === 'LIVE'}
+                            particlePoolRef={particlePoolRef}
+                        />
+
+                        {/* 3d. THEATER AIR SUPPLY DROPS (DISPATCH sectors, FLARE beacons, and landed mystery crates) */}
+                        <AirDropGroundLayer
+                            airDrops={airDrops}
+                            mapData={mapData}
+                            gridSize={gridSize}
+                            mapRotation={mapRotation}
+                            animate={fxMode === 'LIVE'}
+                            particlePoolRef={particlePoolRef}
+                        />
 
                         {/* 4. UNITS LAYER (No full-screen bloom filter -> 10x lighter GPU compositing) */}
                         <Container name="units">
@@ -1647,6 +1754,7 @@ export const GameRenderer = () => {
                                         mapRotation={mapRotation}
                                         isSelected={selectedUnitId === unit.id}
                                         isReadyTurn={isMyTurn && unit.owner === currentPlayer && !unit.completed && !unit.isOverwatching}
+                                        dimmed={dimNonTargetUnits && !tacticalBrightTiles.has(unit.tileId)}
                                     />
                                 );
                             })}
@@ -1660,13 +1768,17 @@ export const GameRenderer = () => {
                         {/* 4a. 550ms UNIT DEATH GHOSTS */}
                         <DeathGhostLayer />
 
-                        {/* 4b. TOP-OF-SPRITE ATTACK TARGETING RETICLES */}
+                        {/* 4b. TOP-OF-SPRITE ATTACK & TACTICAL TARGETING RETICLES */}
                         <TargetingOverlayLayer
                             tileById={tileById}
                             units={units}
                             validAttackTargets={validAttackTargets}
                             validSiegeTile={validSiegeTile}
                             validDemolishTile={validDemolishTile}
+                        />
+                        <TacticalTargetingOverlayLayer
+                            tileById={tileById}
+                            mapRotation={mapRotation}
                         />
 
                         {/* 5. LOOT & UI OVERLAYS */}
@@ -1681,11 +1793,22 @@ export const GameRenderer = () => {
                             mapRotation={mapRotation}
                         />
 
-                        {/* 6. EFFECTS LAYER (Damage, Selection, Projectiles, Pooled Particles) */}
+                        {/* 5b. AERIAL TACTICAL LAYER (volumetric smoke clouds & hovering Recon Drones above units) */}
+                        <TacticalAirLayer
+                            tileById={tileById}
+                            smokeZones={smokeZones}
+                            sensors={sensors}
+                            viewer={viewer}
+                            mapRotation={mapRotation}
+                            animate={fxMode === 'LIVE'}
+                        />
+
+                        {/* 6. EFFECTS LAYER (Damage, Selection, Projectiles, Tactical FX, Pooled Particles) */}
                         <EffectsLayer
                             selectedUnitPos={selectedUnitPos}
                             fxMode={fxMode}
                             mapRotation={mapRotation}
+                            gridSize={gridSize}
                             particlePoolRef={particlePoolRef}
                         />
                     </Container>

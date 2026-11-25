@@ -7,7 +7,7 @@
  */
 import { create } from 'zustand';
 import { BANK_STATS, BARRIER_STATS, BASE_STATS, CP_SYSTEM, DEFAULT_GRID_SIZE, OVERWATCH_STATS, RESPAWN_CP_COST, SHOP_ITEMS } from '@tactical/engine/constants/Config';
-import type { GameSettings, SavedMap, TerrainType, Tile, Unit, UnitRank, UnitType, WeatherState } from '@tactical/engine/types';
+import type { GameSettings, SavedMap, TacticalId, TerrainType, Tile, Unit, UnitRank, UnitType, WeatherState } from '@tactical/engine/types';
 import { getStepCost, getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { canConstructOnTile, canUnitEnterOverwatch, getUnitAttackCost, getUnitMaxHp, isWithinEnemyHqExclusion } from '@tactical/engine/rules/CombatRules';
 import { CareerStorage } from '@tactical/engine/storage/CareerStatsManager';
@@ -28,11 +28,20 @@ import {
   getSpawnTiles,
   getSupplyDropTargets,
   getUnitOptions,
+  hasTacticalVoucher,
   DEFAULT_GAME_SETTINGS,
   INTERACT_COST,
   isSameMapGen,
   isUnitVisible,
+  legalParadropDestinations,
+  legalTacticalAnchors,
+  paradropDestinationBlocker,
   spawnBlocker,
+  TACTICAL_ITEMS,
+  tacticalBlocker,
+  tacticalCooldownLeft,
+  tacticalIsFree,
+  tacticalUnlockRound,
   visibleSet,
   type GameAction,
   type GameEvent,
@@ -75,11 +84,17 @@ export interface PlacementModeState {
   active: boolean;
   itemKey: string;
   cost: number;
-  kind: 'CONSTRUCT' | 'DROP';
+  kind: 'CONSTRUCT' | 'DROP' | 'TACTICAL';
   validTiles: string[];
   selectedTiles?: string[];
   requiredCount?: number;
   variant?: string;
+  /** Tactical footprint orientation; H walks +x, V walks +y. */
+  tacticalAxis?: 'H' | 'V';
+  /** Artillery Barrage lane width (always 2×10). */
+  tacticalWidth?: 1 | 2;
+  /** Picked unit ID during Step 2 of Paradrop airlift relocation. */
+  tacticalUnitId?: string;
 }
 
 export interface MapFeedback {
@@ -200,6 +215,10 @@ interface GameStore extends GameState {
   lootSupply: () => void;
   resolveBankReward: (choice: 'GOLD' | 'CP') => void;
   buyShopItem: (itemKey: string, variant?: string) => void;
+  useTacticalWeapon: (itemKey: TacticalId) => void;
+  setTacticalAxis: (axis: 'H' | 'V') => void;
+  confirmTacticalStrike: () => void;
+  resetParadropPick: () => void;
   confirmConstruct: () => void;
   confirmAutoDrop: () => void;
   cancelPlacement: () => void;
@@ -321,6 +340,18 @@ export const viewerSeat = (s: Pick<GameStore, 'mode' | 'mySeat' | 'currentPlayer
 const topUpPlayerCp = (cp: Record<number, number>): Record<number, number> =>
   Object.fromEntries(Object.keys(cp).map(seat => [Number(seat), CP_SYSTEM.MAX_CP]));
 
+/** Pure sandbox tactical view: unlocks all tiers, Euros, and cooldowns without altering live match rules. */
+const sandboxTacticalState = (state: GameStore): GameState => ({
+  ...state,
+  totalTurns: Math.max(state.totalTurns, 9),
+  playerGold: {
+    ...state.playerGold,
+    [state.currentPlayer]: Math.max(state.playerGold[state.currentPlayer] ?? 0, 5000),
+  },
+  tacticalRound: {},
+  tacticalCooldowns: {},
+});
+
 let aiLoopSeq = 0;
 
 /** Play an action's effects through the synchronized FX timeline. */
@@ -330,6 +361,7 @@ const playEvents = (events: GameEvent[], unitSnapshot?: Unit[], fallbackUnits?: 
   const unitsForLookup = unitSnapshot;
   const preFallback = fallbackUnits ?? useGameStore.getState().units;
   fxTimeline.configure({
+    getGridSize: () => useGameStore.getState().gridSize || 20,
     getUnitInfo: (unitId) => {
       const primary = unitsForLookup ?? useGameStore.getState().units;
       const u = primary.find(item => item.id === unitId) ?? preFallback.find(item => item.id === unitId);
@@ -518,6 +550,16 @@ const pickGameState = (s: GameState): GameState => ({
   spectatorTurn: s.spectatorTurn,
   spectatorWindow: s.spectatorWindow,
   spectatorUsedRound: s.spectatorUsedRound,
+  tacticalRound: s.tacticalRound,
+  tacticalCooldowns: s.tacticalCooldowns,
+  freeTacticalRound: s.freeTacticalRound,
+  trapRevealRound: s.trapRevealRound,
+  radarRound: s.radarRound,
+  overclockCharges: s.overclockCharges,
+  pendingTacticals: s.pendingTacticals,
+  burningLines: s.burningLines,
+  smokeZones: s.smokeZones,
+  sensors: s.sensors,
 });
 
 const optionsSelectionFor = (game: GameState, unit: Unit, visibleTiles: Set<string>) => {
@@ -1351,53 +1393,145 @@ export const useGameStore = create<GameStore>((set, get) => {
           selectedTileId: clickedTileId,
         });
 
-      // Pure sandbox: pick a unit, click any tile to teleport it, click an enemy to strike it.
-      // No ranges, no CP, no terrain costs and no turn order — nothing here mutates the rules.
-      if (state.devSandbox && state.devFreeplay) {
-        const unitHere = units.find(u => u.tileId === clickedTileId);
-        const selected = selectedUnitId ? units.find(u => u.id === selectedUnitId) : null;
-        if (selected && unitHere && unitHere.owner !== selected.owner) {
-          get().devAttackUnit(selected.id, unitHere.id);
-          return;
-        }
-        if (selected && !unitHere) {
-          // A bank vault, an enemy HQ or a barrier is a target, not a landing pad: strike it
-          // instead of parking the unit on top of it.
-          const structureTarget =
-            tile !== null &&
-            tile !== undefined &&
-            tile.hp !== undefined &&
-            ((tile.type === 'BANK' && (tile.hackProgress ?? 0) < 100) ||
-              (tile.type === 'BASE' && tile.owner !== selected.owner) ||
-              tile.type === 'BARRIER');
-          if (structureTarget) {
-            get().devSiegeStructure(selected.id, clickedTileId);
-            return;
-          }
-          if (tile && (tile.type === 'BANK' || tile.type === 'BASE' || tile.type === 'BARRIER')) {
-            return;
-          }
-          get().devMoveUnit(selected.id, clickedTileId);
-          return;
-        }
-        set({
-          ...CLEAR_SELECTION,
-          selectedUnitId: unitHere?.id ?? null,
-          selectedTileId: clickedTileId,
-          hoveredTileId: clickedTileId,
-        });
-        return;
-      }
+      const sandboxFree = state.devSandbox && state.devFreeplay;
 
       // Not your move (someone else's turn, a vault to claim, or the match is over): you can
       // still inspect anything you can see.
-      if (winner !== null || state.bankRewardPending || isAiTurn) {
+      if (!sandboxFree && (winner !== null || state.bankRewardPending || isAiTurn)) {
         inspect();
         return;
       }
 
-      // Placing a Barrier wall, Land Mine, Bridge, or Airdrop Beacon bought from the shop
-      if (placementMode && placementMode.active && tile) {
+      // Placing a Tactical Weapon, Barrier wall, Land Mine, Bridge, or Airdrop Beacon bought from the shop.
+      // Runs BEFORE pure-sandbox teleport so armed weapons/builds work identically in Dev Sandbox!
+      if (placementMode && placementMode.active && tile && !isAiTurn && winner === null) {
+        if (placementMode.kind === 'TACTICAL') {
+          const itemKey = placementMode.itemKey as TacticalId;
+          const def = TACTICAL_ITEMS[itemKey];
+          const visible = state.settings.fogOfWar ? state.visibleTiles : null;
+          const tacState = sandboxFree ? sandboxTacticalState(state) : state;
+
+          // Carpet Run: pick 1 to 3 distinct visible enemy units; fires immediately on 3rd pick or when no more enemies remain.
+          if (def?.shape === 'UNITS3') {
+            const prevSelected = placementMode.selectedTiles ?? [];
+            if (prevSelected.includes(clickedTileId)) {
+              const nextSelected = prevSelected.filter(id => id !== clickedTileId);
+              const validTiles = legalTacticalAnchors(tacState, currentPlayer, itemKey, {
+                tileIds: nextSelected,
+                visible,
+              });
+              set({ placementMode: { ...placementMode, selectedTiles: nextSelected, validTiles } });
+              SoundFX.play('click');
+              return;
+            }
+            if (!placementMode.validTiles.includes(clickedTileId)) {
+              get().showMapFeedback(clickedTileId, 'Pick visible enemy units (up to 3 targets)', 'warn');
+              return;
+            }
+            const nextSelected = [...prevSelected, clickedTileId];
+            const remaining = legalTacticalAnchors(tacState, currentPlayer, itemKey, {
+              tileIds: nextSelected,
+              visible,
+            });
+            if (nextSelected.length >= 3 || remaining.length === 0) {
+              set({ placementMode: null });
+              get().executeAiAction({
+                type: 'USE_TACTICAL',
+                itemKey,
+                tileId: nextSelected[0],
+                tileIds: nextSelected,
+              });
+              return;
+            }
+            set({ placementMode: { ...placementMode, selectedTiles: nextSelected, validTiles: remaining } });
+            SoundFX.play('click');
+            return;
+          }
+
+          // Paradrop: Step 1 pick any visible unit (yours or enemy); Step 2 pick open landing tile.
+          if (def?.shape === 'RELOCATE') {
+            if (!placementMode.tacticalUnitId) {
+              const picked = state.units.find(
+                u => u.tileId === clickedTileId && (!visible || u.owner === currentPlayer || visible.has(u.tileId)),
+              );
+              if (!picked) {
+                get().showMapFeedback(clickedTileId, 'Step 1: Pick any visible unit (yours or enemy) to airlift', 'warn');
+                return;
+              }
+              const dests = legalParadropDestinations(tacState, currentPlayer, picked.id, visible);
+              if (dests.length === 0) {
+                get().showMapFeedback(clickedTileId, 'No legal landing tiles available for that unit', 'warn');
+                return;
+              }
+              SoundFX.play('click');
+              set({
+                placementMode: {
+                  ...placementMode,
+                  tacticalUnitId: picked.id,
+                  selectedTiles: [picked.tileId],
+                  validTiles: dests,
+                },
+              });
+              return;
+            }
+
+            const pickedUnit = state.units.find(u => u.id === placementMode.tacticalUnitId);
+            if (!pickedUnit) {
+              set({ placementMode: null });
+              return;
+            }
+            if (clickedTileId === pickedUnit.tileId) {
+              const unitTiles = legalTacticalAnchors(tacState, currentPlayer, itemKey, { visible });
+              SoundFX.play('click');
+              set({
+                placementMode: {
+                  ...placementMode,
+                  tacticalUnitId: undefined,
+                  selectedTiles: undefined,
+                  validTiles: unitTiles,
+                },
+              });
+              return;
+            }
+            if (!placementMode.validTiles.includes(clickedTileId)) {
+              const reason =
+                paradropDestinationBlocker(tacState, currentPlayer, pickedUnit.owner, pickedUnit.tileId, tile, visible) ??
+                'Pick a highlighted open landing tile';
+              get().showMapFeedback(clickedTileId, reason, 'warn');
+              return;
+            }
+            set({ placementMode: null });
+            get().executeAiAction({
+              type: 'USE_TACTICAL',
+              itemKey,
+              unitId: pickedUnit.id,
+              tileId: clickedTileId,
+            });
+            return;
+          }
+
+          if (!placementMode.validTiles.includes(clickedTileId)) {
+            const reason =
+              tacticalBlocker(tacState, currentPlayer, itemKey, {
+                tileId: clickedTileId,
+                axis: placementMode.tacticalAxis,
+                width: def?.shape === 'LANE' ? 2 : undefined,
+                visible,
+              }) ?? 'Pick a highlighted tile for the tactical weapon';
+            get().showMapFeedback(clickedTileId, reason, 'warn');
+            return;
+          }
+          const action = {
+            type: 'USE_TACTICAL' as const,
+            itemKey,
+            tileId: clickedTileId,
+            axis: placementMode.tacticalAxis,
+            width: def?.shape === 'LANE' ? (2 as const) : undefined,
+          };
+          set({ placementMode: null });
+          get().executeAiAction(action);
+          return;
+        }
         if (placementMode.kind === 'CONSTRUCT') {
           const requiredCount = placementMode.requiredCount ?? 1;
           const prevSelected = placementMode.selectedTiles ?? [];
@@ -1446,6 +1580,44 @@ export const useGameStore = create<GameStore>((set, get) => {
         } else {
           get().showMapFeedback(clickedTileId, 'Pick a highlighted cyan drop zone', 'warn');
         }
+        return;
+      }
+
+      // Pure sandbox: pick a unit, click any tile to teleport it, click an enemy to strike it.
+      // No ranges, no CP, no terrain costs and no turn order — nothing here mutates the rules.
+      if (sandboxFree) {
+        const unitHere = units.find(u => u.tileId === clickedTileId);
+        const selected = selectedUnitId ? units.find(u => u.id === selectedUnitId) : null;
+        if (selected && unitHere && unitHere.owner !== selected.owner) {
+          get().devAttackUnit(selected.id, unitHere.id);
+          return;
+        }
+        if (selected && !unitHere) {
+          // A bank vault, an enemy HQ or a barrier is a target, not a landing pad: strike it
+          // instead of parking the unit on top of it.
+          const structureTarget =
+            tile !== null &&
+            tile !== undefined &&
+            tile.hp !== undefined &&
+            ((tile.type === 'BANK' && (tile.hackProgress ?? 0) < 100) ||
+              (tile.type === 'BASE' && tile.owner !== selected.owner) ||
+              tile.type === 'BARRIER');
+          if (structureTarget) {
+            get().devSiegeStructure(selected.id, clickedTileId);
+            return;
+          }
+          if (tile && (tile.type === 'BANK' || tile.type === 'BASE' || tile.type === 'BARRIER')) {
+            return;
+          }
+          get().devMoveUnit(selected.id, clickedTileId);
+          return;
+        }
+        set({
+          ...CLEAR_SELECTION,
+          selectedUnitId: unitHere?.id ?? null,
+          selectedTileId: clickedTileId,
+          hoveredTileId: clickedTileId,
+        });
         return;
       }
 
@@ -1580,9 +1752,15 @@ export const useGameStore = create<GameStore>((set, get) => {
       const state = get();
       const { currentPlayer, playerGold, isAiTurn, winner } = state;
       const item = SHOP_ITEMS[itemKey as keyof typeof SHOP_ITEMS];
-      if (!item || isAiTurn || winner !== null || playerGold[currentPlayer] < item.cost) return;
+      const hasShopVoucher = (state.playerShopVouchers?.[currentPlayer] ?? []).includes(itemKey as any);
+      if (!item || isAiTurn || winner !== null || (!hasShopVoucher && playerGold[currentPlayer] < item.cost)) return;
       if (item.type === 'CONSTRUCT') {
-        const ctx = { playerId: currentPlayer, mapData: state.mapData, mines: state.mines };
+        const flareTileIds = new Set(
+          (state.airDrops ?? [])
+            .filter(d => d.phase === 'FLARE' && d.tileId)
+            .map(d => d.tileId!),
+        );
+        const ctx = { playerId: currentPlayer, mapData: state.mapData, mines: state.mines, flareTileIds };
         const validTiles = state.mapData
           .filter(t => canConstructOnTile(itemKey, t, state.units, ctx))
           .map(t => t.id);
@@ -1601,7 +1779,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           placementMode: {
             active: true,
             itemKey,
-            cost: item.cost,
+            cost: hasShopVoucher ? 0 : item.cost,
             kind: 'CONSTRUCT',
             validTiles,
             selectedTiles: [],
@@ -1627,6 +1805,152 @@ export const useGameStore = create<GameStore>((set, get) => {
         ...CLEAR_SELECTION,
         hoveredTileId: state.hoveredTileId,
         placementMode: { active: true, itemKey, cost: item.cost, kind: 'DROP', validTiles },
+      });
+    },
+
+    useTacticalWeapon: (itemKey) => {
+      const state = get();
+      const { currentPlayer, isAiTurn, winner, mode, mySeat, totalTurns } = state;
+      const def = TACTICAL_ITEMS[itemKey];
+      if (!def || isAiTurn || winner !== null) return;
+      if (mode === 'ONLINE' && mySeat !== currentPlayer) return;
+      const sandboxFree = state.devSandbox && state.devFreeplay;
+      const tacState = sandboxFree ? sandboxTacticalState(state) : state;
+      const round = totalTurns + 1;
+      const anchorFallback =
+        state.units.find(u => u.owner === currentPlayer)?.tileId ??
+        state.mapData.find(t => t.type === 'BASE' && t.owner === currentPlayer)?.id ??
+        state.mapData[0]?.id ??
+        '0,0';
+      const feedback = (text: string) => {
+        get().showMapFeedback(anchorFallback, text, 'warn');
+      };
+      if (def.fogOnly && !state.settings.fogOfWar) {
+        return feedback(`${def.name} is only available with Fog of War on`);
+      }
+      const hasVoucher = hasTacticalVoucher(state, currentPlayer, itemKey);
+      if (!sandboxFree) {
+        if (!hasVoucher && round < tacticalUnlockRound(itemKey)) return feedback(`${def.name} opens at round ${tacticalUnlockRound(itemKey)}`);
+        if ((state.tacticalRound?.[currentPlayer] ?? 0) === round) return feedback('One tactical weapon per round');
+        const cd = tacticalCooldownLeft(state, currentPlayer, itemKey);
+        if (!hasVoucher && cd > 0) return feedback(`${def.name} is on cooldown (${cd} round${cd === 1 ? '' : 's'} left)`);
+      }
+      const free = sandboxFree || hasVoucher || tacticalIsFree(state, currentPlayer, itemKey);
+      if (!free && (state.playerGold[currentPlayer] ?? 0) < def.cost) return feedback('Not enough Euros');
+      if (def.shape === 'NONE') {
+        set({ placementMode: null });
+        get().executeAiAction({ type: 'USE_TACTICAL', itemKey });
+        return;
+      }
+      const visible = state.settings.fogOfWar ? state.visibleTiles : null;
+      const isDirectional = def.shape === 'LINE4' || def.shape === 'LANE';
+      let axis: 'H' | 'V' = 'H';
+      let validTiles = legalTacticalAnchors(tacState, currentPlayer, itemKey, {
+        axis: isDirectional ? axis : undefined,
+        width: def.shape === 'LANE' ? 2 : undefined,
+        visible,
+      });
+      if (validTiles.length === 0 && isDirectional) {
+        const altTiles = legalTacticalAnchors(tacState, currentPlayer, itemKey, {
+          axis: 'V',
+          width: def.shape === 'LANE' ? 2 : undefined,
+          visible,
+        });
+        if (altTiles.length > 0) {
+          axis = 'V';
+          validTiles = altTiles;
+        }
+      }
+      if (validTiles.length === 0) {
+        if (def.shape === 'UNIT' || def.shape === 'UNITS3') {
+          const hasAnyVisibleEnemy = state.units.some(
+            u => u.owner !== currentPlayer && (!visible || visible.has(u.tileId)),
+          );
+          return feedback(
+            hasAnyVisibleEnemy
+              ? 'All visible enemy units are already at the 2 HP tactical floor'
+              : 'No visible enemy units to target',
+          );
+        }
+        if (def.shape === 'RELOCATE') {
+          return feedback('No visible units to airlift');
+        }
+        if (itemKey === 'SABOTAGE') {
+          return feedback('No valid enemy HQ or specialized structure available');
+        }
+        return feedback(`No legal target tiles for ${def.name}`);
+      }
+      set({
+        ...CLEAR_SELECTION,
+        hoveredTileId: state.hoveredTileId,
+        placementMode: {
+          active: true,
+          itemKey,
+          cost: free ? 0 : def.cost,
+          kind: 'TACTICAL',
+          validTiles,
+          selectedTiles: def.shape === 'UNITS3' ? [] : undefined,
+          requiredCount: def.shape === 'UNITS3' ? 3 : undefined,
+          tacticalAxis: isDirectional ? axis : undefined,
+          tacticalWidth: def.shape === 'LANE' ? 2 : undefined,
+          tacticalUnitId: undefined,
+        },
+      });
+    },
+
+    setTacticalAxis: (axis) => {
+      const state = get();
+      const placementMode = state.placementMode;
+      if (placementMode?.kind !== 'TACTICAL') return;
+      const itemKey = placementMode.itemKey as TacticalId;
+      const def = TACTICAL_ITEMS[itemKey];
+      const tacState = state.devSandbox && state.devFreeplay ? sandboxTacticalState(state) : state;
+      const validTiles = legalTacticalAnchors(tacState, state.currentPlayer, itemKey, {
+        axis,
+        width: def?.shape === 'LANE' ? 2 : undefined,
+        visible: state.settings.fogOfWar ? state.visibleTiles : null,
+      });
+      set({ placementMode: { ...placementMode, tacticalAxis: axis, validTiles } });
+      if (validTiles.length === 0) {
+        const anchor = state.hoveredTileId ?? state.units.find(u => u.owner === state.currentPlayer)?.tileId ?? state.mapData[0]?.id ?? '0,0';
+        get().showMapFeedback(
+          anchor,
+          `No legal ${axis === 'V' ? 'vertical' : 'horizontal'} anchors for ${def?.name ?? 'tactical'}`,
+          'warn',
+        );
+      }
+    },
+
+    confirmTacticalStrike: () => {
+      const { placementMode, isAiTurn, winner } = get();
+      if (!placementMode || !placementMode.active || placementMode.kind !== 'TACTICAL' || isAiTurn || winner !== null) return;
+      const itemKey = placementMode.itemKey as TacticalId;
+      const selected = placementMode.selectedTiles ?? [];
+      if (TACTICAL_ITEMS[itemKey]?.shape !== 'UNITS3' || selected.length === 0) return;
+      set({ placementMode: null });
+      get().executeAiAction({
+        type: 'USE_TACTICAL',
+        itemKey,
+        tileId: selected[0],
+        tileIds: selected,
+      });
+    },
+
+    resetParadropPick: () => {
+      const state = get();
+      const placementMode = state.placementMode;
+      if (!placementMode || placementMode.kind !== 'TACTICAL' || placementMode.itemKey !== 'PARADROP') return;
+      const visible = state.settings.fogOfWar ? state.visibleTiles : null;
+      const tacState = state.devSandbox && state.devFreeplay ? sandboxTacticalState(state) : state;
+      const unitTiles = legalTacticalAnchors(tacState, state.currentPlayer, 'PARADROP', { visible });
+      SoundFX.play('click');
+      set({
+        placementMode: {
+          ...placementMode,
+          tacticalUnitId: undefined,
+          selectedTiles: undefined,
+          validTiles: unitTiles,
+        },
       });
     },
 
@@ -1742,14 +2066,39 @@ export const useGameStore = create<GameStore>((set, get) => {
           ? pickGameState(state)
           : null;
 
-      const result = applyAction(state, action, { autoBankReward: state.isAiTurn });
+      const isSandboxTactical = state.devSandbox && state.devFreeplay && action.type === 'USE_TACTICAL';
+      const sourceState = isSandboxTactical ? sandboxTacticalState(state) : state;
+
+      const result = applyAction(sourceState, action, { autoBankReward: state.isAiTurn });
       if (result.rejected) {
         console.error(`Action rejected (${result.rejected})`, action);
+        if (!state.isAiTurn) {
+          const actionTileId =
+            ('tileId' in action && typeof action.tileId === 'string' && action.tileId) ||
+            ('targetTileId' in action && typeof action.targetTileId === 'string' && action.targetTileId) ||
+            state.hoveredTileId ||
+            state.units.find(u => u.owner === state.currentPlayer)?.tileId ||
+            state.mapData.find(t => t.type === 'BASE' && t.owner === state.currentPlayer)?.id ||
+            state.mapData[0]?.id ||
+            '0,0';
+          get().showMapFeedback(actionTileId, result.rejected, 'warn');
+        }
         // Keep the AI from stalling on an action it can't afford
         if (state.isAiTurn && action.type !== 'END_TURN') get().executeAiAction({ type: 'END_TURN' });
         return;
       }
-      const next = result.state;
+      const next = isSandboxTactical
+        ? {
+            ...result.state,
+            totalTurns: state.totalTurns,
+            tacticalRound: {},
+            tacticalCooldowns: {},
+            winner: null,
+            matchSummary: null,
+            playerCp: topUpPlayerCp(result.state.playerCp),
+            playerGold: state.playerGold,
+          }
+        : result.state;
       highlightRecorder.record({
         turn: next.totalTurns + 1,
         seed: next.activeSeed,

@@ -666,11 +666,16 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
 
     // --- INTERACTION ACTIONS ---
 
-    // A. Loot Supplies
+    // A. Loot Supplies (check standing tile first, then adjacent — mystery crates score highest!)
     if (playerCp >= 4) {
-        const lootTile = adj.find(t => t.loot !== null && t.loot !== undefined);
+        const lootCandidates = [uTile, ...adj].filter(t => t.loot !== null && t.loot !== undefined);
+        lootCandidates.sort((a, b) => {
+            const rankLoot = (l: Tile['loot']) => (l === 'TACTICAL_SUPPLY' ? 3 : l === 'FIELD_SUPPLY' ? 2 : 1);
+            return rankLoot(b.loot) - rankLoot(a.loot);
+        });
+        const lootTile = lootCandidates[0];
         if (lootTile) {
-            const priority = 150;
+            const priority = lootTile.loot === 'TACTICAL_SUPPLY' ? 220 : lootTile.loot === 'FIELD_SUPPLY' ? 185 : 150;
             if (priority > bestScore) {
                 bestScore = priority;
                 bestAction = { type: 'LOOT', unitId: unit.id, tileId: lootTile.id, cost: 4 };

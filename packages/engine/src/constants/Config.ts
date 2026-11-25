@@ -76,6 +76,26 @@ export const CP_SYSTEM = {
  */
 export const CP_OVERFLOW_GOLD_RATE = 15;
 
+/** Rarity is also the round a tactical weapon first becomes buyable. */
+export const TACTICAL_TIERS = {
+  COMMON: 2,
+  RARE: 5,
+  EPIC: 10,
+} as const;
+
+/** Per-weapon cooldown in rounds after a seat fires that tactical weapon. */
+export const TACTICAL_COOLDOWN_ROUNDS = 3;
+
+/** Theater Air Supply Drop schedule (Field every 3 rounds, Tactical every 6 rounds). */
+export const AIR_DROP_SCHEDULE = {
+  FIELD_INTERVAL: 3,
+  TACTICAL_INTERVAL: 6,
+  DISPATCH_LEAD_ROUNDS: 2,
+  FLARE_LEAD_ROUNDS: 1,
+  HQ_MIN_DISTANCE: 4,
+  DUAL_PLANE_STAGGER_MS: 950,
+} as const;
+
 export const GOLD_SETTINGS = {
   INITIAL_GOLD: 200,
   INCOME_PER_TURN: 20,

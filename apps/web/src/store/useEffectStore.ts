@@ -4,6 +4,7 @@ import {
   fxTimeline,
   getPrefersReducedMotion,
   projectileColorFor,
+  type AirDropAnimRequest,
   type CrossfireLockRequest,
   type DeathGhostRequest,
   type PendingDeathVisual,
@@ -13,6 +14,7 @@ import {
   type PromotionBurstRequest,
   type SupplyDropAnimRequest,
   type TacticalCalloutRequest,
+  type TacticalFxAnimRequest,
   type TileEffectRequest,
 } from '../core/graphics/fxTimeline';
 import { SoundFX } from '../core/audio/SoundFX';
@@ -116,7 +118,9 @@ export type DeathGhost = DeathGhostRequest;
 export type TileEffect = TileEffectRequest;
 export type TacticalCallout = TacticalCalloutRequest;
 export type SupplyDropAnim = SupplyDropAnimRequest;
+export type AirDropAnim = AirDropAnimRequest;
 export type PromotionBurst = PromotionBurstRequest;
+export type TacticalFxAnim = TacticalFxAnimRequest;
 
 interface EffectStore {
   damagePopups: DamagePopup[];
@@ -127,7 +131,10 @@ interface EffectStore {
   deathGhosts: DeathGhost[];
   tileEffects: TileEffect[];
   supplyDrops: SupplyDropAnim[];
+  airDropAnims: AirDropAnim[];
+  pendingAirDropTiles: string[];
   promotionBursts: PromotionBurst[];
+  tacticalEffects: TacticalFxAnim[];
   activeCallout: TacticalCallout | null;
   fxMode: FxMode;
   killCamMode: KillCamMode;
@@ -165,8 +172,18 @@ interface EffectStore {
   spawnSupplyDrop: (drop: SupplyDropAnimRequest) => void;
   removeSupplyDrop: (id: string) => void;
 
+  spawnAirDrop: (anim: AirDropAnimRequest) => void;
+  completeAirDropTouchdown: (id: string) => void;
+  removeAirDrop: (id: string) => void;
+  addPendingAirDropTile: (tileId: string) => void;
+  removePendingAirDropTile: (tileId: string) => void;
+
   spawnPromotionBurst: (burst: PromotionBurstRequest) => void;
   removePromotionBurst: (id: string) => void;
+
+  spawnTacticalEffect: (fx: TacticalFxAnimRequest) => void;
+  completeTacticalCombat: (id: string, ambientTailMs?: number) => void;
+  removeTacticalEffect: (id: string) => void;
 
   showCallout: (callout: TacticalCalloutRequest) => void;
   dismissCallout: (id: string) => void;
@@ -186,7 +203,10 @@ export const useEffectStore = create<EffectStore>((set, get) => ({
   deathGhosts: [],
   tileEffects: [],
   supplyDrops: [],
+  airDropAnims: [],
+  pendingAirDropTiles: [],
   promotionBursts: [],
+  tacticalEffects: [],
   activeCallout: null,
   fxMode: readSavedFxMode(),
   killCamMode: initialKillCamMode,
@@ -349,6 +369,70 @@ export const useEffectStore = create<EffectStore>((set, get) => ({
     });
   },
 
+  spawnTacticalEffect: (fx) => {
+    set(state => ({ tacticalEffects: [...state.tacticalEffects, fx] }));
+    wakeBattleRenderer(fx.durationMs + (fx.ambientTailMs ?? 0) + 260);
+  },
+
+  completeTacticalCombat: (id, ambientTailMs = 0) => {
+    if (!ambientTailMs || ambientTailMs <= 0) {
+      get().removeTacticalEffect(id);
+      return;
+    }
+    // Keep aircraft gliding off the far map edge in live gameplay without keeping fxTimeline active.
+    wakeBattleRenderer(ambientTailMs + 280);
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        get().removeTacticalEffect(id);
+      }, ambientTailMs + 650);
+    }
+  },
+
+  removeTacticalEffect: (id) => {
+    set(state => {
+      if (!state.tacticalEffects.some(t => t.id === id)) return state;
+      return { tacticalEffects: state.tacticalEffects.filter(t => t.id !== id) };
+    });
+  },
+
+  spawnAirDrop: (anim) => {
+    set(state => ({ airDropAnims: [...state.airDropAnims, anim] }));
+    wakeBattleRenderer(anim.kinematics.totalMs + 280);
+  },
+
+  completeAirDropTouchdown: (id) => {
+    set(state => {
+      const idx = state.airDropAnims.findIndex(a => a.id === id);
+      if (idx === -1) return state;
+      const next = [...state.airDropAnims];
+      next[idx] = { ...next[idx], ambientOnly: true };
+      return { airDropAnims: next };
+    });
+  },
+
+  removeAirDrop: (id) => {
+    set(state => {
+      if (!state.airDropAnims.some(a => a.id === id)) return state;
+      return { airDropAnims: state.airDropAnims.filter(a => a.id !== id) };
+    });
+  },
+
+  addPendingAirDropTile: (tileId) => {
+    set(state =>
+      state.pendingAirDropTiles.includes(tileId)
+        ? state
+        : { pendingAirDropTiles: [...state.pendingAirDropTiles, tileId] },
+    );
+  },
+
+  removePendingAirDropTile: (tileId) => {
+    set(state =>
+      state.pendingAirDropTiles.includes(tileId)
+        ? { pendingAirDropTiles: state.pendingAirDropTiles.filter(id => id !== tileId) }
+        : state,
+    );
+  },
+
   showCallout: (callout) => {
     set(state => {
       if (state.activeCallout && state.activeCallout.priority > callout.priority) {
@@ -433,6 +517,8 @@ fxTimeline.configure({
         break;
     }
   },
+  playTacticalSound: (itemKey, phase, meta) => SoundFX.playTacticalSound(itemKey, phase, meta),
+  playAirDrop: (kind, stage) => SoundFX.playAirDrop(kind, stage),
   playKillConfirm: () => SoundFX.playKillConfirm(),
   playKillCamSting: (stage, tier, flightRealMs) => SoundFX.playKillCamSting(stage, tier, flightRealMs),
   playMineClick: () => SoundFX.playMineClick(),
@@ -454,8 +540,16 @@ fxTimeline.configure({
   removeTileEffect: (id) => useEffectStore.getState().removeTileEffect(id),
   spawnSupplyDrop: (drop) => useEffectStore.getState().spawnSupplyDrop(drop),
   removeSupplyDrop: (id) => useEffectStore.getState().removeSupplyDrop(id),
+  spawnAirDrop: (anim) => useEffectStore.getState().spawnAirDrop(anim),
+  completeAirDropTouchdown: (id) => useEffectStore.getState().completeAirDropTouchdown(id),
+  removeAirDrop: (id) => useEffectStore.getState().removeAirDrop(id),
+  addPendingAirDropTile: (tileId) => useEffectStore.getState().addPendingAirDropTile(tileId),
+  removePendingAirDropTile: (tileId) => useEffectStore.getState().removePendingAirDropTile(tileId),
   spawnPromotionBurst: (burst) => useEffectStore.getState().spawnPromotionBurst(burst),
   removePromotionBurst: (id) => useEffectStore.getState().removePromotionBurst(id),
+  spawnTacticalEffect: (fx) => useEffectStore.getState().spawnTacticalEffect(fx),
+  completeTacticalCombat: (id, ambientTailMs) => useEffectStore.getState().completeTacticalCombat(id, ambientTailMs),
+  removeTacticalEffect: (id) => useEffectStore.getState().removeTacticalEffect(id),
   showCallout: (callout) => useEffectStore.getState().showCallout(callout),
   onWake: (durationMs) => wakeBattleRenderer(durationMs),
   onClearVisuals: () => {
@@ -468,7 +562,10 @@ fxTimeline.configure({
       st.deathGhosts.length > 0 ||
       st.tileEffects.length > 0 ||
       st.supplyDrops.length > 0 ||
+      st.airDropAnims.length > 0 ||
+      st.pendingAirDropTiles.length > 0 ||
       st.promotionBursts.length > 0 ||
+      st.tacticalEffects.length > 0 ||
       st.activeCallout !== null ||
       Object.keys(st.deferredHp).length > 0
     ) {
@@ -481,7 +578,10 @@ fxTimeline.configure({
         deathGhosts: [],
         tileEffects: [],
         supplyDrops: [],
+        airDropAnims: [],
+        pendingAirDropTiles: [],
         promotionBursts: [],
+        tacticalEffects: [],
         activeCallout: null,
       });
     }

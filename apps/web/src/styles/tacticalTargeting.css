@@ -1,0 +1,163 @@
+/* Standardized floating Tactical Weapon targeting bar pinned neatly at top-center of MapFrame.
+ * Compact single-row (<12% viewport height), high contrast (>= 4.5:1 text & >= 3:1 boundaries),
+ * with explicit Forced Colors Mode and prefers-reduced-motion compliance. */
+
+.tt-tacbar {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 28;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 16px);
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(11, 18, 32, 0.94);
+  border: 1.5px solid var(--tac-accent, #38BDF8);
+  box-shadow: 0 8px 22px rgba(2, 6, 23, 0.55);
+  color: #F8FAFC;
+  font-family: system-ui, -apple-system, sans-serif;
+  pointer-events: auto;
+  user-select: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tt-tacbar {
+    animation: tt-tacbar-in 140ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
+@keyframes tt-tacbar-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.tt-tacbar__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.45px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tt-tacbar__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #FEF08A;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tt-tacbar__hint {
+  font-size: 11px;
+  font-weight: 600;
+  color: #E2E8F0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.tt-tacbar__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.tt-tacbar__btn {
+  appearance: none;
+  border: 1px solid rgba(226, 232, 240, 0.36);
+  background: rgba(30, 41, 59, 0.92);
+  color: #F8FAFC;
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.35px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tt-tacbar__btn:hover {
+  background: rgba(51, 65, 85, 0.98);
+  border-color: #F8FAFC;
+}
+
+.tt-tacbar__btn:focus-visible {
+  outline: 2px solid #FDE047;
+  outline-offset: 2px;
+}
+
+.tt-tacbar__btn--active {
+  background: #F59E0B;
+  border-color: #FEF08A;
+  color: #0F172A;
+}
+
+.tt-tacbar__btn--active:hover {
+  background: #FBBF24;
+  border-color: #FFFFFF;
+}
+
+.tt-tacbar__btn--cancel {
+  background: rgba(153, 27, 27, 0.88);
+  border-color: #FCA5A5;
+  color: #FFF1F2;
+}
+
+.tt-tacbar__btn--cancel:hover {
+  background: #DC2626;
+  border-color: #FFFFFF;
+}
+
+@media (max-width: 720px) {
+  .tt-tacbar {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 5px;
+    padding: 5px 8px;
+  }
+  .tt-tacbar__hint {
+    display: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .tt-tacbar {
+    background: Canvas;
+    color: CanvasText;
+    border: 2px solid Highlight;
+    box-shadow: none;
+  }
+  .tt-tacbar__badge,
+  .tt-tacbar__btn {
+    background: ButtonFace;
+    color: ButtonText;
+    border: 1px solid ButtonText;
+  }
+  .tt-tacbar__btn--active {
+    background: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
+}

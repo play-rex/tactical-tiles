@@ -175,7 +175,19 @@ export const useOnline = create<OnlineState>((set, get) => {
       });
       useGameStore.getState().applyServerView(view);
     });
-    r.onMessage(ServerMsg.error, ({ message }: { message: string }) => set({ error: message }));
+    r.onMessage(ServerMsg.error, ({ message }: { message: string }) => {
+      set({ error: message });
+      const gs = useGameStore.getState();
+      if (gs.currentScreen === 'GAME') {
+        const anchor =
+          gs.hoveredTileId ??
+          gs.units.find(u => u.owner === gs.mySeat)?.tileId ??
+          gs.mapData.find(t => t.type === 'BASE' && t.owner === gs.mySeat)?.id ??
+          gs.mapData[0]?.id ??
+          '0,0';
+        gs.showMapFeedback(anchor, message, 'warn');
+      }
+    });
     r.onLeave(async code => {
       if (room !== r) return;
       room = null;

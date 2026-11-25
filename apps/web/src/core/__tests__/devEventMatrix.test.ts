@@ -36,9 +36,9 @@ test('the sandbox can reach every kill cause, tier and camera profile the game c
   assert.deepEqual(coverage.missingTiers, [], 'no cut tier may be unauditionable');
   assert.deepEqual(coverage.missingStyles, [], 'no camera profile may be unauditionable');
   assert.equal(coverage.complete, true);
-  assert.equal(coverage.causes.length, 7);
+  assert.equal(coverage.causes.length, 8);
   assert.equal(coverage.tiers.length, 4);
-  assert.equal(coverage.styles.length, 8);
+  assert.equal(coverage.styles.length, 12);
 });
 
 test('every matrix entry is unique, grouped, and listed exactly once in the panel', () => {

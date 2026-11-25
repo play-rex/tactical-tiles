@@ -139,3 +139,43 @@ test('end-of-match scoreboard stays held until the drama reel actually starts', 
   assert.equal(useGameStore.getState().finalePending, false);
   highlightRecorder.reset();
 });
+
+test('pure sandbox: Tactical Weapons (Artillery Barrage & Napalm Line) arm and fire on tile click back-to-back', () => {
+  boot();
+  // Ensure an enemy unit sits inside a legal mid-board 2x10 corridor
+  const init = useGameStore.getState();
+  const enemy = init.units.find(u => u.owner === 1)!;
+  const enemyHpBefore = enemy.hp;
+
+  // 1. Arm Artillery Barrage on Round 1 in Sandbox Freeplay
+  useGameStore.getState().useTacticalWeapon('ARTILLERY_BARRAGE');
+  const armedBarrage = useGameStore.getState().placementMode;
+  assert.ok(armedBarrage?.active && armedBarrage.kind === 'TACTICAL' && armedBarrage.itemKey === 'ARTILLERY_BARRAGE');
+  assert.ok(armedBarrage.validTiles.length > 0, 'barrage has legal 2x10 anchors in sandbox');
+
+  const anchorId = armedBarrage.validTiles[0];
+  const [ax, ay] = anchorId.split(',').map(Number);
+  // Place enemy inside the 2x10 lane along whichever axis armed (H walks +x, V walks +y)
+  const laneTile = armedBarrage.tacticalAxis === 'V' ? `${ax},${ay + 2}` : `${ax + 2},${ay}`;
+  useGameStore.setState(s => ({
+    units: s.units.map(u => (u.id === enemy.id ? { ...u, tileId: laneTile, hp: 20 } : u)),
+  }));
+
+  useGameStore.getState().handleTileClick(ax, ay);
+  const afterBarrage = useGameStore.getState();
+  assert.equal(afterBarrage.placementMode, null, 'clicking legal tile fires Artillery Barrage and clears placementMode');
+  assert.equal(afterBarrage.units.find(u => u.id === enemy.id)!.hp, 10, 'Artillery Barrage dealt 50% current HP (20 -> 10) in sandbox');
+
+  // 2. Immediately arm & fire Napalm Line back-to-back with zero round-cap/cooldown lockout in sandbox
+  useGameStore.getState().useTacticalWeapon('NAPALM_LINE');
+  const armedNapalm = useGameStore.getState().placementMode;
+  assert.ok(armedNapalm?.active && armedNapalm.itemKey === 'NAPALM_LINE', 'Napalm Line arms immediately after Barrage in sandbox');
+  const napId = armedNapalm.validTiles[0];
+  const [nx, ny] = napId.split(',').map(Number);
+  useGameStore.getState().handleTileClick(nx, ny);
+
+  const afterNapalm = useGameStore.getState();
+  assert.equal(afterNapalm.placementMode, null, 'clicking legal tile fires Napalm Line');
+  assert.equal(afterNapalm.burningLines?.length, 1, 'Napalm Line ignited 4 burning tiles on the board');
+  assert.ok(enemyHpBefore > 0);
+});

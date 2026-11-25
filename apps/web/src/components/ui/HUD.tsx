@@ -4,6 +4,7 @@ import { useGameStore, viewerSeat } from '../../store/useGameStore';
 import { useEffectStore } from '../../store/useEffectStore';
 import { useOnline } from '../../net/useOnline';
 import { useCopyState } from '../../hooks/useCopyState';
+import { TacticalShop } from './TacticalShop';
 import { getHoverMoveResolution, computeUnitAttackPreview, getHoveredEnemyBlocker } from '../../core/hoverMovePreview';
 import {
   UNIT_STATS,
@@ -23,7 +24,8 @@ import {
   MUTATOR_CONFIG,
 } from '@tactical/engine/constants/Config';
 import { PERKS_BY_CLASS, PERK_LABELS } from '@tactical/engine/constants/Perks';
-import { Tile, Unit, WeatherType, LogEntry, MatchSummary } from '@tactical/engine/types';
+import { TACTICAL_ITEMS } from '@tactical/engine';
+import { Tile, Unit, WeatherType, LogEntry, MatchSummary, TacticalId } from '@tactical/engine/types';
 import { getManhattanDistance, getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { getDoomsdayEscalation } from '@tactical/engine/grid/DoomsdayManager';
 import { contractDef } from '@tactical/engine/game/Contracts';
@@ -358,6 +360,7 @@ export const LeftPanel: React.FC = React.memo(() => {
   const playerRespawns = useGameStore(state => state.playerRespawns);
   const playerStatus = useGameStore(state => state.playerStatus);
   const playerInventory = useGameStore(state => state.playerInventory);
+  const playerShopVouchers = useGameStore(state => state.playerShopVouchers);
   const handleGraveyardSelect = useGameStore(state => state.handleGraveyardSelect);
   const selectedGraveyardUnitId = useGameStore(state => state.selectedGraveyardUnitId);
   const selectInventoryItem = useGameStore(state => state.selectInventoryItem);
@@ -708,33 +711,44 @@ export const LeftPanel: React.FC = React.memo(() => {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
             {Object.entries(SHOP_ITEMS).map(([key, item]) => {
-              const canBuy = isMyTurn && (playerGold[currentPlayer] ?? 0) >= item.cost;
+              const voucherCount = (playerShopVouchers?.[currentPlayer] ?? []).filter(
+                v => v === key,
+              ).length;
+              const canBuy = isMyTurn && (voucherCount > 0 || (playerGold[currentPlayer] ?? 0) >= item.cost);
               const isPlacingThis = Boolean(placementMode?.active && placementMode.itemKey === key);
               return (
                 <GeoButton
                   key={key}
-                  variant={isPlacingThis ? 'amber' : 'default'}
+                  variant={isPlacingThis ? 'amber' : voucherCount > 0 ? 'mint' : 'default'}
                   onClick={() => buyShopItem(key)}
                   disabled={!canBuy}
                   fullWidth
                   title={
-                    item.type === 'CONSUMABLE'
-                      ? `${item.name} (€${item.cost}) — Pick drop zone vs AI; random drop near HQ in Multiplayer`
-                      : key === 'LAND_MINE'
-                        ? `Land Mine (€${item.cost}) — Hidden to enemies (${LAND_MINE_STATS.DAMAGE} DMG + stops move). Restricted within ${LAND_MINE_STATS.ENEMY_HQ_EXCLUSION_RADIUS} tiles of enemy HQ.`
-                        : key === 'BARRIER'
-                          ? `Deploy Barrier (x3) (€${item.cost}) — Click up to ${BARRIER_STATS.BUILD_COUNT} tiles to build ${BARRIER_STATS.HP} HP waist-high cover.`
-                          : key === 'TUNNEL'
-                            ? `Mountain Tunnel (€${item.cost}) — Blast a tunnel through a mountain tile: fast travel for all units, no cover.`
-                            : `${item.name} (€${item.cost}) — Select placement tile on map`
+                    voucherCount > 0
+                      ? `${item.name} (FREE Supply Crate Voucher ×${voucherCount}) — Click to place for €0`
+                      : item.type === 'CONSUMABLE'
+                        ? `${item.name} (€${item.cost}) — Pick drop zone vs AI; random drop near HQ in Multiplayer`
+                        : key === 'LAND_MINE'
+                          ? `Land Mine (€${item.cost}) — Hidden to enemies (${LAND_MINE_STATS.DAMAGE} DMG + stops move). Restricted within ${LAND_MINE_STATS.ENEMY_HQ_EXCLUSION_RADIUS} tiles of enemy HQ.`
+                          : key === 'BARRIER'
+                            ? `Deploy Barrier (x3) (€${item.cost}) — Click up to ${BARRIER_STATS.BUILD_COUNT} tiles to build ${BARRIER_STATS.HP} HP waist-high cover.`
+                            : key === 'TUNNEL'
+                              ? `Mountain Tunnel (€${item.cost}) — Blast a tunnel through a mountain tile: fast travel for all units, no cover.`
+                              : `${item.name} (€${item.cost}) — Select placement tile on map`
                   }
                   coreStyle={{ padding: '6px 8px', justifyContent: 'space-between' }}
                 >
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {item.name.replace('Deploy ', '').replace(' Drop', '').replace(' Kit (50% Heal)', '').replace(' (Full Heal)', '').replace(' (x3)', ' x3')}
                   </span>
-                  <span style={{ color: isPlacingThis ? '#1C1200' : 'var(--acc-amber-ink)', fontFamily: 'monospace' }}>
-                    €{item.cost}
+                  <span
+                    style={{
+                      color: isPlacingThis ? '#1C1200' : voucherCount > 0 ? '#052E16' : 'var(--acc-amber-ink)',
+                      fontFamily: 'monospace',
+                      fontWeight: 900,
+                    }}
+                  >
+                    {voucherCount > 0 ? `FREE${voucherCount > 1 ? `×${voucherCount}` : ''}` : `€${item.cost}`}
                   </span>
                 </GeoButton>
               );
@@ -748,6 +762,8 @@ export const LeftPanel: React.FC = React.memo(() => {
           )}
         </div>
       </GeoCard>
+
+      <TacticalShop />
     </div>
   );
 });
@@ -767,6 +783,7 @@ const TurnStatusBar: React.FC = React.memo(() => {
   const contractProgress = useGameStore(state => state.contractProgress);
   const contractMisses = useGameStore(state => state.contractMisses);
   const finalPush = useGameStore(state => state.finalPush);
+  const airDrops = useGameStore(state => state.airDrops) ?? [];
   const winner = useGameStore(state => state.winner);
   const mySeat = useGameStore(state => state.mySeat);
   const mode = useGameStore(state => state.mode);
@@ -793,6 +810,39 @@ const TurnStatusBar: React.FC = React.memo(() => {
     : 0;
   const pushReady = finalPush?.[currentPlayer] === 'READY' && winner === null;
   const canPush = pushReady && !isAiTurn && (mode !== 'ONLINE' || currentPlayer === mySeat);
+
+  const flaredDrops = airDrops.filter(d => d.phase === 'FLARE');
+  const dispatchedDrops = airDrops.filter(d => d.phase === 'DISPATCH');
+  const airDropBanner = (() => {
+    if (flaredDrops.length >= 2) {
+      return {
+        tone: 'gold' as const,
+        text: `🔥 DUAL FLARES LIT · FIELD + TACTICAL NEXT ROUND (R${flaredDrops[0].landingRound})`,
+      };
+    }
+    if (flaredDrops.length === 1) {
+      const f = flaredDrops[0];
+      const pos = f.at ? ` (${f.at.x},${f.at.y})` : '';
+      return {
+        tone: f.kind === 'TACTICAL' ? ('gold' as const) : ('cyan' as const),
+        text: `🔥 ${f.kind === 'TACTICAL' ? 'TACTICAL' : 'FIELD'} FLARE${pos} · DROPS NEXT ROUND`,
+      };
+    }
+    if (dispatchedDrops.length >= 2) {
+      return {
+        tone: 'gold' as const,
+        text: `✈✈ DUAL CONVOY (FIELD + TACTICAL) · 2 ROUNDS (R${dispatchedDrops[0].landingRound})`,
+      };
+    }
+    if (dispatchedDrops.length === 1) {
+      const d = dispatchedDrops[0];
+      return {
+        tone: d.kind === 'TACTICAL' ? ('gold' as const) : ('cyan' as const),
+        text: `✈ ${d.kind === 'TACTICAL' ? 'TACTICAL' : 'FIELD'} DROP INBOUND · 2 ROUNDS (R${d.landingRound})`,
+      };
+    }
+    return null;
+  })();
 
   let missionLine: string | null = null;
   if (activeMission) {
@@ -833,8 +883,21 @@ const TurnStatusBar: React.FC = React.memo(() => {
           </span>
         </div>
 
-        {(missionLine || activeMutatorTags.length > 0 || doomsdayTag) && (
+        {(missionLine || activeMutatorTags.length > 0 || doomsdayTag || airDropBanner) && (
           <div style={{ borderTop: '1px solid var(--op-line)', paddingTop: '5px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {airDropBanner && (
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 900,
+                  color: airDropBanner.tone === 'gold' ? 'var(--acc-amber-ink)' : 'var(--acc-blue-ink)',
+                  letterSpacing: '0.25px',
+                }}
+                title="Theater Air Supply Drop: mystery crate contents stay hidden until a unit spends LOOT on its turn."
+              >
+                {airDropBanner.text}
+              </div>
+            )}
             {missionLine && (
               <div style={{ fontSize: '12px', color: 'var(--acc-amber-ink)', fontWeight: 800 }}>
                 🎯 {activeMission?.title}: {missionLine}
@@ -1292,6 +1355,8 @@ export const RightPanel: React.FC = () => {
   const cancelPlacement = useGameStore(state => state.cancelPlacement);
   const confirmConstruct = useGameStore(state => state.confirmConstruct);
   const confirmAutoDrop = useGameStore(state => state.confirmAutoDrop);
+  const confirmTacticalStrike = useGameStore(state => state.confirmTacticalStrike);
+  const resetParadropPick = useGameStore(state => state.resetParadropPick);
   const placementMode = useGameStore(state => state.placementMode);
 
   const secureBuilding = useGameStore(state => state.secureBuilding);
@@ -1331,10 +1396,31 @@ export const RightPanel: React.FC = () => {
         <GeoCard armed style={{ flexShrink: 0 }}>
           <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px', textAlign: 'center' }}>
             <div style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-amber-ink)' }}>
-              {placementMode.kind === 'DROP' ? 'SUPPLY AIRDROP MODE' : 'CONSTRUCTION MODE'}
+              {placementMode.kind === 'DROP'
+                ? 'SUPPLY AIRDROP MODE'
+                : placementMode.kind === 'TACTICAL'
+                  ? 'TACTICAL STRIKE MODE'
+                  : 'CONSTRUCTION MODE'}
             </div>
             <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 600 }}>
-              {placementMode.kind === 'DROP'
+              {placementMode.kind === 'TACTICAL'
+                ? (() => {
+                    const def = TACTICAL_ITEMS[placementMode.itemKey as TacticalId];
+                    if (def?.shape === 'UNITS3') {
+                      const count = placementMode.selectedTiles?.length ?? 0;
+                      return `Pick 1–3 lit enemy units (${count}/3 locked — click a locked unit to undo).`;
+                    }
+                    if (def?.shape === 'RELOCATE') {
+                      return placementMode.tacticalUnitId
+                        ? 'Step 2/2: Click any lit open ground tile to airlift the selected unit.'
+                        : 'Step 1/2: Click any lit unit (ally or enemy) to airlift.';
+                    }
+                    if (def?.shape === 'UNIT') return 'Click any lit enemy unit on the spotlighted map to strike immediately.';
+                    if (def?.shape === 'LANE') return 'Aim the 2×10 corridor (H/V or Space to flip). Friendly fire ON.';
+                    if (def?.shape === 'LINE4') return 'Aim the 1×4 fire line (H/V or Space to flip). Friendly fire ON.';
+                    return 'Click any lit target tile on the spotlighted map.';
+                  })()
+                : placementMode.kind === 'DROP'
                 ? 'Click any highlighted amber tile for targeted delivery, or auto-drop near HQ.'
                 : placementMode.itemKey === 'LAND_MINE'
                   ? `Click a cyan tile to plant hidden mine (excluded within ${LAND_MINE_STATS.ENEMY_HQ_EXCLUSION_RADIUS} tiles of enemy HQ).`
@@ -1349,9 +1435,21 @@ export const RightPanel: React.FC = () => {
             </div>
             <GeoWell coreStyle={{ padding: '6px 10px' }}>
               <div style={{ fontSize: '12px', fontWeight: 900 }}>
-                {SHOP_ITEMS[placementMode.itemKey as keyof typeof SHOP_ITEMS]?.name} (€{placementMode.cost})
+                {placementMode.kind === 'TACTICAL'
+                  ? `${TACTICAL_ITEMS[placementMode.itemKey as TacticalId]?.name} (${placementMode.cost === 0 ? 'FREE' : `€${placementMode.cost}`})`
+                  : `${SHOP_ITEMS[placementMode.itemKey as keyof typeof SHOP_ITEMS]?.name} (€${placementMode.cost})`}
               </div>
             </GeoWell>
+            {placementMode.kind === 'TACTICAL' && placementMode.itemKey === 'CARPET_RUN' && (placementMode.selectedTiles?.length ?? 0) > 0 && (
+              <GeoButton variant="amber" fullWidth onClick={confirmTacticalStrike} coreStyle={{ padding: '7px 10px' }}>
+                FIRE SALVO ({placementMode.selectedTiles?.length}/3)
+              </GeoButton>
+            )}
+            {placementMode.kind === 'TACTICAL' && placementMode.itemKey === 'PARADROP' && placementMode.tacticalUnitId && (
+              <GeoButton variant="default" fullWidth onClick={resetParadropPick} coreStyle={{ padding: '7px 10px' }}>
+                RE-PICK UNIT
+              </GeoButton>
+            )}
             {placementMode.kind === 'CONSTRUCT' && (placementMode.requiredCount ?? 1) > 1 && (placementMode.selectedTiles?.length ?? 0) > 0 && (
               <GeoButton variant="mint" fullWidth onClick={confirmConstruct} coreStyle={{ padding: '7px 10px' }}>
                 BUILD SELECTED ({placementMode.selectedTiles?.length}/{placementMode.requiredCount})
@@ -1363,7 +1461,7 @@ export const RightPanel: React.FC = () => {
               </GeoButton>
             )}
             <GeoButton variant="red" fullWidth onClick={cancelPlacement} coreStyle={{ padding: '7px 10px' }}>
-              {placementMode.kind === 'DROP' ? 'CANCEL DROP' : 'CANCEL BUILD'}
+              {placementMode.kind === 'DROP' ? 'CANCEL DROP' : placementMode.kind === 'TACTICAL' ? 'CANCEL TACTICAL' : 'CANCEL BUILD'}
             </GeoButton>
           </div>
         </GeoCard>

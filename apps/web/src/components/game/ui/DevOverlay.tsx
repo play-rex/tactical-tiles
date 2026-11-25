@@ -1,9 +1,18 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { TILE_SIZE } from '@tactical/engine/constants/Config';
 import { useViewportContext } from '../../../context/ViewportContext';
 import { unrotateBoardPoint } from '../../../core/boardRotation';
 import { useGameStore, type DevBrush } from '../../../store/useGameStore';
-import { DEV_EVENT_CATALOG, DEV_EVENT_GROUPS, devEventCoverage } from '../../../core/dev/devEventMatrix';
+import { useEffectStore } from '../../../store/useEffectStore';
+import { fxTimeline } from '../../../core/graphics/fxTimeline';
+import {
+  DEV_EVENT_CATALOG,
+  DEV_EVENT_GROUPS,
+  devEventCoverage,
+  type DevEventGroup,
+  type DevEventKind,
+} from '../../../core/dev/devEventMatrix';
+import { KILL_CAM_CAUSE_LABEL, KILL_CAM_STYLES, KILL_CAM_TIERS } from '../../../core/graphics/killCam';
 
 const TERRAIN_BRUSHES: { label: string; brush: DevBrush }[] = [
   { label: 'GRASS', brush: { kind: 'TERRAIN', terrain: 'PLAINS' } },
@@ -35,38 +44,22 @@ const UNIT_BRUSHES: { label: string; brush: DevBrush }[] = [
 /** The panel renders the coverage matrix, so no cut can exist without a way to audition it. */
 const COVERAGE = devEventCoverage();
 
-const chip = (active: boolean): React.CSSProperties => ({
-  background: active ? 'linear-gradient(180deg,#38bdf8,#0ea5e9)' : 'rgba(15,23,36,0.92)',
-  border: `1px solid ${active ? '#0284c7' : 'rgba(148,163,184,0.35)'}`,
-  color: active ? '#04121e' : '#cbd5e1',
-  padding: '4px 7px',
-  fontSize: 8.5,
-  fontWeight: 900,
-  letterSpacing: '0.14em',
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-});
+type DevTabId = DevEventGroup | 'BRUSHES';
+type BrushSubTab = 'TERRAIN' | 'STRUCTURES' | 'UNITS';
 
-const eventChip: React.CSSProperties = {
-  background: 'linear-gradient(180deg,#1e293b,#0f172a)',
-  border: '1px solid rgba(56,189,248,0.45)',
-  color: '#7dd3fc',
-  padding: '5px 8px',
-  fontSize: 8.5,
-  fontWeight: 900,
-  letterSpacing: '0.14em',
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-};
+const TABS: { id: DevTabId; label: string }[] = [
+  // Put Tactical Weapons first for fast auditioning, followed by all remaining event groups + Brushes.
+  ...DEV_EVENT_GROUPS.filter(g => g.id === 'TACTICAL'),
+  ...DEV_EVENT_GROUPS.filter(g => g.id !== 'TACTICAL'),
+  { id: 'BRUSHES', label: 'BRUSHES' },
+];
 
 /**
- * Sandbox-only overlay.
- *
- * - A click-through layer turns the board into a paint surface while a brush is armed (same
- *   rotated-world → canonical-tile mapping the renderer uses for hover, so it works at any rotation
- *   and zoom).
- * - The panel fires scripted events through the real FX pipeline, so what you audition is exactly
- *   what a live match plays.
+ * Compact, content-first Dev Sandbox dock:
+ * - Single-row tabs + single-row action strip keeps dock height under ~90px (<12% of map viewport).
+ * - Automatically slides completely out of view while FX or Kill Cams play (z-index 42 < KillCam 44)
+ *   so animations and camera cuts are 100% unobstructed, then returns when settled.
+ * - Armed brushes fold the strip down to a single 28px bar while painting on the board.
  */
 export const DevOverlay: React.FC = () => {
   const devSandbox = useGameStore(s => s.devSandbox);
@@ -79,15 +72,40 @@ export const DevOverlay: React.FC = () => {
   const resetGame = useGameStore(s => s.resetGame);
   const mapRotation = useGameStore(s => s.mapRotation);
   const gridSize = useGameStore(s => s.gridSize);
+  const killCamActive = useEffectStore(s => s.killCamActive);
   const { viewport } = useViewportContext();
 
-  const [brush, setBrush] = useState<DevBrush | null>(null);
-  // A simulated match is watched on the real game screen: fold the panel away so the HUD, kill cams
-  // and match card are unobstructed, and leave a single strip to get back in.
+  const [brush, setBrush] = useState<{ label: string; brush: DevBrush } | null>(null);
   const [open, setOpen] = useState(() => !useGameStore.getState().devBotMatch);
+  const [activeTab, setActiveTab] = useState<DevTabId>('TACTICAL');
+  const [brushSubTab, setBrushSubTab] = useState<BrushSubTab>('TERRAIN');
+  const [autoHideOnFx, setAutoHideOnFx] = useState(true);
+  const [fxActive, setFxActive] = useState(() => fxTimeline.isActive());
+  const [lastFired, setLastFired] = useState<{ kind: DevEventKind; label: string } | null>(null);
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
   useEffect(() => {
     setOpen(!devBotMatch);
   }, [devBotMatch]);
+
+  useEffect(() => {
+    return fxTimeline.subscribeActive(active => setFxActive(active));
+  }, []);
+
+  // Backtick (`) toggles Dev Dock cleanly without touching unit hotkeys
+  useEffect(() => {
+    if (!devSandbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === '`') {
+        e.preventDefault();
+        setOpen(v => !v);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [devSandbox]);
 
   if (!devSandbox) return null;
   const boardSize = gridSize * TILE_SIZE;
@@ -99,12 +117,51 @@ export const DevOverlay: React.FC = () => {
     const gx = Math.floor(unrot.x / TILE_SIZE);
     const gy = Math.floor(unrot.y / TILE_SIZE);
     if (gx < 0 || gx >= gridSize || gy < 0 || gy >= gridSize) return;
-    devPlace(gx, gy, brush);
+    devPlace(gx, gy, brush.brush);
   };
 
-  const toggle = (next: DevBrush) => {
-    setBrush(cur => (JSON.stringify(cur) === JSON.stringify(next) ? null : next));
+  const toggleBrush = (item: { label: string; brush: DevBrush }) => {
+    setBrush(cur => (cur && JSON.stringify(cur.brush) === JSON.stringify(item.brush) ? null : item));
   };
+
+  const triggerEvent = (kind: DevEventKind, label: string) => {
+    setLastFired({ kind, label });
+    devFireEvent(kind);
+  };
+
+  const selectTab = (id: DevTabId) => {
+    setActiveTab(id);
+    if (!open) setOpen(true);
+    tabRefs.current[id]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  };
+
+  const handleTabKeyDown = (e: React.KeyboardEvent, idx: number) => {
+    let nextIdx = idx;
+    if (e.key === 'ArrowRight') nextIdx = (idx + 1) % TABS.length;
+    else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + TABS.length) % TABS.length;
+    else if (e.key === 'Home') nextIdx = 0;
+    else if (e.key === 'End') nextIdx = TABS.length - 1;
+    else return;
+    e.preventDefault();
+    const nextTab = TABS[nextIdx];
+    selectTab(nextTab.id);
+    tabRefs.current[nextTab.id]?.focus();
+  };
+
+  const watchingAnimation = autoHideOnFx && (killCamActive || fxActive);
+  const showDrawerBody = open && !brush;
+  const activeEvents = activeTab !== 'BRUSHES' ? DEV_EVENT_CATALOG.filter(spec => spec.group === activeTab) : [];
+  const activeBrushes =
+    brushSubTab === 'TERRAIN'
+      ? TERRAIN_BRUSHES
+      : brushSubTab === 'STRUCTURES'
+        ? STRUCTURE_BRUSHES
+        : UNIT_BRUSHES;
+
+  const totalCauses = Object.keys(KILL_CAM_CAUSE_LABEL).length;
+  const totalTiers = KILL_CAM_TIERS.length;
+  const totalStyles = KILL_CAM_STYLES.length;
+  const covSummary = `CAUSES ${COVERAGE.causes.length}/${totalCauses} · TIERS ${COVERAGE.tiers.length}/${totalTiers} · CAMERAS ${COVERAGE.styles.length}/${totalStyles}${COVERAGE.complete ? ' · COMPLETE' : ''}`;
 
   return (
     <>
@@ -114,124 +171,159 @@ export const DevOverlay: React.FC = () => {
             e.preventDefault();
             paint(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
           }}
-          style={{ position: 'absolute', inset: 0, zIndex: 43, cursor: 'crosshair', touchAction: 'none' }}
+          style={{ position: 'absolute', inset: 0, zIndex: 41, cursor: 'crosshair', touchAction: 'none' }}
         />
       )}
 
+      {watchingAnimation && !killCamActive && (
+        <button
+          type="button"
+          className="tt-devdock__watchpill"
+          onClick={() => setAutoHideOnFx(false)}
+          title="Dock auto-hidden while animation plays — click to pin open"
+        >
+          ▶ PLAYING · PIN DEV
+        </button>
+      )}
+
       <div
-        style={{
-          position: 'absolute',
-          left: 8,
-          bottom: 8,
-          zIndex: 45,
-          maxWidth: 'calc(100% - 16px)',
-          background: 'rgba(6,10,17,0.94)',
-          border: '1px solid rgba(56,189,248,0.4)',
-          boxShadow: '0 16px 40px -18px #000',
-          padding: '7px 9px',
-          display: 'grid',
-          gap: 6,
-          color: '#cbd5e1',
-          fontFamily: '"Space Grotesk","Avenir Next",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',
-        }}
+        className={`tt-devdock${!showDrawerBody ? ' tt-devdock--collapsed' : ''}${watchingAnimation ? ' tt-devdock--watching' : ''}`}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: '0.24em', color: '#7dd3fc' }}>
-            {devBotMatch ? 'SIM' : 'DEV'}
-          </span>
-          <button onClick={() => setOpen(v => !v)} style={{ ...chip(false), padding: '2px 6px' }}>
-            {open ? 'HIDE' : 'SHOW'}
-          </button>
+        <div className="tt-devdock__bar">
+          <span className="tt-devdock__badge">{devBotMatch ? 'SIM' : 'DEV'}</span>
           <button
+            type="button"
+            className="tt-devdock__chip"
+            onClick={() => {
+              if (brush) setBrush(null);
+              else setOpen(v => !v);
+            }}
+            title="Toggle Dev Dock (shortcut: `)"
+          >
+            {brush ? `BRUSH: ${brush.label} · CLEAR` : open ? 'HIDE' : 'TOOLS'}
+          </button>
+
+          {lastFired && (
+            <button
+              type="button"
+              className="tt-devdock__chip tt-devdock__chip--replay"
+              onClick={() => triggerEvent(lastFired.kind, lastFired.label)}
+              title={`Replay ${lastFired.label}`}
+            >
+              ↻ {lastFired.label}
+            </button>
+          )}
+
+          <button
+            type="button"
+            className={`tt-devdock__chip${devFreeplay ? ' tt-devdock__chip--active' : ''}`}
             onClick={() => setDevFreeplay(!devFreeplay)}
             title="No ranges, no CP, no turn lock: teleport units and strike anywhere"
-            style={{ ...chip(devFreeplay), padding: '2px 6px' }}
           >
-            PURE SANDBOX {devFreeplay ? 'ON' : 'OFF'}
+            SANDBOX {devFreeplay ? 'ON' : 'OFF'}
           </button>
+
           <button
+            type="button"
+            className={`tt-devdock__chip${devBotMatch ? ' tt-devdock__chip--active' : ''}`}
             onClick={() => setDevBotMatch(!devBotMatch)}
-            title="Both seats play themselves: run a simulated match and just watch the animations"
-            style={{ ...chip(devBotMatch), padding: '2px 6px' }}
+            title="Both seats play themselves so you can watch live animations"
           >
             BOTS {devBotMatch ? 'ON' : 'OFF'}
           </button>
-          {brush && (
-            <button onClick={() => setBrush(null)} style={{ ...chip(true), padding: '2px 6px' }}>
-              BRUSH ON · CLEAR
-            </button>
-          )}
-          <button onClick={resetGame} style={{ ...chip(false), padding: '2px 6px', marginLeft: 'auto' }}>
-            EXIT DEV
+
+          <button
+            type="button"
+            className={`tt-devdock__chip${autoHideOnFx ? ' tt-devdock__chip--active' : ''}`}
+            onClick={() => setAutoHideOnFx(v => !v)}
+            title="Automatically hide the Dev Dock while weapon animations and Kill Cams play"
+          >
+            AUTO-HIDE {autoHideOnFx ? 'ON' : 'OFF'}
+          </button>
+
+          <span
+            className="tt-devdock__cov"
+            style={{ color: COVERAGE.complete ? '#4ade80' : '#f59e0b' }}
+            title={covSummary}
+          >
+            {COVERAGE.complete ? `✓ ${COVERAGE.styles.length}/${totalStyles} CAMS` : 'INCOMPLETE'}
+          </span>
+
+          <button type="button" className="tt-devdock__chip" onClick={resetGame}>
+            EXIT
           </button>
         </div>
 
-        {open && (
+        {showDrawerBody && (
           <>
-            {DEV_EVENT_GROUPS.map(group => {
-              const rows = DEV_EVENT_CATALOG.filter(spec => spec.group === group.id);
-              if (rows.length === 0) return null;
-              return (
-                <div key={group.id} style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <span style={{ fontSize: 7.5, fontWeight: 900, letterSpacing: '0.16em', color: '#475569', minWidth: 54 }}>
-                    {group.label}
-                  </span>
-                  {rows.map(spec => (
-                    <button key={spec.kind} onClick={() => devFireEvent(spec.kind)} title={spec.hint} style={eventChip}>
-                      {spec.label}
+            <div className="tt-devdock__tablist" role="tablist" aria-label="Dev sandbox categories">
+              {TABS.map((tab, idx) => {
+                const selected = activeTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    ref={el => {
+                      tabRefs.current[tab.id] = el;
+                    }}
+                    type="button"
+                    role="tab"
+                    id={`devtab-${tab.id}`}
+                    aria-selected={selected}
+                    tabIndex={selected ? 0 : -1}
+                    className="tt-devdock__tab"
+                    onClick={() => selectTab(tab.id)}
+                    onKeyDown={e => handleTabKeyDown(e, idx)}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div
+              className="tt-devdock__strip"
+              role="tabpanel"
+              aria-labelledby={`devtab-${activeTab}`}
+            >
+              {activeTab === 'BRUSHES' ? (
+                <>
+                  {(['TERRAIN', 'STRUCTURES', 'UNITS'] as BrushSubTab[]).map(sub => (
+                    <button
+                      key={sub}
+                      type="button"
+                      className={`tt-devdock__chip${brushSubTab === sub ? ' tt-devdock__chip--active' : ''}`}
+                      onClick={() => setBrushSubTab(sub)}
+                    >
+                      {sub}
                     </button>
                   ))}
-                </div>
-              );
-            })}
-            <span style={{ fontSize: 8, letterSpacing: '0.12em', color: COVERAGE.complete ? '#4ade80' : '#f59e0b' }}>
-              COVERAGE · CAUSES {COVERAGE.causes.length}/7 · TIERS {COVERAGE.tiers.length}/4 · CAMERAS {COVERAGE.styles.length}/8
-              {COVERAGE.complete ? ' · COMPLETE' : ` · MISSING ${[...COVERAGE.missingCauses, ...COVERAGE.missingTiers, ...COVERAGE.missingStyles].join(', ')}`}
-            </span>
-
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 520 }}>
-              {TERRAIN_BRUSHES.map(item => (
-                <button
-                  key={item.label}
-                  onClick={() => toggle(item.brush)}
-                  style={chip(JSON.stringify(brush) === JSON.stringify(item.brush))}
-                >
-                  {item.label}
-                </button>
-              ))}
+                  <span className="tt-devdock__sep" aria-hidden="true" />
+                  {activeBrushes.map(item => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      className="tt-devdock__event"
+                      onClick={() => toggleBrush(item)}
+                      title="Click to arm brush, then click map tiles to paint"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </>
+              ) : (
+                activeEvents.map(spec => (
+                  <button
+                    key={spec.kind}
+                    type="button"
+                    className="tt-devdock__event"
+                    onClick={() => triggerEvent(spec.kind, spec.label)}
+                    title={spec.hint}
+                  >
+                    {spec.label}
+                  </button>
+                ))
+              )}
             </div>
-
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 520 }}>
-              {STRUCTURE_BRUSHES.map(item => (
-                <button
-                  key={item.label}
-                  onClick={() => toggle(item.brush)}
-                  style={chip(JSON.stringify(brush) === JSON.stringify(item.brush))}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 520 }}>
-              {UNIT_BRUSHES.map(item => (
-                <button
-                  key={item.label}
-                  onClick={() => toggle(item.brush)}
-                  style={chip(JSON.stringify(brush) === JSON.stringify(item.brush))}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-
-            <span style={{ fontSize: 8.5, letterSpacing: '0.12em', color: '#64748b' }}>
-              {brush
-                ? 'CLICK THE BOARD TO PLACE · BRUSH STAYS ARMED'
-                : devFreeplay
-                  ? 'CLICK A UNIT, THEN ANY TILE TO TELEPORT IT · CLICK AN ENEMY, BANK, ENEMY HQ OR BARRIER TO STRIKE — NO RANGE, NO CP'
-                  : 'PICK A BRUSH, THEN CLICK THE BOARD'}
-            </span>
           </>
         )}
       </div>

@@ -68,21 +68,54 @@ export const KillCamSchematicLayer: React.FC = React.memo(() => {
     const px = -uy;
     const py = ux;
 
-    // 1. LAND MINE ARM PHASE ("*click*"): blinking crimson pressure-plate LED under victim's boots
+    // 1. LAND MINE ARM PHASE ("*click*"): exposed armored landmine casing + blinking crimson LED under boots
     if (frame.phase === 'ARM' && frame.cameraStyle === 'MINE_CLICK') {
       const p = frame.armProgress;
       const blink = Math.sin(p * Math.PI * 6) > -0.25 ? 1 : 0.35;
+      // Converging pressure-plate trigger rings
       g.lineStyle(2.5, 0xEF4444, 0.95 * blink);
-      g.drawCircle(fx, fy, 10 + p * 18);
+      g.drawCircle(fx, fy, 11 + p * 18);
       g.lineStyle(1.6, 0xFCA5A5, 0.85 * blink);
-      g.drawCircle(fx, fy, Math.max(4, 24 - p * 16));
+      g.drawCircle(fx, fy, Math.max(5, 25 - p * 16));
+      // Armored mine casing body (clearly visible for a split second before blowing up and vanishing)
+      g.lineStyle(2, 0x94A3B8, 0.95);
+      g.beginFill(0x1E293B, 0.96);
+      g.drawCircle(fx, fy, 11.5);
+      g.endFill();
+      // Four radial fuse prongs around the rim
+      g.lineStyle(2, 0xCBD5E1, 0.92);
+      for (let i = 0; i < 4; i++) {
+        const a = (Math.PI / 2) * i + Math.PI / 4;
+        g.moveTo(fx + Math.cos(a) * 8.5, fy + Math.sin(a) * 8.5);
+        g.lineTo(fx + Math.cos(a) * 14, fy + Math.sin(a) * 14);
+      }
+      // Central pressure plate + hot crimson/white armed LED
       g.lineStyle(0);
-      g.beginFill(0xEF4444, 0.95 * blink);
-      g.drawCircle(fx, fy, 5.5);
+      g.beginFill(0x7F1D1D, 0.96);
+      g.drawCircle(fx, fy, 6.8);
       g.endFill();
-      g.beginFill(0xFFFFFF, 0.95 * blink);
-      g.drawCircle(fx, fy, 2.4);
+      g.beginFill(0xEF4444, 0.98 * blink);
+      g.drawCircle(fx, fy, 4.4);
       g.endFill();
+      g.beginFill(0xFFFFFF, 0.98 * blink);
+      g.drawCircle(fx, fy, 2.0);
+      g.endFill();
+      return;
+    }
+
+    // 1b. LAND MINE BLAST WAVE (SLAM / SLOW): expanding concussive shockwave after mine obliteration
+    if (frame.cameraStyle === 'MINE_CLICK' && (frame.phase === 'SLAM' || frame.phase === 'SLOW')) {
+      const blastT = Math.min(1, frame.elapsedMs / 520);
+      const waveAlpha = Math.max(0, 1 - blastT) * alpha;
+      if (waveAlpha > 0.02) {
+        const rInner = 14 + blastT * 34;
+        const rOuter = 20 + blastT * 48;
+        g.lineStyle(3.2 * (1 - blastT * 0.5), 0xFEF08A, 0.95 * waveAlpha);
+        g.drawCircle(fx, fy, rInner);
+        g.lineStyle(2.2, 0xF97316, 0.85 * waveAlpha);
+        g.drawCircle(fx, fy, rOuter);
+        g.lineStyle(0);
+      }
       return;
     }
 
@@ -138,6 +171,91 @@ export const KillCamSchematicLayer: React.FC = React.memo(() => {
       g.drawRect(fx - r, fy - r, r * 2, r * 2);
       g.lineStyle(1.5, 0x38BDF8, 0.65 * alpha);
       drawDiamond(g, fx, fy, r * 1.15);
+      g.lineStyle(0);
+      return;
+    }
+
+    // 4b. TACTICAL ORBITAL DROP: vertical orbital laser sight rail + altitude convergence rings
+    if (frame.cameraStyle === 'ORBITAL_DROP') {
+      const r = 34 - frame.reticle * 10;
+      g.lineStyle(2.4, 0xF43F5E, 0.92 * alpha);
+      g.drawCircle(fx, fy, r);
+      g.lineStyle(1.6, 0xFDA4AF, 0.78 * alpha);
+      g.drawCircle(fx, fy, r + 14);
+      g.lineStyle(1.8, 0xFFF1F2, 0.85 * alpha);
+      for (let i = 0; i < 4; i++) {
+        const a = (Math.PI / 2) * i + Math.PI / 4;
+        g.moveTo(fx + Math.cos(a) * (r - 6), fy + Math.sin(a) * (r - 6));
+        g.lineTo(fx + Math.cos(a) * (r + 18), fy + Math.sin(a) * (r + 18));
+      }
+      g.lineStyle(0);
+      return;
+    }
+
+    // 4c. BOMBER TRACK / CREEPING BARRAGE / AIRLIFT / HUNTER DRONE: glowing vector rails & multi-target locks
+    if (frame.cameraStyle === 'BOMBER_TRACK' || frame.cameraStyle === 'BARRAGE_WALK') {
+      const isParadrop = cue.tacticalItemKey === 'PARADROP';
+      const isDrone = cue.tacticalItemKey === 'RECON_DRONE' || cue.weapon === 'TACTICAL_DRONE';
+      const col =
+        frame.cameraStyle === 'BARRAGE_WALK'
+          ? 0xEF4444
+          : isParadrop
+            ? 0x34D399
+            : isDrone
+              ? 0x38BDF8
+              : 0xFB923C;
+
+      // Multi-target Carpet Run waypoints or Paradrop pickup->LZ airlift corridor
+      if (cue.waypoints && cue.waypoints.length >= 2) {
+        const pts = cue.waypoints;
+        g.lineStyle(3, col, 0.78 * alpha);
+        for (let i = 0; i < pts.length - 1; i++) {
+          g.moveTo(pts[i].x, pts[i].y);
+          g.lineTo(pts[i + 1].x, pts[i + 1].y);
+        }
+        g.lineStyle(1.4, 0xFEF08A, 0.72 * alpha);
+        for (let i = 0; i < pts.length; i++) {
+          g.lineStyle(2.4, i === pts.length - 1 ? 0xFEF08A : col, 0.92 * alpha);
+          drawDiamond(g, pts[i].x, pts[i].y, 24 - frame.reticle * 5);
+          if (isParadrop && i === 0) {
+            g.lineStyle(1.8, 0xA7F3D0, 0.8 * alpha);
+            g.drawCircle(pts[i].x, pts[i].y, 30);
+          }
+        }
+        g.lineStyle(0);
+        return;
+      }
+
+      const halfCorridor = frame.cameraStyle === 'BARRAGE_WALK' ? TILE_SIZE * 0.92 : TILE_SIZE * 0.48;
+      if (dist > 10) {
+        g.lineStyle(2.2, col, 0.85 * alpha);
+        g.moveTo(mx + px * halfCorridor, my + py * halfCorridor);
+        g.lineTo(fx + px * halfCorridor, fy + py * halfCorridor);
+        g.moveTo(mx - px * halfCorridor, my - py * halfCorridor);
+        g.lineTo(fx - px * halfCorridor, fy - py * halfCorridor);
+
+        // Sector cross-ticks along corridor
+        g.lineStyle(1.4, 0xFEF08A, 0.65 * alpha);
+        for (let d = 0; d <= dist; d += TILE_SIZE) {
+          const tx = mx + ux * d;
+          const ty = my + uy * d;
+          g.moveTo(tx - px * (halfCorridor * 0.6), ty - py * (halfCorridor * 0.6));
+          g.lineTo(tx + px * (halfCorridor * 0.6), ty + py * (halfCorridor * 0.6));
+        }
+      }
+      g.lineStyle(2.4, isDrone ? 0xBAE6FD : 0xFEF08A, 0.92 * alpha);
+      drawDiamond(g, fx, fy, 26 - frame.reticle * 6);
+      g.lineStyle(0);
+      return;
+    }
+
+    // 4d. THEATER SWEEP: emerald/cyan recon lock grid
+    if (frame.cameraStyle === 'THEATER_SWEEP') {
+      const r = 24 + frame.impact * 20;
+      g.lineStyle(2, 0x22D3EE, 0.82 * alpha);
+      g.drawCircle(fx, fy, r);
+      g.lineStyle(1.4, 0x34D399, 0.72 * alpha);
+      drawDiamond(g, fx, fy, r * 0.75);
       g.lineStyle(0);
       return;
     }

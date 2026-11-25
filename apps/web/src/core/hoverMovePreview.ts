@@ -1,5 +1,5 @@
 import { COMBAT_BONUSES } from '@tactical/engine/constants/Config';
-import { getAttackBlocker, getCrossfireSupporters, type GameState } from '@tactical/engine';
+import { getAttackBlocker, getCrossfireSupporters, smokeBlocksLine, type GameState } from '@tactical/engine';
 import { getManhattanDistance, getTileByIdFast, hasLineOfSight, reconstructMovePathFromParents } from '@tactical/engine/grid/Pathfinding';
 import {
   calculateAttackOutcome,
@@ -9,7 +9,7 @@ import {
   type AttackOutcome,
 } from '@tactical/engine/rules/CombatRules';
 import { resolveMoveWithOverwatch } from '@tactical/engine/rules/OverwatchRules';
-import type { Tile, Unit, WeatherState } from '@tactical/engine/types';
+import type { SmokeZone, Tile, Unit, WeatherState } from '@tactical/engine/types';
 
 type MoveWithOverwatchResolution = ReturnType<typeof resolveMoveWithOverwatch>;
 
@@ -25,6 +25,7 @@ export interface HoverMovePreviewInput {
   fogOfWar: boolean;
   maxBudget: number;
   visibleTiles: Set<string> | null;
+  smokeZones?: readonly SmokeZone[];
 }
 
 let cachedKey: HoverMovePreviewInput | null = null;
@@ -41,7 +42,8 @@ const matchesCache = (a: HoverMovePreviewInput, b: HoverMovePreviewInput) =>
   a.gridSize === b.gridSize &&
   a.fogOfWar === b.fogOfWar &&
   a.maxBudget === b.maxBudget &&
-  a.visibleTiles === b.visibleTiles;
+  a.visibleTiles === b.visibleTiles &&
+  a.smokeZones === b.smokeZones;
 
 /**
  * Resolves a hovered move preview with Overwatch warnings using cached Dijkstra parents when
@@ -73,6 +75,7 @@ export function getHoverMoveResolution(input: HoverMovePreviewInput): MoveWithOv
     gridSize: input.gridSize,
     fogOfWar: input.fogOfWar,
     maxBudget: input.maxBudget,
+    smokeZones: input.smokeZones,
     knownVisibleTiles: input.visibleTiles,
     precomputedPath: precomputedPath && precomputedPath.length > 0 ? precomputedPath : undefined,
   });
@@ -123,8 +126,9 @@ export function getPostMoveTargetTiles(params: {
   gridSize: number;
   fogOfWar: boolean;
   visibleTiles: ReadonlySet<string> | null;
+  smokeZones?: readonly SmokeZone[];
 }): Tile[] {
-  const { unit, destTile, remainingCp, mapData, units, weather, gridSize, fogOfWar, visibleTiles } = params;
+  const { unit, destTile, remainingCp, mapData, units, weather, gridSize, fogOfWar, visibleTiles, smokeZones } = params;
   if (unit.completed || unit.ammo <= 0 || remainingCp < getUnitAttackCost(unit)) return [];
   if (!canUnitAttackFromTile(unit, destTile)) return [];
 
@@ -136,7 +140,10 @@ export function getPostMoveTargetTiles(params: {
     if (!eTile) continue;
     if (fogOfWar && visibleTiles && !visibleTiles.has(eTile.id)) continue;
     if (getManhattanDistance(destTile, eTile) > range) continue;
-    if (hasLineOfSight(destTile, eTile, mapData, unit.type, weather, gridSize)) {
+    if (
+      hasLineOfSight(destTile, eTile, mapData, unit.type, weather, gridSize) &&
+      !smokeBlocksLine(smokeZones, destTile, eTile)
+    ) {
       out.push(eTile);
     }
   }
@@ -144,7 +151,7 @@ export function getPostMoveTargetTiles(params: {
 }
 
 export function getHoveredEnemyBlocker(
-  state: Pick<GameState, 'mapData' | 'units' | 'weather' | 'gridSize' | 'settings' | 'playerCp' | 'currentPlayer'>,
+  state: Pick<GameState, 'mapData' | 'units' | 'weather' | 'gridSize' | 'settings' | 'playerCp' | 'currentPlayer' | 'smokeZones'>,
   attacker: Unit,
   targetTile: Tile,
   visible?: ReadonlySet<string>,

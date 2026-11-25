@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './src/styles/opChamferGeo.css';
 import './src/styles/killCam.css';
+import './src/styles/devOverlay.css';
+import './src/styles/tacticalTargeting.css';
 import { GameRenderer } from './src/components/game/GameRenderer';
 import { BankRewardModal, LeftPanel, RightPanel, WinnerOverlay } from './src/components/ui/HUD';
 import { GameSetup } from './src/screens/GameSetup';
@@ -14,6 +16,7 @@ import { useGameStore } from './src/store/useGameStore';
 import { ViewportProvider } from './src/context/ViewportContext';
 import { MapControls, PhoneDock } from './src/components/game/ui/MapControls';
 import { MapHoverCard } from './src/components/game/ui/MapHoverCard';
+import { TacticalTargetingBar } from './src/components/game/ui/TacticalTargetingBar';
 import { TurnBanner } from './src/components/game/ui/TurnBanner';
 import { TacticalBanner } from './src/components/game/ui/TacticalBanner';
 import { KillCamOverlay } from './src/components/game/ui/KillCamOverlay';
@@ -105,9 +108,11 @@ const TopBattleGuidanceBar: React.FC<{ compact?: boolean }> = React.memo(({ comp
     guidance = 'Vault Breached! Choose Euros or CP loot.';
   } else if (placementMode && placementMode.active) {
     guidance =
-      placementMode.kind === 'DROP'
-        ? 'Supply Airdrop: Click a highlighted amber tile, or Auto-Drop near HQ.'
-        : 'Construction Mode: Click a cyan tile to deploy, or Cancel.';
+      placementMode.kind === 'TACTICAL'
+        ? 'Tactical Targeting: Click a lit target on the spotlighted map, SPACE to flip/fire, ESC or Right-Click to cancel.'
+        : placementMode.kind === 'DROP'
+          ? 'Supply Airdrop: Click a highlighted amber tile, or Auto-Drop near HQ.'
+          : 'Construction Mode: Click a cyan tile to deploy, or Cancel.';
   } else if (selectedInventoryItemIndex !== null) {
     guidance = 'Supply Armed: Click a friendly unit to apply.';
   } else if (selectedGraveyardUnitId) {
@@ -293,6 +298,7 @@ const MapFrame: React.FC = () => (
         <div className="geo-frame-rim" style={{ flex: 1, minHeight: 0, display: 'flex' }}>
           <div className="geo-frame-core" style={{ flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}>
             <GameRenderer />
+            <TacticalTargetingBar />
             <MapHoverCard />
             <TurnBanner />
             <TacticalBanner />

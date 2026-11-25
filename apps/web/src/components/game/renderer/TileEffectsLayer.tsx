@@ -40,18 +40,68 @@ const TileEffectItem: React.FC<{ data: TileEffect }> = React.memo(({ data }) => 
 
     switch (data.kind) {
       case 'mineFlash': {
-        // Strictly single-pulse blast flash fading smoothly from peak (WCAG 2.3.1 safe)
-        const ease = Math.pow(1 - t, 1.7);
-        g.beginFill(data.color, 0.56 * ease);
+        // Multi-stage Land Mine bomb-blast animation (WCAG 2.3.1 single-pulse smooth decay):
+        // hot white-gold core -> jagged fiery blast starburst -> double concussive shockwaves
+        const ease = Math.pow(1 - t, 1.65);
+        const burst = 1 - Math.pow(1 - Math.min(1, t * 2.2), 2.6);
+
+        // 1. Warm crimson/orange tile blast wash
+        g.beginFill(data.color, 0.52 * ease);
         g.drawRect(data.x + 2, data.y + 2, TILE_SIZE - 4, TILE_SIZE - 4);
         g.endFill();
 
-        g.beginFill(0xFEF08A, 0.5 * Math.pow(1 - t, 2.4));
-        g.drawCircle(cx, cy, (14 + t * 22) * scale);
-        g.endFill();
+        // 2. Jagged 10-point fiery starburst tearing radially outward (0..62%)
+        if (t < 0.62) {
+          const starFade = Math.pow(1 - t / 0.62, 1.45);
+          const outerR = (13 + burst * 28) * scale;
+          const innerR = (6 + burst * 11) * scale;
+          const spikes = 10;
+          g.beginFill(0xF97316, 0.88 * starFade);
+          for (let i = 0; i < spikes * 2; i++) {
+            const ang = (Math.PI * i) / spikes + 0.18;
+            const jitter = i % 2 === 0 ? (i % 4 === 0 ? 1.12 : 0.9) : 0.92;
+            const r = (i % 2 === 0 ? outerR : innerR) * jitter;
+            const px = cx + Math.cos(ang) * r;
+            const py = cy + Math.sin(ang) * r;
+            if (i === 0) g.moveTo(px, py);
+            else g.lineTo(px, py);
+          }
+          g.closePath();
+          g.endFill();
+
+          // Hot yellow inner blast star
+          const hotOuter = outerR * 0.66;
+          const hotInner = innerR * 0.62;
+          g.beginFill(0xFEF08A, 0.92 * starFade);
+          for (let i = 0; i < spikes * 2; i++) {
+            const ang = (Math.PI * i) / spikes + 0.34;
+            const r = i % 2 === 0 ? hotOuter : hotInner;
+            const px = cx + Math.cos(ang) * r;
+            const py = cy + Math.sin(ang) * r;
+            if (i === 0) g.moveTo(px, py);
+            else g.lineTo(px, py);
+          }
+          g.closePath();
+          g.endFill();
+        }
+
+        // 3. Incandescent white-gold detonation core (0..38%)
+        if (t < 0.38) {
+          const coreFade = Math.pow(1 - t / 0.38, 1.8);
+          g.beginFill(0xFFFBEB, 0.96 * coreFade);
+          g.drawCircle(cx, cy, (9 + t * 24) * scale);
+          g.endFill();
+        }
+
+        // 4. Double expanding concussive shockwave rings (0..92%)
+        const ringEase = 1 - Math.pow(1 - t, 2.2);
+        g.lineStyle(3.2 * ease, 0xFEF08A, 0.94 * ease);
+        g.drawCircle(cx, cy, (10 + ringEase * 28) * scale);
+        g.lineStyle(2.4 * ease, 0xEF4444, 0.85 * ease);
+        g.drawCircle(cx, cy, (14 + ringEase * 36) * scale);
 
         const pad = 2 - t * 6;
-        g.lineStyle(3 * ease, 0xFCA5A5, 0.9 * ease);
+        g.lineStyle(2.4 * ease, 0xFCA5A5, 0.72 * ease);
         g.drawRect(data.x + pad, data.y + pad, TILE_SIZE - pad * 2, TILE_SIZE - pad * 2);
         g.lineStyle(0);
         break;

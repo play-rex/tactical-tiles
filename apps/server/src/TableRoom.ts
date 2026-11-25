@@ -596,7 +596,7 @@ export class TableRoom extends Room {
     const sightBefore = this.sight;
     this.refreshSight();
     const seatEvents = this.seats.map((s, i) =>
-      s.isBot ? [] : eventsFor(result.events, fog, sightBefore[i] ?? EMPTY_SIGHT, this.sight[i] ?? EMPTY_SIGHT),
+      s.isBot ? [] : eventsFor(result.events, fog, sightBefore[i] ?? EMPTY_SIGHT, this.sight[i] ?? EMPTY_SIGHT, i),
     );
     // Increment is uncapped: every action (other than ending the turn) banks its bonus.
     // CP costs bound how many actions a turn can hold, so active play earns time.

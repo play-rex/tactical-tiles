@@ -1,4 +1,4 @@
-import type { TerrainType, UnitType } from '@tactical/engine/types';
+import type { TacticalFxPhase, TacticalId, TerrainType, UnitType } from '@tactical/engine/types';
 
 export type SoundEffectType =
     | 'click'
@@ -791,6 +791,323 @@ class SoundFXManager {
         }
     }
 
+    // ── Tactical Weapons Procedural Military Foley (All 11 Weapons) ──────
+
+    public playTacticalSound(
+        itemKey: TacticalId,
+        phase: TacticalFxPhase,
+        meta?: { steps?: number; pings?: number; sabotageKind?: 'CP' | 'STRIP' },
+    ): void {
+        try {
+            const bus = this.ensureAudio();
+            if (!bus) return;
+            const { ctx, out, reverb } = bus;
+
+            switch (itemKey) {
+                case 'MINEFIELD_SNAPSHOT': {
+                    // Ground-penetrating subsurface lidar sweep + metallic sonar contact locks
+                    this.playPressurePunch({
+                        ctx, out, reverb, reverbMix: 0.35,
+                        delay: 0, freqStart: 190, freqEnd: 62, duration: 0.32, gain: 0.28, type: 'sine',
+                    });
+                    this.playFilteredNoise({
+                        ctx, out, reverb, reverbMix: 0.4,
+                        delay: 0.02, attack: 0.03, duration: 0.44,
+                        filterType: 'bandpass', freqStart: 520, freqEnd: 2200, q: 3.5, gain: 0.14,
+                    });
+                    const pingCount = Math.min(5, Math.max(1, meta?.pings ?? 2));
+                    for (let i = 0; i < pingCount; i++) {
+                        this.playPressurePunch({
+                            ctx, out, reverb, reverbMix: 0.3,
+                            delay: 0.16 + i * 0.085, freqStart: 1680 + i * 110, freqEnd: 1420, duration: 0.09, gain: 0.09, type: 'sine',
+                        });
+                    }
+                    break;
+                }
+
+                case 'RECON_DRONE': {
+                    // Hunter UAV high-speed quad-rotor swoop + optical target lock + crisp 3-round micro-cannon burst at ~280ms
+                    this.playFilteredNoise({
+                        ctx, out, reverb, reverbMix: 0.28,
+                        delay: 0, attack: 0.04, duration: 0.62,
+                        filterType: 'bandpass', freqStart: 1650, freqEnd: 740, q: 3.8, gain: 0.17,
+                    });
+                    this.playPressurePunch({
+                        ctx, out, delay: 0.02, freqStart: 270, freqEnd: 135, duration: 0.46, gain: 0.11, type: 'sawtooth',
+                    });
+                    // Target lock chirp
+                    this.playFilteredNoise({
+                        ctx, out, delay: 0.16, attack: 0.001, duration: 0.028,
+                        filterType: 'bandpass', freqStart: 4200, freqEnd: 2900, q: 7.5, gain: 0.14,
+                    });
+                    // 3-round precision drone micro-burst synced to 280ms impact
+                    for (let r = 0; r < 3; r++) {
+                        const t = 0.25 + r * 0.042;
+                        this.playFilteredNoise({
+                            ctx, out, reverb, reverbMix: 0.25,
+                            delay: t, attack: 0.0005, duration: 0.042,
+                            filterType: 'bandpass', freqStart: 2450 - r * 120, freqEnd: 760, q: 1.8, gain: 0.3, saturate: true,
+                        });
+                        this.playPressurePunch({
+                            ctx, out, delay: t, freqStart: 155, freqEnd: 46, duration: 0.038, gain: 0.22,
+                        });
+                    }
+                    break;
+                }
+
+                case 'SMOKE_SCREEN': {
+                    // Triple muffled smoke mortar canisters + pressurized billowing obscurant hiss
+                    for (let i = 0; i < 3; i++) {
+                        this.playPressurePunch({
+                            ctx, out, reverb, reverbMix: 0.25,
+                            delay: i * 0.075, freqStart: 145 - i * 8, freqEnd: 46, duration: 0.08, gain: 0.26,
+                        });
+                        this.playFilteredNoise({
+                            ctx, out, reverb, reverbMix: 0.35, pink: true,
+                            delay: i * 0.075 + 0.02, attack: 0.01, duration: 0.12,
+                            filterType: 'lowpass', freqStart: 950, freqEnd: 320, q: 1.0, gain: 0.22,
+                        });
+                    }
+                    this.playFilteredNoise({
+                        ctx, out, reverb, reverbMix: 0.4,
+                        delay: 0.18, attack: 0.06, duration: 0.72,
+                        filterType: 'bandpass', freqStart: 2100, freqEnd: 780, q: 0.9, gain: 0.22,
+                    });
+                    break;
+                }
+
+                case 'RADAR_SWEEP': {
+                    // Wide AWACS Doppler phased-array beam sweep + cascading target contact pings
+                    this.playFilteredNoise({
+                        ctx, out, reverb, reverbMix: 0.45,
+                        delay: 0, attack: 0.08, duration: 0.85,
+                        filterType: 'bandpass', freqStart: 340, freqEnd: 2650, q: 4.5, gain: 0.15,
+                    });
+                    this.playPressurePunch({
+                        ctx, out, reverb, reverbMix: 0.3,
+                        delay: 0, freqStart: 130, freqEnd: 210, duration: 0.55, gain: 0.13, type: 'sine',
+                    });
+                    const contacts = Math.min(6, Math.max(1, meta?.pings ?? 3));
+                    for (let i = 0; i < contacts; i++) {
+                        this.playPressurePunch({
+                            ctx, out, reverb, reverbMix: 0.25,
+                            delay: 0.18 + i * 0.11, freqStart: 1320 + i * 70, freqEnd: 1180, duration: 0.075, gain: 0.085, type: 'sine',
+                        });
+                    }
+                    break;
+                }
+
+                case 'PRECISION_STRIKE': {
+                    if (phase === 'MARK') {
+                        // Sharp optical laser designator lock-on double click + whine
+                        this.playFilteredNoise({
+                            ctx, out, delay: 0, attack: 0.001, duration: 0.026,
+                            filterType: 'bandpass', freqStart: 4200, freqEnd: 2800, q: 7.0, gain: 0.16,
+                        });
+                        this.playPressurePunch({
+                            ctx, out, delay: 0.04, freqStart: 1850, freqEnd: 2250, duration: 0.16, gain: 0.075, type: 'sine',
+                        });
+                        this.playFilteredNoise({
+                            ctx, out, delay: 0.19, attack: 0.001, duration: 0.032,
+                            filterType: 'bandpass', freqStart: 4900, freqEnd: 3400, q: 8.0, gain: 0.18,
+                        });
+                    } else {
+                        // Laser hum -> hypersonic JDAM diving scream -> pinpoint seismic warhead impact at 420ms
+                        this.playPressurePunch({
+                            ctx, out, reverb, reverbMix: 0.32,
+                            delay: 0, freqStart: 2350, freqEnd: 310, duration: 0.41, gain: 0.12, type: 'sawtooth',
+                        });
+                        this.playFilteredNoise({
+                            ctx, out, reverb, reverbMix: 0.38,
+                            delay: 0.1, attack: 0.04, duration: 0.32,
+                            filterType: 'bandpass', freqStart: 3000, freqEnd: 620, q: 2.2, gain: 0.24,
+                        });
+                        // Detonation synced at 420ms
+                        this.playPressurePunch({
+                            ctx, out, reverb, reverbMix: 0.68,
+                            delay: 0.41, freqStart: 116, freqEnd: 17, duration: 0.58, gain: 0.72, type: 'triangle',
+                        });
+                        this.playFilteredNoise({
+                            ctx, out, reverb, reverbMix: 0.86, pink: true,
+                            delay: 0.41, attack: 0.001, duration: 0.68,
+                            filterType: 'lowpass', freqStart: 1520, freqEnd: 68, q: 0.9, gain: 0.74, saturate: true,
+                        });
+                        this.playFilteredNoise({
+                            ctx, out, reverb, reverbMix: 0.52,
+                            delay: 0.43, attack: 0.002, duration: 0.3,
+                            filterType: 'bandpass', freqStart: 3400, freqEnd: 560, q: 1.2, gain: 0.32,
+                        });
+                    }
+                    break;
+                }
+
+                case 'SABOTAGE': {
+                    // High-voltage EMP capacitor discharge + downward turbine drain + comms static glitch
+                    this.playPressurePunch({
+                        ctx, out, reverb, reverbMix: 0.35,
+                        delay: 0, freqStart: 920, freqEnd: 48, duration: 0.44, gain: 0.32, type: 'sawtooth',
+                    });
+                    this.playFilteredNoise({
+                        ctx, out, reverb, reverbMix: 0.35,
+                        delay: 0.01, attack: 0.001, duration: 0.26,
+                        filterType: 'highpass', freqStart: 3600, freqEnd: 1100, q: 2.4, gain: 0.26, saturate: true,
+                    });
+                    this.playFilteredNoise({
+                        ctx, out, delay: 0.14, attack: 0.002, duration: 0.16,
+                        filterType: 'bandpass', freqStart: meta?.sabotageKind === 'STRIP' ? 1850 : 2800, freqEnd: 620, q: 3.5, gain: 0.22, saturate: true,
+                    });
+                    break;
+                }
+
+                case 'NAPALM_LINE': {
+                    if (phase === 'BURN') {
+                        // Fierce flame-sear roar + crackling embers
+                        this.playFilteredNoise({
+                            ctx, out, reverb, reverbMix: 0.4, pink: true,
+                            delay: 0, attack: 0.015, duration: 0.42,
+                            filterType: 'bandpass', freqStart: 920, freqEnd: 260, q: 1.1, gain: 0.42, saturate: true,
+                        });
+                        this.playFilteredNoise({
+                            ctx, out, delay: 0.04, attack: 0.005, duration: 0.24,
+                            filterType: 'highpass', freqStart: 2800, freqEnd: 1600, q: 1.4, gain: 0.18,
+                        });
+                    } else {
+                        // Sustained supersonic strike-jet afterburner pass across the theater + 4 cascading incendiary ignitions
+                        this.playFilteredNoise({
+                            ctx, out, reverb, reverbMix: 0.58, pink: true,
+                            delay: 0, attack: 0.14, duration: 1.35,
+                            filterType: 'bandpass', freqStart: 1850, freqEnd: 240, q: 1.45, gain: 0.38, saturate: true,
+                        });
+                        for (let i = 0; i < 4; i++) {
+                            const t = 0.22 + i * 0.11;
+                            this.playPressurePunch({
+                                ctx, out, reverb, reverbMix: 0.42,
+                                delay: t, freqStart: 108, freqEnd: 26, duration: 0.26, gain: 0.38,
+                            });
+                            this.playFilteredNoise({
+                                ctx, out, reverb, reverbMix: 0.58, pink: true,
+                                delay: t, attack: 0.012, duration: 0.36,
+                                filterType: 'lowpass', freqStart: 1180, freqEnd: 155, q: 0.9, gain: 0.36, saturate: true,
+                            });
+                        }
+                    }
+                    break;
+                }
+
+                case 'PARADROP': {
+                    // Sustained C-130 quad-turboprop theater flyover -> extraction tether -> parafoil canopy snap -> heavy touchdown at 860ms
+                    this.playFilteredNoise({
+                        ctx, out, reverb, reverbMix: 0.38, pink: true,
+                        delay: 0, attack: 0.16, duration: 1.65,
+                        filterType: 'lowpass', freqStart: 460, freqEnd: 145, q: 1.25, gain: 0.26,
+                    });
+                    this.playPressurePunch({
+                        ctx, out, reverb, reverbMix: 0.25,
+                        delay: 0.04, freqStart: 112, freqEnd: 78, duration: 1.2, gain: 0.14, type: 'triangle',
+                    });
+                    // Rear cargo ramp + parafoil canopy snap-open at ~380ms
+                    this.playFilteredNoise({
+                        ctx, out, reverb, reverbMix: 0.28,
+                        delay: 0.36, attack: 0.003, duration: 0.14,
+                        filterType: 'bandpass', freqStart: 1450, freqEnd: 600, q: 1.4, gain: 0.28,
+                    });
+                    // Solid boots-on-ground touchdown thud at ~860ms
+                    this.playPressurePunch({
+                        ctx, out, reverb, reverbMix: 0.34,
+                        delay: 0.84, freqStart: 130, freqEnd: 30, duration: 0.16, gain: 0.44,
+                    });
+                    this.playFilteredNoise({
+                        ctx, out, delay: 0.89, attack: 0.002, duration: 0.045,
+                        filterType: 'bandpass', freqStart: 2700, freqEnd: 1800, q: 5.0, gain: 0.13,
+                    });
+                    break;
+                }
+
+                case 'CARPET_RUN': {
+                    if (phase === 'MARK') {
+                        for (let i = 0; i < 3; i++) {
+                            this.playFilteredNoise({
+                                ctx, out, delay: i * 0.055, attack: 0.001, duration: 0.025,
+                                filterType: 'bandpass', freqStart: 3200 + i * 320, freqEnd: 2100, q: 6.5, gain: 0.14,
+                            });
+                        }
+                    } else {
+                        // Deep sustained heavy flying-wing bomber pass + 1..3 guided missile whistles & concussive hits (280/480/680ms)
+                        this.playFilteredNoise({
+                            ctx, out, reverb, reverbMix: 0.56, pink: true,
+                            delay: 0, attack: 0.14, duration: 1.65,
+                            filterType: 'lowpass', freqStart: 580, freqEnd: 115, q: 1.15, gain: 0.42,
+                        });
+                        const count = Math.max(1, Math.min(3, meta?.steps ?? 3));
+                        for (let i = 0; i < count; i++) {
+                            const impact = 0.28 + i * 0.2;
+                            // Brief guided warhead shriek before each impact
+                            this.playPressurePunch({
+                                ctx, out, reverb, reverbMix: 0.22,
+                                delay: Math.max(0, impact - 0.15), freqStart: 1550, freqEnd: 460, duration: 0.14, gain: 0.08, type: 'sawtooth',
+                            });
+                            this.playTankBlastImpact(impact);
+                        }
+                    }
+                    break;
+                }
+
+                case 'ARTILLERY_BARRAGE': {
+                    if (phase === 'MARK') {
+                        for (let i = 0; i < 4; i++) {
+                            this.playFilteredNoise({
+                                ctx, out, delay: i * 0.045, attack: 0.001, duration: 0.022,
+                                filterType: 'bandpass', freqStart: 2600 + i * 240, freqEnd: 1800, q: 6.0, gain: 0.13,
+                            });
+                        }
+                    } else {
+                        // Distant howitzer battery salvo -> descending whistles -> creeping 2x10 rolling thunder
+                        this.playPressurePunch({
+                            ctx, out, reverb, reverbMix: 0.65,
+                            delay: 0, freqStart: 78, freqEnd: 24, duration: 0.3, gain: 0.38,
+                        });
+                        const steps = Math.max(3, Math.min(10, meta?.steps ?? 10));
+                        for (let i = 0; i < steps; i++) {
+                            const t = 0.2 + i * 0.085;
+                            const weight = i === steps - 1 ? 1.08 : 0.74 + (i % 2) * 0.16;
+                            this.playPressurePunch({
+                                ctx, out, reverb, reverbMix: 0.62,
+                                delay: t, freqStart: 96 - (i % 3) * 8, freqEnd: 20, duration: 0.28, gain: 0.44 * weight,
+                            });
+                            this.playFilteredNoise({
+                                ctx, out, reverb, reverbMix: 0.78, pink: true,
+                                delay: t, attack: 0.002, duration: 0.36,
+                                filterType: 'lowpass', freqStart: 1100 - i * 35, freqEnd: 85, q: 0.9,
+                                gain: 0.48 * weight, saturate: true,
+                            });
+                        }
+                    }
+                    break;
+                }
+
+                case 'OVERCLOCK_CORE': {
+                    // Rising harmonic reactor spool-up + crisp high-voltage lock-in snap
+                    this.playPressurePunch({
+                        ctx, out, reverb, reverbMix: 0.35,
+                        delay: 0, freqStart: 140, freqEnd: 560, duration: 0.42, gain: 0.22, type: 'triangle',
+                    });
+                    this.playFilteredNoise({
+                        ctx, out, reverb, reverbMix: 0.3,
+                        delay: 0.04, attack: 0.08, duration: 0.4,
+                        filterType: 'bandpass', freqStart: 600, freqEnd: 3400, q: 3.2, gain: 0.16,
+                    });
+                    this.playFilteredNoise({
+                        ctx, out, delay: 0.38, attack: 0.001, duration: 0.045,
+                        filterType: 'bandpass', freqStart: 4200, freqEnd: 2400, q: 5.5, gain: 0.18,
+                    });
+                    break;
+                }
+            }
+        } catch {
+            // Never disrupt gameplay
+        }
+    }
+
     /**
      * Exposes a live MediaStream audio tap from the master compressor so Play-of-the-Match WebM
      * exports capture full procedural gunfire, blasts, and kill-cam stings.
@@ -1071,6 +1388,67 @@ class SoundFXManager {
                     break;
                 }
             }
+        } catch {
+            // Never let audio playback disrupt gameplay
+        }
+    }
+
+    /** Theater Air Supply Drop foley: C-130/Heavy Lifter flyover, canopy snap, and crate touchdown chime. */
+    public playAirDrop(kind: 'FIELD' | 'TACTICAL', stage: 'FLYOVER' | 'DROP' | 'TOUCHDOWN'): void {
+        try {
+            const bus = this.ensureAudio();
+            if (!bus) return;
+            const { ctx, out, reverb } = bus;
+            const isTac = kind === 'TACTICAL';
+
+            if (stage === 'FLYOVER') {
+                // Deep C-130 turboprop drone (FIELD) or heavy twin-jet lifter roar (TACTICAL) across the long pass
+                this.playFilteredNoise({
+                    ctx, out, reverb, reverbMix: 0.48, pink: true,
+                    delay: 0, attack: 0.55, duration: isTac ? 3.8 : 3.2,
+                    filterType: 'lowpass', freqStart: isTac ? 540 : 410, freqEnd: isTac ? 130 : 115, q: 1.35, gain: isTac ? 0.28 : 0.22,
+                });
+                this.playPressurePunch({
+                    ctx, out, reverb, reverbMix: 0.3,
+                    delay: 0.12, freqStart: isTac ? 94 : 114, freqEnd: isTac ? 60 : 80, duration: 2.4, gain: 0.13, type: 'triangle',
+                });
+                return;
+            }
+
+            if (stage === 'DROP') {
+                // Cargo ramp pneumatic release + parachute canopy billowing snap
+                this.playFilteredNoise({
+                    ctx, out, reverb, reverbMix: 0.3,
+                    delay: 0, attack: 0.004, duration: 0.16,
+                    filterType: 'bandpass', freqStart: 1350, freqEnd: 520, q: 1.5, gain: 0.26,
+                });
+                this.playPressurePunch({
+                    ctx, out, reverb, reverbMix: 0.25,
+                    delay: 0.14, freqStart: 150, freqEnd: 55, duration: 0.14, gain: 0.22,
+                });
+                return;
+            }
+
+            // TOUCHDOWN: Heavy steel thud + mystery supply beacon chime
+            this.playPressurePunch({
+                ctx, out, reverb, reverbMix: 0.36,
+                delay: 0, freqStart: isTac ? 115 : 138, freqEnd: 28, duration: 0.2, gain: isTac ? 0.48 : 0.38,
+            });
+            const now = ctx.currentTime;
+            const notes = isTac ? [523.25, 659.25, 783.99] : [440, 587.33];
+            notes.forEach((f, idx) => {
+                const osc = ctx.createOscillator();
+                const g = ctx.createGain();
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(f, now + idx * 0.055);
+                g.gain.setValueAtTime(0.0001, now + idx * 0.055);
+                g.gain.linearRampToValueAtTime(0.08, now + idx * 0.055 + 0.018);
+                g.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.055 + 0.42);
+                osc.connect(g);
+                g.connect(out);
+                osc.start(now + idx * 0.055);
+                osc.stop(now + idx * 0.055 + 0.45);
+            });
         } catch {
             // Never let audio playback disrupt gameplay
         }

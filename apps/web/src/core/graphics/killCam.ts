@@ -13,7 +13,7 @@
  * `resolveKillCamNarrative` (emergent headline & badge priority engine).
  */
 
-import type { DamageBreakdown, KillCause, TerrainType, UnitType, WeaponVisual } from '@tactical/engine';
+import { TACTICAL_ITEMS, type DamageBreakdown, type KillCause, type TacticalId, type TerrainType, type UnitType, type WeaponVisual } from '@tactical/engine';
 
 /** Player-selectable kill-cam pacing mode. */
 export type KillCamMode = 'FULL' | 'SHORT' | 'OFF';
@@ -41,6 +41,10 @@ export const KILL_CAM_STYLES: KillCamCameraStyle[] = [
   'BREACHER_ARC',
   'STRUCTURE_BLOWOUT',
   'GRAZE_FAKEOUT',
+  'ORBITAL_DROP',
+  'BOMBER_TRACK',
+  'BARRAGE_WALK',
+  'THEATER_SWEEP',
 ];
 
 export type KillCamPhase = 'IDLE' | 'ARM' | 'PUSH' | 'SLAM' | 'SLOW' | 'RECOVER';
@@ -53,7 +57,11 @@ export type KillCamCameraStyle =
   | 'CROSSFIRE_TRIANGLE'
   | 'BREACHER_ARC'
   | 'STRUCTURE_BLOWOUT'
-  | 'GRAZE_FAKEOUT';
+  | 'GRAZE_FAKEOUT'
+  | 'ORBITAL_DROP'
+  | 'BOMBER_TRACK'
+  | 'BARRAGE_WALK'
+  | 'THEATER_SWEEP';
 
 export type KillCamNarrativeTag =
   | 'FINAL_BLOW'
@@ -78,6 +86,8 @@ export interface KillCamCue {
   cause: KillCause;
   cameraStyle?: KillCamCameraStyle;
   weapon?: WeaponVisual;
+  /** Optional Tactical Weapon ID for tactical camera beats and callout labels. */
+  tacticalItemKey?: TacticalId;
   /** Structure headline, e.g. "VAULT BREACHED" (structure cues only). */
   title?: string;
   /** One-line subtext for structure cues. */
@@ -109,6 +119,8 @@ export interface KillCamCue {
   hasVisibleOrigin?: boolean;
   /** World-pixel centers of flanking Crossfire supporters (for triangulation framing + beams). */
   crossfirePoints?: KillCamPoint[];
+  /** Multi-target world-pixel waypoints (e.g., Carpet Run 1..3 enemy targets or Paradrop pickup->drop). */
+  waypoints?: KillCamPoint[];
   /** True when replaying a recorded Play of the Match clip. */
   isReplay?: boolean;
   /** Total incoming damage across every staged hit on this victim. */
@@ -215,6 +227,32 @@ export const GRAZE_TIMING: Record<'FULL' | 'SHORT', KillCamTiming> = {
   SHORT: { armMs: 0, pushMs: 150, travelRealMs: 130, minPushScale: 0.7, slamMs: 85, slowMs: 420, recoverMs: 200, slowScale: 0.58, slamScale: 0.22, letterbox: 0, maxFit: 0.66 },
 };
 
+/** Dedicated short micro-cam timing for non-lethal Land Mine blasts (`*click* ... BOOM`). */
+export const MINE_ATTACK_TIMING: Record<'FULL' | 'SHORT', KillCamTiming> = {
+  FULL: { armMs: 130, pushMs: 0, travelRealMs: 0, minPushScale: 1, slamMs: 180, slowMs: 460, recoverMs: 240, slowScale: 0.42, slamScale: 0.22, letterbox: 0, maxFit: 0.86 },
+  SHORT: { armMs: 85, pushMs: 0, travelRealMs: 0, minPushScale: 1, slamMs: 120, slowMs: 280, recoverMs: 180, slowScale: 0.56, slamScale: 0.34, letterbox: 0, maxFit: 0.74 },
+};
+
+/**
+ * Cinematic 3.5–4.0s timing profiles for major Tactical Weapons in `FULL` mode
+ * (`ORBITAL_DROP`, `BOMBER_TRACK`, `BARRAGE_WALK`) while `SHORT` stays snappy.
+ */
+export const TACTICAL_MAJOR_TIMING: Record<'FULL' | 'SHORT', { ATTACK: KillCamTiming; KILL: KillCamTiming }> = {
+  FULL: {
+    ATTACK: { armMs: 0, pushMs: 1550, travelRealMs: 1450, minPushScale: 0.16, slamMs: 320, slowMs: 1120, recoverMs: 580, slowScale: 0.34, slamScale: 0.14, letterbox: 0.85, maxFit: 0.88 },
+    KILL: { armMs: 0, pushMs: 1750, travelRealMs: 1650, minPushScale: 0.14, slamMs: 360, slowMs: 1220, recoverMs: 620, slowScale: 0.24, slamScale: 0.08, letterbox: 1, maxFit: 1 },
+  },
+  SHORT: {
+    ATTACK: { armMs: 0, pushMs: 560, travelRealMs: 500, minPushScale: 0.3, slamMs: 160, slowMs: 420, recoverMs: 280, slowScale: 0.48, slamScale: 0.24, letterbox: 0, maxFit: 0.72 },
+    KILL: { armMs: 0, pushMs: 740, travelRealMs: 660, minPushScale: 0.22, slamMs: 220, slowMs: 680, recoverMs: 360, slowScale: 0.28, slamScale: 0.1, letterbox: 1, maxFit: 1 },
+  },
+};
+
+export const TACTICAL_SWEEP_TIMING: Record<'FULL' | 'SHORT', KillCamTiming> = {
+  FULL: { armMs: 0, pushMs: 720, travelRealMs: 650, minPushScale: 0.28, slamMs: 240, slowMs: 920, recoverMs: 480, slowScale: 0.45, slamScale: 0.25, letterbox: 0, maxFit: 0.72 },
+  SHORT: { armMs: 0, pushMs: 340, travelRealMs: 300, minPushScale: 0.45, slamMs: 140, slowMs: 360, recoverMs: 240, slowScale: 0.6, slamScale: 0.35, letterbox: 0, maxFit: 0.58 },
+};
+
 export const getKillCamTiming = (
   tier: KillCamTier,
   mode: KillCamMode = 'FULL',
@@ -222,6 +260,11 @@ export const getKillCamTiming = (
 ): KillCamTiming => {
   const bucket = mode === 'SHORT' ? 'SHORT' : 'FULL';
   if (cameraStyle === 'GRAZE_FAKEOUT') return GRAZE_TIMING[bucket];
+  if (cameraStyle === 'MINE_CLICK' && tier === 'ATTACK') return MINE_ATTACK_TIMING[bucket];
+  if (cameraStyle === 'ORBITAL_DROP' || cameraStyle === 'BOMBER_TRACK' || cameraStyle === 'BARRAGE_WALK') {
+    return tier === 'ATTACK' ? TACTICAL_MAJOR_TIMING[bucket].ATTACK : TACTICAL_MAJOR_TIMING[bucket].KILL;
+  }
+  if (cameraStyle === 'THEATER_SWEEP') return TACTICAL_SWEEP_TIMING[bucket];
   return KILL_CAM_TIMINGS[bucket][tier];
 };
 
@@ -269,10 +312,24 @@ const easeOutCubic = (t: number): number => 1 - Math.pow(1 - clamp01(t), 3);
 export const selectKillCamStyle = (cue: KillCamCue): KillCamCameraStyle => {
   if (cue.cameraStyle) return cue.cameraStyle;
   if (cue.subject === 'STRUCTURE') return 'STRUCTURE_BLOWOUT';
+  if (cue.weapon === 'TACTICAL_STRIKE' || cue.tacticalItemKey === 'PRECISION_STRIKE') return 'ORBITAL_DROP';
+  if (
+    cue.weapon === 'TACTICAL_CARPET' ||
+    cue.weapon === 'TACTICAL_NAPALM' ||
+    cue.weapon === 'TACTICAL_DRONE' ||
+    cue.tacticalItemKey === 'CARPET_RUN' ||
+    cue.tacticalItemKey === 'NAPALM_LINE' ||
+    cue.tacticalItemKey === 'PARADROP' ||
+    cue.tacticalItemKey === 'RECON_DRONE'
+  ) {
+    return 'BOMBER_TRACK';
+  }
+  if (cue.weapon === 'TACTICAL_BARRAGE' || cue.tacticalItemKey === 'ARTILLERY_BARRAGE') return 'BARRAGE_WALK';
+  if (cue.tacticalItemKey) return 'THEATER_SWEEP';
+  if (cue.cause === 'MINE') return 'MINE_CLICK';
   if (cue.subject === 'ATTACK') {
     return cue.remainingHp === 1 ? 'GRAZE_FAKEOUT' : 'STANDARD';
   }
-  if (cue.cause === 'MINE') return 'MINE_CLICK';
   if (cue.cause === 'OVERWATCH') return 'OVERWATCH_SNAP';
   if (cue.crossfireCount >= 1 && cue.crossfirePoints && cue.crossfirePoints.length > 0) {
     return 'CROSSFIRE_TRIANGLE';
@@ -323,6 +380,7 @@ export const KILL_CAM_CAUSE_LABEL: Record<KillCause, string> = {
   ARTILLERY: 'BASE ARTILLERY',
   LAVA: 'MAGMA',
   BASE_FALL: 'HQ COLLAPSE',
+  TACTICAL: 'TACTICAL STRIKE',
 };
 
 export const KILL_CAM_WEAPON_LABEL: Record<WeaponVisual, string> = {
@@ -332,6 +390,11 @@ export const KILL_CAM_WEAPON_LABEL: Record<WeaponVisual, string> = {
   TURRET: 'BANK MG',
   ARTILLERY: 'HQ AUTOCANNON',
   SIEGE: 'DEMOLITION CHARGE',
+  TACTICAL_STRIKE: 'PRECISION STRIKE',
+  TACTICAL_CARPET: 'CARPET RUN',
+  TACTICAL_BARRAGE: 'ARTILLERY BARRAGE',
+  TACTICAL_NAPALM: 'NAPALM LINE',
+  TACTICAL_DRONE: 'HUNTER DRONE',
 };
 
 export interface ResolvedNarrative {
@@ -378,6 +441,32 @@ export const resolveKillCamNarrative = (cue: KillCamCue, combo: number): Resolve
   }
 
   if (cue.subject === 'ATTACK') {
+    if (cue.tacticalItemKey) {
+      const tacName = TACTICAL_ITEMS[cue.tacticalItemKey]?.name.toUpperCase() ?? 'TACTICAL OPS';
+      return {
+        headline: cue.title ?? tacName,
+        eyebrow: 'TACTICAL OPS',
+        tags,
+        accentGold: cue.tacticalItemKey === 'OVERCLOCK_CORE' || cue.tacticalItemKey === 'ARTILLERY_BARRAGE',
+      };
+    }
+    if (cue.cause === 'TACTICAL' && cue.title) {
+      return {
+        headline: cue.title,
+        eyebrow: 'AIRLIFT SUPPLY',
+        tags,
+        accentGold: cue.title.includes('TACTICAL') || cue.title.includes('DUAL'),
+      };
+    }
+    if (cue.cause === 'MINE') {
+      const grazed = cue.remainingHp === 1;
+      return {
+        headline: grazed ? '1 HP · MINE SURVIVOR!' : 'LAND MINE BLAST',
+        eyebrow: 'PROXIMITY MINE',
+        tags,
+        accentGold: grazed,
+      };
+    }
     const grazed = cue.remainingHp === 1;
     return {
       headline: grazed ? '1 HP · BARELY ALIVE!' : 'DIRECT HIT',
@@ -410,6 +499,8 @@ export const resolveKillCamNarrative = (cue: KillCamCue, combo: number): Resolve
     accentGold = true;
   } else if (cue.isFirstBlood) {
     headline = 'FIRST BLOOD';
+  } else if (cue.cause === 'TACTICAL' && cue.weapon && KILL_CAM_WEAPON_LABEL[cue.weapon]) {
+    headline = `${KILL_CAM_WEAPON_LABEL[cue.weapon]} KILL`;
   } else if (cue.cause !== 'COMBAT') {
     headline = `${KILL_CAM_CAUSE_LABEL[cue.cause]} KILL`;
   } else if (cue.weapon === 'SNIPER' && cue.distanceTiles >= 7) {
@@ -536,6 +627,9 @@ export class KillCamDirector {
   public arm(cue: KillCamCue, reducedMotion = false): number {
     this.reducedMotion = reducedMotion;
     if (reducedMotion || this.mode === 'OFF' || this.skippedCueIds.has(cue.id)) {
+      return 0;
+    }
+    if (cue.tier === 'ATTACK' && this.cue && this.cue.tier !== 'ATTACK') {
       return 0;
     }
     const style = selectKillCamStyle(cue);
@@ -743,8 +837,11 @@ export class KillCamDirector {
     const maxFit = timing.maxFit;
     const isAttack = cue.tier === 'ATTACK';
     const isGraze = style === 'GRAZE_FAKEOUT';
-    const isBlueprintWorthy = cue.tier === 'CINEMATIC' || cue.tier === 'STRUCTURE';
-    const slowCreep = isAttack ? (isGraze ? -0.14 : 0.02) : 0.05;
+    const isMineAttack = isAttack && style === 'MINE_CLICK';
+    const isTacticalStyle =
+      style === 'ORBITAL_DROP' || style === 'BOMBER_TRACK' || style === 'BARRAGE_WALK' || style === 'THEATER_SWEEP';
+    const isBlueprintWorthy = cue.tier === 'CINEMATIC' || cue.tier === 'STRUCTURE' || isTacticalStyle;
+    const slowCreep = isAttack ? (isGraze ? -0.14 : isMineAttack ? 0.05 : isTacticalStyle ? 0.04 : 0.02) : 0.05;
 
     const armT = smoothstep(this.phaseElapsedMs / Math.max(1, timing.armMs || 150));
     const pushLinear = clamp01(this.phaseElapsedMs / Math.max(1, this.pushMsEff));
@@ -845,6 +942,69 @@ export class KillCamDirector {
         peakTiltRad = tiltSign * 0.018;
         break;
       }
+      case 'ORBITAL_DROP': {
+        // High-altitude orbital designator lock tightening straight down onto the strike tile.
+        pushCenterX = cue.focusX;
+        pushCenterY = cue.focusY;
+        slamCenterX = cue.focusX;
+        slamCenterY = cue.focusY;
+        frameW = lerp(Math.max(cue.frameW, 340), Math.max(cue.frameW * 0.72, 220), this.phase === 'PUSH' ? pushT : 1);
+        frameH = lerp(Math.max(cue.frameH, 280), Math.max(cue.frameH * 0.72, 190), this.phase === 'PUSH' ? pushT : 1);
+        peakTiltRad = 0.032;
+        break;
+      }
+      case 'BOMBER_TRACK': {
+        // Tracking dolly riding alongside the bomber / strike jet / cargo plane (with multi-target waypoint panning!).
+        const trackProgress =
+          this.phase === 'PUSH'
+            ? pushT * 0.48
+            : this.phase === 'SLAM'
+              ? lerp(0.48, 0.78, slamT)
+              : lerp(0.78, 1, slowT);
+        if (cue.waypoints && cue.waypoints.length >= 2) {
+          const pts = cue.waypoints;
+          const scaled = clamp01(trackProgress) * (pts.length - 1);
+          const idx = Math.min(pts.length - 2, Math.floor(scaled));
+          const segT = smoothstep(scaled - idx);
+          const wx = lerp(pts[idx].x, pts[idx + 1].x, segT);
+          const wy = lerp(pts[idx].y, pts[idx + 1].y, segT);
+          pushCenterX = wx;
+          pushCenterY = wy;
+          slamCenterX = wx;
+          slamCenterY = wy;
+        } else {
+          pushCenterX = lerp(cue.markerX, cue.focusX, trackProgress);
+          pushCenterY = lerp(cue.markerY, cue.focusY, trackProgress);
+          slamCenterX = lerp(cue.markerX, cue.focusX, Math.min(1, trackProgress));
+          slamCenterY = lerp(cue.markerY, cue.focusY, Math.min(1, trackProgress));
+        }
+        peakTiltRad = tiltSign * 0.024;
+        break;
+      }
+      case 'BARRAGE_WALK': {
+        // Creeping artillery corridor dolly sweeping progressively down the 10-tile barrage lane.
+        const walkProgress =
+          this.phase === 'PUSH'
+            ? pushT * 0.45
+            : this.phase === 'SLAM'
+              ? lerp(0.45, 0.78, slamT)
+              : lerp(0.78, 1, slowT);
+        pushCenterX = lerp(cue.markerX, cue.focusX, walkProgress);
+        pushCenterY = lerp(cue.markerY, cue.focusY, walkProgress);
+        slamCenterX = lerp(cue.markerX, cue.focusX, walkProgress);
+        slamCenterY = lerp(cue.markerY, cue.focusY, walkProgress);
+        peakTiltRad = tiltSign * 0.018;
+        break;
+      }
+      case 'THEATER_SWEEP': {
+        // Calm, wide-angle theater framing for Radar / Snapshot / EMP / Paradrop / Overclock beats.
+        pushCenterX = pairX;
+        pushCenterY = pairY;
+        slamCenterX = cue.focusX;
+        slamCenterY = cue.focusY;
+        peakTiltRad = 0.008;
+        break;
+      }
       default:
         peakTiltRad = cue.tier === 'CINEMATIC' ? tiltSign * 0.016 : 0;
         break;
@@ -895,22 +1055,22 @@ export class KillCamDirector {
         const startFit = this.hadPush ? 0.8 : this.hadArm ? 0.42 : 0;
         fit = lerp(startFit, 1, slamT) * maxFit;
         letterbox = hasLetterbox ? slamT * timing.letterbox : 0;
-        dim = lerp(isAttack ? 0.08 : 0.2, isGraze ? 0.36 : isAttack ? 0.2 : 0.52, slamT);
+        dim = lerp(isAttack ? 0.08 : 0.2, isGraze || isMineAttack ? 0.34 : isAttack ? 0.2 : 0.52, slamT);
         reticle = 1;
-        flash = Math.max(0, (isAttack && !isGraze ? 0.45 : 1) - slamT * 1.15);
+        flash = Math.max(0, (isAttack && !isGraze && !isMineAttack ? 0.45 : 0.92) - slamT * 1.15);
         impact = slamT;
         dutchTiltRad = lerp(peakTiltRad * 0.85, peakTiltRad, slamT);
         // Beat A (0–55ms): crisp 2-frame anime luminance impact pulse; Beat B: cool recon slate.
         const animeFlashT = clamp01(1 - this.phaseElapsedMs / 58);
-        impactFlashGrade = isBlueprintWorthy ? animeFlashT : cue.tier === 'MICRO' ? animeFlashT * 0.48 : 0;
+        impactFlashGrade = isBlueprintWorthy ? animeFlashT : isMineAttack ? animeFlashT * 0.65 : cue.tier === 'MICRO' ? animeFlashT * 0.48 : 0;
         worldDesat = isBlueprintWorthy
           ? lerp(0.25, 0.78, slamT)
           : cue.tier === 'MICRO'
             ? lerp(0.1, 0.34, slamT)
-            : isGraze
-              ? lerp(0.1, 0.42, slamT)
+            : isGraze || isMineAttack
+              ? lerp(0.14, 0.42, slamT)
               : 0;
-        schematicAlpha = isBlueprintWorthy ? lerp(0.52, 1, slamT) : cue.tier === 'MICRO' ? lerp(0.2, 0.65, slamT) : isGraze ? slamT : 0;
+        schematicAlpha = isBlueprintWorthy ? lerp(0.52, 1, slamT) : cue.tier === 'MICRO' ? lerp(0.2, 0.65, slamT) : isGraze || isMineAttack ? lerp(0.9, 0.85, slamT) : 0;
         centerX = lerp(pushCenterX, slamCenterX, slamT);
         centerY = lerp(pushCenterY, slamCenterY, slamT);
         break;
@@ -918,12 +1078,12 @@ export class KillCamDirector {
       case 'SLOW': {
         fit = (1 + slowCreep * smoothstep(slowT)) * maxFit;
         letterbox = hasLetterbox ? timing.letterbox : 0;
-        dim = lerp(isGraze ? 0.32 : isAttack ? 0.2 : 0.52, isAttack ? 0.12 : 0.4, slowT);
+        dim = lerp(isGraze || isMineAttack ? 0.32 : isAttack ? 0.2 : 0.52, isAttack ? 0.12 : 0.4, slowT);
         reticle = 1 - 0.35 * smoothstep(slowT);
         impact = 1;
         dutchTiltRad = lerp(peakTiltRad, peakTiltRad * 0.55, slowT);
-        worldDesat = isBlueprintWorthy ? lerp(0.78, 0.58, slowT) : cue.tier === 'MICRO' ? lerp(0.34, 0.2, slowT) : isGraze ? lerp(0.36, 0.14, slowT) : 0;
-        schematicAlpha = isBlueprintWorthy ? 1 : cue.tier === 'MICRO' ? lerp(0.65, 0.4, slowT) : isGraze ? 1 - slowT * 0.35 : 0;
+        worldDesat = isBlueprintWorthy ? lerp(0.78, 0.58, slowT) : cue.tier === 'MICRO' ? lerp(0.34, 0.2, slowT) : isGraze || isMineAttack ? lerp(0.38, 0.12, slowT) : 0;
+        schematicAlpha = isBlueprintWorthy ? 1 : cue.tier === 'MICRO' ? lerp(0.65, 0.4, slowT) : isGraze ? 1 - slowT * 0.35 : isMineAttack ? (1 - slowT) * 0.7 : 0;
         grazeFlipped = isGraze;
         glitch = isGraze && this.phaseElapsedMs < 95 ? 1 - this.phaseElapsedMs / 95 : 0;
         centerX = slamCenterX;
@@ -938,7 +1098,7 @@ export class KillCamDirector {
         reticle = 0.65 * (1 - recoverT);
         impact = 1;
         dutchTiltRad = peakTiltRad * 0.55 * (1 - recoverT);
-        worldDesat = (isBlueprintWorthy ? 0.58 : cue.tier === 'MICRO' ? 0.2 : isGraze ? 0.14 : 0) * (1 - recoverT);
+        worldDesat = (isBlueprintWorthy ? 0.58 : cue.tier === 'MICRO' ? 0.2 : isGraze || isMineAttack ? 0.12 : 0) * (1 - recoverT);
         schematicAlpha = (isBlueprintWorthy ? 1 : cue.tier === 'MICRO' ? 0.4 : isGraze ? 0.65 : 0) * (1 - recoverT);
         grazeFlipped = isGraze;
         centerX = lerp(slamCenterX, pairX, recoverT);

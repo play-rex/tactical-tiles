@@ -30,6 +30,8 @@ interface UnitSpriteProps {
     gridSize?: number;
     isSelected?: boolean;
     isReadyTurn?: boolean;
+    /** Dims non-targetable units while a discrete Tactical Weapon spotlight is active. */
+    dimmed?: boolean;
     unit: any;
     mapRotation?: BoardRotation;
     initialFacingRad?: number;
@@ -44,6 +46,7 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     gridSize = 20,
     isSelected,
     isReadyTurn = false,
+    dimmed = false,
     unit,
     mapRotation = 0 as BoardRotation,
     initialFacingRad,
@@ -325,6 +328,7 @@ const UnitSpriteComponent: React.FC<UnitSpriteProps> = ({
     return (
         <Container
             ref={containerRef}
+            alpha={dimmed ? 0.34 : 1}
             eventMode="none"
         >
             <Graphics draw={drawTeamPlate} alpha={unit.completed ? 0.45 : 1} />

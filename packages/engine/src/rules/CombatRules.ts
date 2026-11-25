@@ -349,6 +349,8 @@ export interface ConstructContext {
     playerId?: number;
     mapData?: Tile[];
     mines?: LandMine[];
+    /** Active Air Drop flare tile IDs: BARRIER cannot block an incoming LZ (LAND_MINE is allowed!). */
+    flareTileIds?: ReadonlySet<string>;
 }
 
 /**
@@ -390,6 +392,7 @@ export const canConstructOnTile = (
     }
 
     if (itemKey === 'BARRIER') {
+        if (tile.loot || ctx?.flareTileIds?.has(tile.id)) return false;
         return (
             tile.type !== 'WATER' &&
             tile.type !== 'BRIDGE' &&

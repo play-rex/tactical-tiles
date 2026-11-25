@@ -60,6 +60,25 @@ export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data, ma
             g.lineStyle(2.2 * widthScale, 0xFFFFFF, alpha);
             g.moveTo(data.startX, data.startY);
             g.lineTo(headX, headY);
+
+            // Ionized rail acceleration rings pulsing along the sniper trajectory + muzzle optic glint
+            const ringCount = 3;
+            for (let r = 0; r < ringCount; r++) {
+                const frac = (r + 1) / (ringCount + 1);
+                if (sweepT < frac) continue;
+                const rx = data.startX + dx * frac;
+                const ry = data.startY + dy * frac;
+                const rSize = (5 + fadeT * 10) * widthScale;
+                g.lineStyle(1.6 * widthScale, 0xFDA4AF, alpha * 0.72);
+                g.moveTo(rx - px * rSize, ry - py * rSize);
+                g.lineTo(rx + px * rSize, ry + py * rSize);
+            }
+            if (fadeT < 0.45) {
+                const glintA = (1 - fadeT / 0.45) * 0.9;
+                g.lineStyle(1.8, 0xFFFFFF, glintA);
+                g.moveTo(data.startX - px * 11, data.startY - py * 11);
+                g.lineTo(data.startX + px * 11, data.startY + py * 11);
+            }
             g.lineStyle(0);
 
             if (sweepT >= 0.96 && alpha > 0.12) {
@@ -254,6 +273,13 @@ export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data, ma
             g.moveTo(tailX, tailY);
             g.lineTo(headX, headY);
 
+            // Ionized gold capacitor discharge ring at Bank Turret muzzle
+            if (progress < 0.65) {
+                const capA = (1 - progress / 0.65) * 0.85;
+                g.lineStyle(2, 0xFDE047, capA);
+                g.drawCircle(data.startX, data.startY, 7 + progress * 16);
+            }
+
             for (const off of [-2, 2]) {
                 g.lineStyle(1.8, 0xFFFBEB, alpha * 0.92);
                 g.moveTo(tailX + px * off, tailY + py * off);
@@ -266,7 +292,7 @@ export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data, ma
             return;
         }
 
-        // 5. SIEGE / MISSILE — screen-upright parabolic arc + ground shadow + smoke ribbon
+        // 5. SIEGE / MISSILE — screen-upright parabolic arc + finned mortar warhead + smoke ribbon
         if (data.weapon === 'SIEGE' || data.type === 'MISSILE') {
             const progress = Math.min(1, elapsed / travelMs);
             if (progress >= 1) return;
@@ -307,6 +333,14 @@ export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data, ma
 
             const head = pointAt(progress);
             const back = pointAt(Math.max(0, progress - 0.055));
+            const sdx = head.x - back.x;
+            const sdy = head.y - back.y;
+            const sLen = Math.max(0.001, Math.hypot(sdx, sdy));
+            const sux = sdx / sLen;
+            const suy = sdy / sLen;
+            const spx = -suy;
+            const spy = sux;
+
             g.lineStyle(5.5, 0xF97316, 0.65);
             g.moveTo(back.x, back.y);
             g.lineTo(head.x, head.y);
@@ -315,42 +349,72 @@ export const ProjectileRenderer: React.FC<ProjectileRendererProps> = ({ data, ma
             g.lineTo(head.x, head.y);
             g.lineStyle(0);
 
-            g.beginFill(0xFB923C, 0.95);
-            g.drawCircle(head.x, head.y, 5.2);
+            // Finned mortar warhead silhouette oriented along arc tangent
+            const tailX = head.x - sux * 7;
+            const tailY = head.y - suy * 7;
+            const noseX = head.x + sux * 7.5;
+            const noseY = head.y + suy * 7.5;
+            g.beginFill(0x334155, 1);
+            g.drawPolygon([
+                tailX + spx * 5, tailY + spy * 5,
+                head.x - sux * 1 + spx * 2, head.y - suy * 1 + spy * 2,
+                head.x - sux * 1 - spx * 2, head.y - suy * 1 - spy * 2,
+                tailX - spx * 5, tailY - spy * 5,
+            ]);
+            g.endFill();
+            g.beginFill(0xFB923C, 1);
+            g.drawPolygon([
+                noseX, noseY,
+                head.x - sux * 2 + spx * 3.4, head.y - suy * 2 + spy * 3.4,
+                head.x - sux * 2 - spx * 3.4, head.y - suy * 2 - spy * 3.4,
+            ]);
             g.endFill();
             g.beginFill(0xFFFFFF, 1);
-            g.drawCircle(head.x, head.y, 2.6);
+            g.drawCircle(head.x + sux * 2, head.y + suy * 2, 2.2);
             g.endFill();
             return;
         }
 
-        // 6. SCOUT PISTOL SHOT (SOLDIER & default BULLET) — crisp single high-velocity 9mm ballistic tracer
-        const progress = Math.min(1, elapsed / travelMs);
-        if (progress >= 1) return;
-
+        // 6. SCOUT CARBINE BURST (SOLDIER & default BULLET) — crisp 3-round staggered tactical burst
         const barrelStart = Math.min(12, dist * 0.2);
         const sx = data.startX + ux * barrelStart;
         const sy = data.startY + uy * barrelStart;
-        const headX = sx + (data.endX - sx) * progress;
-        const headY = sy + (data.endY - sy) * progress;
-        const tailP = Math.max(0, progress - 0.28);
-        const tailX = sx + (data.endX - sx) * tailP;
-        const tailY = sy + (data.endY - sy) * tailP;
+        const burstDelays = [0, 24, 48];
+        const burstOffsets = [0, -2.2, 2.1];
+        const roundTravel = Math.max(70, travelMs - 48);
 
-        g.lineStyle(3.8, 0xF59E0B, 0.36);
-        g.moveTo(tailX, tailY);
-        g.lineTo(headX, headY);
-        g.lineStyle(1.7, 0xFFFBEB, 0.98);
-        g.moveTo(tailX, tailY);
-        g.lineTo(headX, headY);
-        g.lineStyle(0);
+        for (let b = 0; b < burstDelays.length; b++) {
+            const localMs = elapsed - burstDelays[b];
+            if (localMs < 0) continue;
+            const progress = localMs / roundTravel;
+            if (progress >= 1) continue;
 
-        g.beginFill(0xFDE047, 0.98);
-        g.drawCircle(headX, headY, 2.8);
-        g.endFill();
-        g.beginFill(0xFFFFFF, 1);
-        g.drawCircle(headX, headY, 1.4);
-        g.endFill();
+            const off = burstOffsets[b];
+            const ox = sx + px * off * 0.4;
+            const oy = sy + py * off * 0.4;
+            const ex = data.endX + px * off;
+            const ey = data.endY + py * off;
+            const headX = ox + (ex - ox) * progress;
+            const headY = oy + (ey - oy) * progress;
+            const tailP = Math.max(0, progress - 0.3);
+            const tailX = ox + (ex - ox) * tailP;
+            const tailY = oy + (ey - oy) * tailP;
+
+            g.lineStyle(3.6, 0xF59E0B, 0.38);
+            g.moveTo(tailX, tailY);
+            g.lineTo(headX, headY);
+            g.lineStyle(1.7, 0xFFFBEB, 0.98);
+            g.moveTo(tailX, tailY);
+            g.lineTo(headX, headY);
+            g.lineStyle(0);
+
+            g.beginFill(0xFDE047, 0.98);
+            g.drawCircle(headX, headY, 2.4);
+            g.endFill();
+            g.beginFill(0xFFFFFF, 1);
+            g.drawCircle(headX, headY, 1.2);
+            g.endFill();
+        }
     });
 
     const initialDraw = useCallback((g: PIXI.Graphics) => {

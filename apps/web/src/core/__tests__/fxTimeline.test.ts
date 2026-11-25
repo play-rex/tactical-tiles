@@ -836,3 +836,156 @@ test('FxTimeline sequences Bank Turret laser before multi-target HQ artillery wi
   assert.ok(weaponFires[2].at >= weaponFires[1].at + 380, 'Base HQ second target fires after first burst + slew');
   assert.equal(turretSwivels.length, 1, 'servo swivel plays once between HQ Target 1 and HQ Target 2');
 });
+
+test('FxTimeline synchronizes Tactical Weapon impacts, sounds, per-tile barrage explosions, and clean idle settle', () => {
+  const timeline = new FxTimeline();
+  timeline.setKillCamEnabled(false);
+
+  const spawnedTac: { at: number; itemKey: string; phase: string; durationMs: number }[] = [];
+  const removedTac: string[] = [];
+  const tacSounds: { itemKey: string; phase: string }[] = [];
+  const particles: { at: number; preset: string }[] = [];
+  const pendingDeaths = new Map<string, PendingDeathVisual>();
+  const deathGhosts: { at: number; unitId: string }[] = [];
+
+  timeline.configure({
+    spawnTacticalEffect: (fx) => spawnedTac.push({ at: timeline.getClockMs(), itemKey: fx.itemKey, phase: fx.phase, durationMs: fx.durationMs }),
+    removeTacticalEffect: (id) => removedTac.push(id),
+    playTacticalSound: (itemKey, phase) => tacSounds.push({ itemKey, phase }),
+    emitParticles: (req) => particles.push({ at: timeline.getClockMs(), preset: req.preset }),
+    addPendingDeath: (g) => { pendingDeaths.set(g.unitId, g); },
+    removePendingDeath: (uid) => { pendingDeaths.delete(uid); },
+    spawnDeathGhost: (g) => deathGhosts.push({ at: timeline.getClockMs(), unitId: g.unitId }),
+    hasActiveParticles: () => false,
+  });
+
+  const advance = (totalMs: number) => {
+    let rem = totalMs;
+    while (rem > 0) {
+      const step = Math.min(16, rem);
+      timeline.step(step);
+      rem -= step;
+    }
+  };
+
+  // 1. Precision Strike RESOLVE holds victim visually alive until 420ms JDAM impact
+  timeline.dispatchGameEvents([
+    {
+      kind: 'tacticalFx',
+      itemKey: 'PRECISION_STRIKE',
+      phase: 'RESOLVE',
+      owner: 0,
+      anchor: { x: 6, y: 6 },
+      tiles: [{ x: 6, y: 6 }],
+    },
+    { kind: 'hit', targetUnitId: 'u_strike', at: { x: 6, y: 6 }, damage: 8, weapon: 'TACTICAL_STRIKE', isKill: true },
+    { kind: 'killed', unitId: 'u_strike', unitType: 'SOLDIER', owner: 1, rank: 0, at: { x: 6, y: 6 }, killerOwner: 0, cause: 'TACTICAL' },
+  ]);
+
+  assert.equal(spawnedTac.length, 1);
+  assert.equal(tacSounds[0]?.itemKey, 'PRECISION_STRIKE');
+  assert.equal(pendingDeaths.has('u_strike'), true, 'victim waits for 420ms JDAM impact');
+  assert.equal(deathGhosts.length, 0);
+
+  advance(360);
+  assert.equal(pendingDeaths.has('u_strike'), true, 'still diving before 420ms');
+
+  advance(120);
+  assert.equal(pendingDeaths.has('u_strike'), false, 'JDAM impact releases pending death');
+  assert.equal(deathGhosts.length, 1);
+  assert.ok(particles.some(p => p.preset === 'orbitalBeam'), 'emits orbitalBeam particle burst on impact');
+
+  // 2. Carpet Run hits 3 scattered enemy units on 280 / 480 / 680ms staggered timing with ambient exit tail
+  const carpetStarts: number[] = [];
+  timeline.dispatchGameEvents([
+    {
+      kind: 'tacticalFx',
+      itemKey: 'CARPET_RUN',
+      phase: 'RESOLVE',
+      owner: 0,
+      anchor: { x: 3, y: 3 },
+      tiles: [{ x: 3, y: 3 }, { x: 10, y: 7 }, { x: 16, y: 14 }],
+    },
+    { kind: 'hit', targetUnitId: 'u_c1', at: { x: 3, y: 3 }, damage: 6, weapon: 'TACTICAL_CARPET' },
+    { kind: 'hit', targetUnitId: 'u_c2', at: { x: 10, y: 7 }, damage: 6, weapon: 'TACTICAL_CARPET' },
+    { kind: 'hit', targetUnitId: 'u_c3', at: { x: 16, y: 14 }, damage: 6, weapon: 'TACTICAL_CARPET' },
+  ]);
+  carpetStarts.push(spawnedTac.length);
+  advance(1500);
+  assert.equal(carpetStarts[0], 2);
+
+  // 3. Artillery Barrage 2x10 staggers 20 creeping explosions down the lane
+  const barrageTiles = [];
+  for (let s = 0; s < 10; s++) {
+    barrageTiles.push({ x: 2 + s, y: 8 });
+    barrageTiles.push({ x: 2 + s, y: 9 });
+  }
+  const explosionsBefore = particles.filter(p => p.preset === 'explosion').length;
+  timeline.dispatchGameEvents([
+    {
+      kind: 'tacticalFx',
+      itemKey: 'ARTILLERY_BARRAGE',
+      phase: 'RESOLVE',
+      owner: 0,
+      anchor: { x: 2, y: 8 },
+      tiles: barrageTiles,
+      axis: 'H',
+      width: 2,
+    },
+  ]);
+  advance(1700);
+  assert.equal(
+    particles.filter(p => p.preset === 'explosion').length - explosionsBefore,
+    20,
+    'emits 20 staggered shell explosions across 2x10 barrage',
+  );
+
+  // Settle cleanly back to 0% ECO idle
+  advance(2600);
+  assert.equal(removedTac.length, spawnedTac.length, 'every tactical FX anim cleans up');
+  assert.equal(timeline.isActive(), false, 'timeline returns cleanly to idle');
+});
+
+test('FxTimeline runs major Tactical Cameras in the 3.5-4.0s cinematic window in FULL mode and hands off ambient exit tail cleanly', () => {
+  const timeline = new FxTimeline();
+  timeline.setKillCamMode('FULL');
+  const completedTails: { id: string; ambientTailMs?: number }[] = [];
+
+  timeline.configure({
+    completeTacticalCombat: (id, ambientTailMs) => completedTails.push({ id, ambientTailMs }),
+    hasActiveParticles: () => false,
+  });
+
+  timeline.dispatchGameEvents([
+    {
+      kind: 'tacticalFx',
+      itemKey: 'CARPET_RUN',
+      phase: 'RESOLVE',
+      owner: 0,
+      anchor: { x: 3, y: 4 },
+      tiles: [{ x: 3, y: 4 }, { x: 9, y: 8 }, { x: 15, y: 12 }],
+    },
+    { kind: 'hit', targetUnitId: 'u_t1', at: { x: 9, y: 8 }, damage: 6, weapon: 'TACTICAL_CARPET', isKill: true },
+    { kind: 'killed', unitId: 'u_t1', unitType: 'SOLDIER', owner: 1, rank: 0, at: { x: 9, y: 8 }, killerOwner: 0, cause: 'TACTICAL' },
+  ]);
+
+  let realMs = 0;
+  let camStarted = false;
+  let camEndedAt = 0;
+  while (realMs < 7000) {
+    timeline.step(16);
+    realMs += 16;
+    const active = timeline.isKillCamActive();
+    if (active) camStarted = true;
+    else if (camStarted && camEndedAt === 0) {
+      camEndedAt = realMs;
+    }
+    if (camEndedAt > 0 && !timeline.isActive()) break;
+  }
+
+  assert.equal(camStarted, true, 'tactical kill cam activates in FULL mode');
+  assert.ok(camEndedAt >= 3400 && camEndedAt <= 4150, `expected 3.5-4.0s tactical kill cam, got ${camEndedAt}ms`);
+  assert.equal(completedTails.length, 1, 'hands off aircraft exit cruise to non-blocking ambient tail');
+  assert.ok((completedTails[0].ambientTailMs ?? 0) >= 3000, 'bomber carries multi-second ambient exit tail');
+  assert.equal(timeline.isActive(), false, 'timeline is completely idle so gameplay and Dev Dock unlock while bomber exits');
+});

@@ -1,5 +1,6 @@
 import { LAND_MINE_STATS } from '../constants/Config';
-import { LandMine, Tile, Unit, WeatherState } from '../types';
+import { LandMine, SmokeZone, Tile, Unit, WeatherState } from '../types';
+import { smokeBlocksLine } from '../tactical/geometry';
 import {
     calculateVisibility,
     getManhattanDistance,
@@ -49,7 +50,8 @@ export const getOverwatchCoverageTiles = (
     overwatcher: Unit,
     mapData: Tile[],
     weather: WeatherState,
-    gridSize: number
+    gridSize: number,
+    smokeZones?: readonly SmokeZone[]
 ): Set<string> => {
     const covered = new Set<string>();
     const origin = getTileByIdFast(mapData, overwatcher.tileId, gridSize);
@@ -67,7 +69,10 @@ export const getOverwatchCoverageTiles = (
             if (tx < 0 || tx >= gridSize || ty < 0 || ty >= gridSize) continue;
             const target = mapData[ty * gridSize + tx];
             if (!target) continue;
-            if (hasOverwatchLineOfSight(origin, target, mapData, overwatcher.type, weather, gridSize)) {
+            if (
+                hasOverwatchLineOfSight(origin, target, mapData, overwatcher.type, weather, gridSize) &&
+                !smokeBlocksLine(smokeZones, origin, target)
+            ) {
                 covered.add(target.id);
             }
         }
@@ -91,6 +96,7 @@ export const resolveMoveWithOverwatch = (params: {
     fogOfWar: boolean;
     maxBudget: number;
     mines?: LandMine[];
+    smokeZones?: readonly SmokeZone[];
     knownVisibleTiles?: Set<string> | null;
     precomputedPath?: Tile[];
     precomputedEnemyOverwatchers?: Unit[];
@@ -107,6 +113,7 @@ export const resolveMoveWithOverwatch = (params: {
         fogOfWar,
         maxBudget,
         mines = [],
+        smokeZones,
         knownVisibleTiles = null,
         precomputedPath,
         precomputedEnemyOverwatchers,
@@ -228,6 +235,7 @@ export const resolveMoveWithOverwatch = (params: {
                     if (dist > range) continue;
                     if (!hasOverwatchLineOfSight(owTile, stepTile, mapData, ow.type, weather, gridSize)) continue;
                 }
+                if (smokeBlocksLine(smokeZones, owTile, stepTile)) continue;
                 if (fogOfWar && !getTeamVis(ow.owner).has(stepTile.id)) continue;
 
                 const outcome = calculateOverwatchOutcome(ow, owTile, stepTile, movingUnit.owner, movingUnit);

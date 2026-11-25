@@ -20,6 +20,7 @@ import {
   getUnitRange,
 } from '../rules/CombatRules';
 import type { GameState } from './state';
+import { smokeBlocksLine } from '../tactical/geometry';
 
 /** CP that securing a building, robbing a bank or picking up supplies costs. */
 export const INTERACT_COST = 4;
@@ -28,8 +29,33 @@ export const INTERACT_COST = 4;
  * Tiles `seat` can see. Empty when fog of war is off: then everything is visible (callers
  * check `settings.fogOfWar` before reading it, as the renderer does).
  */
-export const visibleSet = (state: GameState, seat: number): Set<string> =>
-  calculateVisibility(seat, state.units, state.mapData, state.weather, state.settings.fogOfWar, state.gridSize);
+export const visibleSet = (state: GameState, seat: number): Set<string> => {
+  const round = state.totalTurns + 1;
+  // Radar Sweep is a server-side sight override for exactly one round.
+  if ((state.radarRound?.[seat] ?? 0) >= round) return new Set(state.mapData.map(t => t.id));
+  const visible = calculateVisibility(
+    seat,
+    state.units,
+    state.mapData,
+    state.weather,
+    state.settings.fogOfWar,
+    state.gridSize,
+  );
+  // Recon drones extend their owner's sight by 5, even through fog.
+  for (const sensor of state.sensors ?? []) {
+    if (sensor.owner !== seat) continue;
+    const origin = tileOf(state, sensor.tileId);
+    if (!origin) continue;
+    for (let dy = -5; dy <= 5; dy++) {
+      for (let dx = -5; dx <= 5; dx++) {
+        if (Math.abs(dx) + Math.abs(dy) > 5) continue;
+        const tile = tileOf(state, `${origin.x + dx},${origin.y + dy}`);
+        if (tile) visible.add(tile.id);
+      }
+    }
+  }
+  return visible;
+};
 
 export const tileOf = (state: Pick<GameState, 'mapData' | 'gridSize'>, id: string) =>
   getTileByIdFast(state.mapData, id, state.gridSize);
@@ -79,6 +105,7 @@ export const attackOptionsFor = (state: GameState, unit: Unit, visible: Set<stri
   const inReach = (t: Tile) =>
     getManhattanDistance(tile, t) <= range &&
     (!settings.fogOfWar || visible.has(t.id)) &&
+    !smokeBlocksLine(state.smokeZones, tile, t) &&
     hasLineOfSight(tile, t, mapData, unit.type, weather, gridSize);
 
   for (const u of units) {
@@ -267,7 +294,7 @@ export const getCrossfireSupporters = (
 
 /** Explains why `attacker` cannot currently attack `targetTile`, or null if the shot is legal. */
 export const getAttackBlocker = (
-  state: Pick<GameState, 'mapData' | 'units' | 'weather' | 'gridSize' | 'settings' | 'playerCp' | 'currentPlayer'>,
+  state: Pick<GameState, 'mapData' | 'units' | 'weather' | 'gridSize' | 'settings' | 'playerCp' | 'currentPlayer' | 'smokeZones'>,
   attacker: Unit,
   targetTile: Tile,
   visible?: ReadonlySet<string>,
@@ -286,6 +313,7 @@ export const getAttackBlocker = (
   if (!hasLineOfSight(attTile, targetTile, state.mapData, attacker.type, state.weather, state.gridSize)) {
     return 'Blocked Line of Sight';
   }
+  if (smokeBlocksLine(state.smokeZones, attTile, targetTile)) return 'Smoke blocks Line of Sight';
   return null;
 };
 

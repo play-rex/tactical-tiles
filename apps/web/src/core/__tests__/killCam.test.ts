@@ -354,6 +354,29 @@ test('OVERWATCH ambush waits to pre-roll until shot fires, and MINE kills never 
   assert.equal(mine.getMineClicks(), 1, 'mine click audio fires on arrival');
   for (let i = 0; i < 17; i++) mine.timeline.step(10);
   assert.equal(mine.timeline.getKillCamFrame().phase, 'SLAM', 'detonates straight into SLAM ~150ms real time later');
+
+  // Non-lethal Land Mine ALSO triggers a short micro kill-cam (*click* -> bomb blast -> recover)
+  const mineNonLethal = buildTimeline();
+  mineNonLethal.timeline.dispatchGameEvents([
+    { kind: 'movePath', unitId: 'u_survivor', unitType: 'ASSAULTER', owner: 1, path: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }] },
+    { kind: 'mineBlast', at: { x: 2, y: 0 }, damage: 8, victimUnitId: 'u_survivor', victimDead: false, mineOwner: 0 },
+    { kind: 'sound', sound: 'explosion' },
+    { kind: 'shake', intensity: 9, at: { x: 2, y: 0 } },
+  ]);
+  assert.equal(mineNonLethal.timeline.isKillCamActive(), false, 'non-lethal mine stays quiet until arrival');
+  for (let i = 0; i < 18; i++) mineNonLethal.timeline.step(10);
+  assert.equal(mineNonLethal.timeline.isKillCamActive(), false, 'still quiet mid-march before mine tile');
+  for (let i = 0; i < 10; i++) mineNonLethal.timeline.step(10);
+  const armFrame = mineNonLethal.timeline.getKillCamFrame();
+  assert.equal(armFrame.phase, 'ARM', 'non-lethal mine freezes on pressure plate in ARM (*click*)');
+  assert.equal(armFrame.cameraStyle, 'MINE_CLICK');
+  assert.equal(armFrame.cue?.tier, 'ATTACK');
+  assert.equal(armFrame.cue?.cause, 'MINE');
+  assert.equal(mineNonLethal.getMineClicks(), 1, 'mine click SFX plays for non-lethal mine');
+  for (let i = 0; i < 16; i++) mineNonLethal.timeline.step(10);
+  assert.equal(mineNonLethal.timeline.getKillCamFrame().phase, 'SLAM', 'non-lethal mine detonates into bomb-blast SLAM');
+  for (let i = 0; i < 120; i++) mineNonLethal.timeline.step(10);
+  assert.equal(mineNonLethal.timeline.isKillCamActive(), false, 'short micro mine cam recovers cleanly in ~1s');
 });
 
 test('FxTimeline cuts to structure losses: vault heist and bank demolition', () => {

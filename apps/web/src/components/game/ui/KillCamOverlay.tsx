@@ -13,6 +13,7 @@ import {
 } from '../../../core/graphics/killCam';
 import { useGameStore } from '../../../store/useGameStore';
 import { useOnline } from '../../../net/useOnline';
+import { TACTICAL_VISUAL_STYLE } from '../../../core/graphics/TacticalAssets';
 import { PLAYER_UI_THEME, playerDisplayName } from '../../ui/GeoPrimitives';
 
 export { buildReceiptSteps, type ReceiptStep };
@@ -109,7 +110,12 @@ export const KillCamOverlay: React.FC = () => {
   const seats = useOnline(s => (mode === 'ONLINE' ? s.view?.seats : undefined));
 
   const isAttack = frame.cue?.subject === 'ATTACK';
-  const canSkip = frame.active && Boolean(frame.cue) && !isAttack;
+  const isTacticalCinematicAttack = Boolean(
+    isAttack &&
+    frame.cue?.tacticalItemKey &&
+    (frame.cameraStyle === 'ORBITAL_DROP' || frame.cameraStyle === 'BOMBER_TRACK' || frame.cameraStyle === 'BARRAGE_WALK'),
+  );
+  const canSkip = frame.active && Boolean(frame.cue) && (!isAttack || isTacticalCinematicAttack);
 
   useEffect(() => {
     if (!canSkip) return;
@@ -173,23 +179,84 @@ export const KillCamOverlay: React.FC = () => {
 
   const receiptSteps = buildReceiptSteps(cue.breakdown, cue.damage, cue.subject === 'KILL');
 
-  // ── Non-lethal Attack Micro-Cam & 1-HP Graze Fake-Out (non-blocking) ────────
+  const handleSkip = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    fxTimeline.skipKillCam();
+  };
+
+  // ── Stage 0: Land Mine "*click*" ARM micro-tension beat (both non-lethal & lethal mines) ──
+  if (frame.phase === 'ARM') {
+    return (
+      <div
+        className={`tt-killcam tt-killcam--prelude tt-killcam--arm${dodgeClass}`}
+        data-tier={cue.tier}
+        style={style}
+        onClick={canSkip ? handleSkip : undefined}
+        aria-hidden="true"
+      >
+        <div className="tt-killcam__vignette" />
+        <BracketFrame prelude />
+        <div className="tt-killcam__slugline tt-killcam__slugline--mine">
+          <span className="tt-killcam__rec">● PROXIMITY MINE</span>
+          <span className="tt-killcam__slugline-sep">/</span>
+          <span>*CLICK*</span>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Non-lethal Attack Micro-Cam & 1-HP Graze Fake-Out (plus 3.5s Tactical Cinema & Air Drop cuts) ──
   if (isAttack) {
     const isGraze = frame.cameraStyle === 'GRAZE_FAKEOUT';
+    const isMineAttack = cue.cause === 'MINE';
+    const isAirSupplyDrop = !cue.tacticalItemKey && cue.cause === 'TACTICAL' && Boolean(cue.title);
+    const tacSpec = cue.tacticalItemKey ? TACTICAL_VISUAL_STYLE[cue.tacticalItemKey] : undefined;
+    const tacStyle = tacSpec
+      ? ({ ...style, '--kc-accent': tacSpec.primaryHex } as React.CSSProperties)
+      : isMineAttack
+        ? ({ ...style, '--kc-accent': '#F97316' } as React.CSSProperties)
+        : isAirSupplyDrop
+          ? ({ ...style, '--kc-accent': cue.title?.includes('TACTICAL') || cue.title?.includes('DUAL') ? '#FACC15' : '#22D3EE' } as React.CSSProperties)
+          : style;
+    const tacSlug =
+      isAirSupplyDrop
+        ? (cue.title ?? 'AIR SUPPLY DROP')
+        : cue.tacticalItemKey === 'PARADROP'
+        ? 'AIRLIFT INBOUND'
+        : cue.tacticalItemKey === 'RECON_DRONE'
+          ? 'HUNTER UAV LOCK'
+          : cue.tacticalItemKey === 'CARPET_RUN'
+            ? 'TRI-STRIKE BOMBER'
+            : cue.tacticalItemKey === 'NAPALM_LINE'
+              ? 'INCENDIARY RUN'
+              : cue.tacticalItemKey === 'ARTILLERY_BARRAGE'
+                ? '2×10 CREEPING BARRAGE'
+                : cue.tacticalItemKey === 'PRECISION_STRIKE'
+                  ? 'ORBITAL LOCK-ON'
+                  : 'TACTICAL STRIKE';
+
     if (frame.phase === 'PUSH') {
       return (
         <div
           className={`tt-killcam tt-killcam--prelude tt-killcam--attack${dodgeClass}`}
           data-tier="ATTACK"
-          style={style}
+          style={tacStyle}
           aria-hidden="true"
         >
           <BracketFrame prelude />
+          {isTacticalCinematicAttack && (
+            <div className="tt-killcam__slugline">
+              <span className="tt-killcam__rec">● TACTICAL CAM</span>
+              <span className="tt-killcam__slugline-sep">/</span>
+              <span>{tacSlug}</span>
+            </div>
+          )}
         </div>
       );
     }
 
     const weaponLabel = cue.weapon ? KILL_CAM_WEAPON_LABEL[cue.weapon] : KILL_CAM_CAUSE_LABEL[cue.cause];
+    const isTacticalNonDamaging = Boolean((cue.tacticalItemKey || isAirSupplyDrop) && cue.damage === 0);
     const grazeTease = isGraze && !frame.grazeFlipped;
     const grazeSurvived = isGraze && frame.grazeFlipped;
 
@@ -198,35 +265,71 @@ export const KillCamOverlay: React.FC = () => {
         key={`atk-${cue.id}-${grazeSurvived ? 'surv' : 'hit'}`}
         className={`tt-killcam tt-killcam--slam tt-killcam--attack${dodgeClass}${grazeTease ? ' tt-killcam--graze-tease' : ''}${grazeSurvived ? ' tt-killcam--graze-survive' : ''}`}
         data-tier="ATTACK"
-        style={style}
+        style={tacStyle}
         aria-hidden="true"
       >
         {grazeTease && <div className="tt-killcam__graze-flash" />}
         {grazeSurvived && <div className="tt-killcam__glitch-bar" />}
+        {isTacticalCinematicAttack && timing.letterbox > 0 && (
+          <>
+            <div className="tt-killcam__bar tt-killcam__bar--top">
+              <span className="tt-killcam__rec">● TACTICAL CAM</span>
+              <span className="tt-killcam__bar-net">
+                TURN {turn} · {tacSlug}
+              </span>
+            </div>
+            <div className="tt-killcam__bar tt-killcam__bar--bottom">
+              <span className="tt-killcam__bar-brand">TACTICAL TILES</span>
+              <span className="tt-killcam__bar-net">{killerName.toUpperCase()} · PRESS SPACE TO SKIP</span>
+            </div>
+          </>
+        )}
 
-        <div className={`tt-killcam__attack-hud${grazeTease ? ' tt-killcam__attack-hud--tease' : ''}${grazeSurvived ? ' tt-killcam__attack-hud--survive' : ''}`}>
+        <div
+          className={`tt-killcam__attack-hud${grazeTease ? ' tt-killcam__attack-hud--tease' : ''}${grazeSurvived ? ' tt-killcam__attack-hud--survive' : ''}${isTacticalNonDamaging ? ' tt-killcam__attack-hud--tactical' : ''}`}
+        >
           <span className="tt-killcam__attack-eyebrow">
             {grazeTease
               ? '● CRITICAL IMPACT'
               : grazeSurvived
                 ? '◆ ARMOR DEFLECTED · GRAZE'
-                : cue.cause === 'OVERWATCH'
-                  ? 'OVERWATCH HIT'
-                  : weaponLabel}
+                : isMineAttack
+                  ? '● LAND MINE BLAST'
+                  : isAirSupplyDrop
+                    ? '✈ THEATER AIR SUPPLY'
+                    : tacSpec
+                      ? `◆ ${tacSpec.callsign}`
+                      : cue.cause === 'OVERWATCH'
+                        ? 'OVERWATCH HIT'
+                        : weaponLabel}
           </span>
           <div className="tt-killcam__attack-row">
-            <span className="tt-killcam__attack-dmg">−{cue.damage}</span>
-            {cue.victimName && <span className="tt-killcam__attack-unit">{victimUnitLabel}</span>}
+            {isTacticalNonDamaging ? (
+              <span className="tt-killcam__attack-tac-title">{narrative.headline}</span>
+            ) : (
+              <>
+                <span className="tt-killcam__attack-dmg">−{cue.damage}</span>
+                {cue.victimName && <span className="tt-killcam__attack-unit">{victimUnitLabel}</span>}
+              </>
+            )}
           </div>
           <div className="tt-killcam__attack-meta">
             {grazeSurvived ? (
               <span className="tt-killcam__attack-survive">1 HP · BARELY ALIVE!</span>
             ) : grazeTease ? (
               <span className="tt-killcam__attack-tease-label">LETHAL CHECK...</span>
+            ) : isMineAttack && cue.remainingHp === 1 ? (
+              <span className="tt-killcam__attack-survive">1 HP · BARELY ALIVE! · MINE DESTROYED</span>
+            ) : isTacticalNonDamaging ? (
+              <span>{isAirSupplyDrop ? (cue.detail ?? 'MYSTERY CRATE · CONTEST LZ') : `${killerName.toUpperCase()} · TACTICAL OPS`}</span>
             ) : cue.remainingHp !== undefined && cue.maxHp > 0 ? (
-              <span>{cue.remainingHp} / {cue.maxHp} HP LEFT</span>
+              <span>
+                {cue.remainingHp} / {cue.maxHp} HP LEFT{isMineAttack ? ' · MOVE STOPPED' : ''}
+              </span>
             ) : (
-              <span>DIRECT HIT</span>
+              <span>
+                {isMineAttack ? 'BLAST TRIGGERED · MINE CLEARED' : cue.tacticalItemKey ? `${narrative.headline} · DIRECT HIT` : 'DIRECT HIT'}
+              </span>
             )}
             {cue.crossfireCount > 0 && (
               <span className="tt-killcam__chip tt-killcam__chip--hot">CROSSFIRE ×{cue.crossfireCount}</span>
@@ -241,32 +344,6 @@ export const KillCamOverlay: React.FC = () => {
               ))}
             </div>
           )}
-        </div>
-      </div>
-    );
-  }
-
-  const handleSkip = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    fxTimeline.skipKillCam();
-  };
-
-  // ── Stage 0: Land Mine "*click*" ARM micro-tension beat ─────────────────────
-  if (frame.phase === 'ARM') {
-    return (
-      <div
-        className={`tt-killcam tt-killcam--prelude tt-killcam--arm${dodgeClass}`}
-        data-tier={cue.tier}
-        style={style}
-        onClick={handleSkip}
-        aria-hidden="true"
-      >
-        <div className="tt-killcam__vignette" />
-        <BracketFrame prelude />
-        <div className="tt-killcam__slugline tt-killcam__slugline--mine">
-          <span className="tt-killcam__rec">● PROXIMITY MINE</span>
-          <span className="tt-killcam__slugline-sep">/</span>
-          <span>*CLICK*</span>
         </div>
       </div>
     );
@@ -296,7 +373,19 @@ export const KillCamOverlay: React.FC = () => {
                 ? 'CROSSFIRE LOCK'
                 : frame.cameraStyle === 'SNIPER_WHIP'
                   ? 'RAIL TRACKING'
-                  : 'ROUND IN FLIGHT'}
+                  : frame.cameraStyle === 'ORBITAL_DROP'
+                    ? 'ORBITAL LOCK-ON'
+                    : frame.cameraStyle === 'BOMBER_TRACK'
+                      ? cue.tacticalItemKey === 'RECON_DRONE'
+                        ? 'HUNTER UAV INTERCEPT'
+                        : cue.tacticalItemKey === 'CARPET_RUN'
+                          ? 'TRI-STRIKE BOMBER'
+                          : 'STRIKE FLYOVER'
+                      : frame.cameraStyle === 'BARRAGE_WALK'
+                        ? '2×10 CREEPING BARRAGE'
+                        : frame.cameraStyle === 'THEATER_SWEEP'
+                          ? 'THEATER TELEMETRY'
+                          : 'ROUND IN FLIGHT'}
           </span>
         </div>
         <button type="button" className="tt-killcam__skip" onClick={handleSkip} title="Skip kill cam (Space / Esc)">

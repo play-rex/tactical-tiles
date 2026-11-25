@@ -5,13 +5,24 @@
 import { getEffectiveUnitAmmo } from '../rules/CombatRules';
 import { UNIT_STATS } from '../constants/Config';
 import type {
+  ActiveAirDrop,
+  AirDropKind,
+  AirDropMeta,
   BankReward,
   BuildingSubType,
   ContractId,
   DeadUnit,
   FinalPushStatus,
   SharedContract,
+  ShopConstructId,
   SpectatorEffectId,
+  BurningLine,
+  PendingTactical,
+  SmokeZone,
+  TacticalAxis,
+  TacticalFxPhase,
+  TacticalId,
+  TacticalSensor,
   GameMutators,
   GameSettings,
   LandMine,
@@ -56,6 +67,14 @@ export interface GameState {
   playerRespawns: Record<number, number>;
   playerStatus: Record<number, PlayerStatus>;
   playerInventory: Record<number, InventoryItem[]>;
+  /** Free Field Shop construct vouchers won from Field Supply Crates (e.g. LAND_MINE, BARRIER, BRIDGE, TUNNEL). */
+  playerShopVouchers?: Record<number, ShopConstructId[]>;
+  /** Free Tactical Weapon vouchers won from Tactical Supply Crates (bypasses round unlock & cooldown). */
+  playerTacticalVouchers?: Record<number, TacticalId[]>;
+  /** Active incoming Theater Air Supply Drops (DISPATCH at L-2, FLARE at L-1). */
+  airDrops?: ActiveAirDrop[];
+  /** Mystery crate landing-round bookkeeping & Tactical anti-streak memory. */
+  airDropMeta?: AirDropMeta;
   winner: number | 'DRAW' | null;
   activeSeed: string;
   /** Local challenge ops only; online tables never carry one. */
@@ -85,6 +104,26 @@ export interface GameState {
   spectatorWindow?: number;
   /** Round whose window has already been spent (one effect per window). */
   spectatorUsedRound?: number | null;
+  /** Round in which each seat last bought a tactical weapon (one per round). */
+  tacticalRound?: Record<number, number>;
+  /** Round at which a specific tactical weapon comes off its 3-round cooldown per seat. */
+  tacticalCooldowns?: Record<number, Partial<Record<TacticalId, number>>>;
+  /** Round in which each seat spent its free round-2 Common pick. */
+  freeTacticalRound?: Record<number, number>;
+  /** Round in which a seat's trap reveal is live. */
+  trapRevealRound?: Record<number, number>;
+  /** Round in which a seat's radar reveal is live. */
+  radarRound?: Record<number, number>;
+  /** Remaining Overclock Core attack refunds per seat. */
+  overclockCharges?: Record<number, number>;
+  /** Telegraphed strikes waiting for the owner's next turn. */
+  pendingTacticals?: PendingTactical[];
+  /** Burning napalm lines, ticked at round end. */
+  burningLines?: BurningLine[];
+  /** Smoke clouds, ticked at round end. */
+  smokeZones?: SmokeZone[];
+  /** Recon drones, ticked at round end. */
+  sensors?: TacticalSensor[];
 }
 
 // ── Actions ──────────────────────────────────────────────────────
@@ -120,7 +159,19 @@ export type GameAction =
   /** Spend the once-per-match Final Push token: refill CP and clear Overclock debt. */
   | { type: 'FINAL_PUSH' }
   /** An eliminated player's window: fire one map effect. */
-  | { type: 'SPECTATOR_ATTACK'; effectId: SpectatorEffectId };
+  | { type: 'SPECTATOR_ATTACK'; effectId: SpectatorEffectId }
+  /** Buy and fire one tactical weapon. Gold-only; round cap and 3-round per-weapon cooldown enforced by engine. */
+  | {
+      type: 'USE_TACTICAL';
+      itemKey: TacticalId;
+      tileId?: string;
+      /** Multi-target unit tiles for Carpet Run (1–3 distinct visible enemy unit tiles). */
+      tileIds?: string[];
+      /** Selected unit ID for Paradrop airlift relocation (own or enemy unit). */
+      unitId?: string;
+      axis?: TacticalAxis;
+      width?: 1 | 2;
+    };
 
 export type GameActionType = GameAction['type'];
 
@@ -131,9 +182,20 @@ export type SoundName =
 
 export interface TilePoint { x: number; y: number }
 
-export type WeaponVisual = 'SOLDIER' | 'ASSAULTER' | 'SNIPER' | 'TURRET' | 'ARTILLERY' | 'SIEGE';
+export type WeaponVisual =
+  | 'SOLDIER'
+  | 'ASSAULTER'
+  | 'SNIPER'
+  | 'TURRET'
+  | 'ARTILLERY'
+  | 'SIEGE'
+  | 'TACTICAL_DRONE'
+  | 'TACTICAL_STRIKE'
+  | 'TACTICAL_CARPET'
+  | 'TACTICAL_BARRAGE'
+  | 'TACTICAL_NAPALM';
 
-export type KillCause = 'COMBAT' | 'OVERWATCH' | 'MINE' | 'TURRET' | 'ARTILLERY' | 'LAVA' | 'BASE_FALL';
+export type KillCause = 'COMBAT' | 'OVERWATCH' | 'MINE' | 'TURRET' | 'ARTILLERY' | 'LAVA' | 'BASE_FALL' | 'TACTICAL';
 
 /** Deterministic damage decomposition carried on combat hits for the Tactical Receipt. */
 export interface DamageBreakdown {
@@ -205,6 +267,7 @@ export type GameEvent =
       damage: number;
       victimUnitId?: string;
       victimDead?: boolean;
+      mineOwner?: number;
       delayMs?: number;
     }
   | {
@@ -225,7 +288,38 @@ export type GameEvent =
   | { kind: 'overwatchSet'; unitId: string; at: TilePoint; owner: number }
   | { kind: 'heal'; unitId: string; at: TilePoint; amount: number; item: 'MEDKIT' | 'FIRST_AID' | 'AMMO' | 'RELOAD' }
   | { kind: 'build'; tiles: TilePoint[]; itemKey: 'BARRIER' | 'BRIDGE' | 'TUNNEL' }
-  | { kind: 'supplyLanded'; at: TilePoint; item: SupplyLootType };
+  | { kind: 'supplyLanded'; at: TilePoint; item: SupplyLootType }
+  | {
+      kind: 'airDrop';
+      dropId: string;
+      dropKind: AirDropKind;
+      at: TilePoint;
+      headingRad: number;
+      staggerMs?: number;
+      isDualConvoy?: boolean;
+      rerouted?: boolean;
+      companionAt?: TilePoint;
+    }
+  | {
+      kind: 'tacticalFx';
+      itemKey: TacticalId;
+      phase: TacticalFxPhase;
+      owner: number;
+      anchor: TilePoint;
+      tiles: TilePoint[];
+      pings?: TilePoint[];
+      axis?: TacticalAxis;
+      width?: 1 | 2;
+      meta?: {
+        sabotageKind?: 'CP' | 'STRIP';
+        cpDrained?: number;
+        victimOwner?: number;
+        hitsCount?: number;
+        from?: TilePoint;
+        unitType?: UnitType;
+      };
+      delayMs?: number;
+    };
 
 // ── Logs ─────────────────────────────────────────────────────────
 
@@ -329,6 +423,10 @@ export const createEmptyGameState = (settings: GameSettings, gridSize = 20): Gam
   playerRespawns: {},
   playerStatus: {},
   playerInventory: {},
+  playerShopVouchers: {},
+  playerTacticalVouchers: {},
+  airDrops: [],
+  airDropMeta: { crateRounds: {}, openedCount: 0 },
   winner: null,
   activeSeed: '',
   activeMission: null,

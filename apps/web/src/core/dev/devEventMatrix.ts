@@ -12,7 +12,7 @@
  * test, which is the point: the sandbox should always be able to show you every cut the game can
  * play.
  */
-import type { GameEvent, KillCause, TerrainType, UnitType, WeaponVisual } from '@tactical/engine';
+import type { GameEvent, KillCause, TacticalId, TerrainType, UnitType, WeaponVisual } from '@tactical/engine';
 import {
   classifyKillTier,
   KILL_CAM_CAUSE_LABEL,
@@ -33,6 +33,7 @@ export type DevEventKind =
   | 'ATTACK_HIT'
   | 'GRAZE_1HP'
   | 'OVERWATCH_HIT'
+  | 'MINE_BLAST'
   // Kills by combat profile
   | 'KILL_MICRO'
   | 'KILL_CINEMATIC'
@@ -57,12 +58,27 @@ export type DevEventKind =
   | 'HQ_BREACH'
   | 'HQ_DESTROY'
   | 'BARRIER_DEMOLISH'
+  // Tactical weapons (all 11 auditionable)
+  | 'TACTICAL_SNAPSHOT'
+  | 'TACTICAL_DRONE'
+  | 'TACTICAL_SMOKE'
+  | 'TACTICAL_RADAR'
+  | 'TACTICAL_SABOTAGE'
+  | 'TACTICAL_PARADROP'
+  | 'TACTICAL_OVERCLOCK'
+  | 'TACTICAL_NAPALM'
+  | 'TACTICAL_PRECISION_KILL'
+  | 'TACTICAL_CARPET_KILL'
+  | 'TACTICAL_BARRAGE_KILL'
+  // Theater Air Supply Drops (single C-130 + Round 6/12 dual-plane convoy)
+  | 'AIRDROP_FIELD'
+  | 'AIRDROP_DUAL'
   // Match tools (no cue of their own)
   | 'POTM_REPLAY'
   | 'EXPORT_CLIP'
   | 'TURN_RECAP';
 
-export type DevEventGroup = 'IMPACT' | 'KILL' | 'CAUSE' | 'STRUCTURE' | 'REPLAY';
+export type DevEventGroup = 'IMPACT' | 'KILL' | 'CAUSE' | 'STRUCTURE' | 'TACTICAL' | 'REPLAY';
 
 /** Everything the director needs to classify a probe, minus the geometry it does not read. */
 export interface DevEventProbe {
@@ -70,7 +86,9 @@ export interface DevEventProbe {
   cause: KillCause;
   /** Explicit tier for subjects that bypass `classifyKillTier` (ATTACK / STRUCTURE). */
   tier?: KillCamTier;
+  cameraStyle?: KillCamCameraStyle;
   weapon?: WeaponVisual;
+  tacticalItemKey?: TacticalId;
   distanceTiles?: number;
   rank?: number;
   victimUnitType?: UnitType;
@@ -103,7 +121,9 @@ export const devProbeCue = (probe: DevEventProbe): KillCamCue => ({
   tier: probe.tier ?? 'CINEMATIC',
   subject: probe.subject,
   cause: probe.cause,
+  cameraStyle: probe.cameraStyle,
   weapon: probe.weapon,
+  tacticalItemKey: probe.tacticalItemKey,
   title: probe.title,
   structureType: probe.structureType,
   victimUnitId: 'dev_victim',
@@ -323,6 +343,22 @@ const hitBatch = (ctx: DevEventContext, opts: { weapon: WeaponVisual; distance: 
   ];
 };
 
+/** March onto a non-lethal land mine: short micro kill-cam (*click* -> bomb blast -> mine cleared). */
+const mineAttackBatch = (ctx: DevEventContext): GameEvent[] => {
+  const dy = ctx.victim.y >= 2 ? -1 : 1;
+  const p0 = { x: ctx.victim.x, y: clampTile(ctx.victim.y + dy * 2, ctx.gridSize) };
+  const p1 = { x: ctx.victim.x, y: clampTile(ctx.victim.y + dy, ctx.gridSize) };
+  const p2 = victimPoint(ctx);
+  return [
+    { kind: 'movePath', unitId: ctx.victim.id, unitType: ctx.victim.type, owner: ctx.victim.owner, path: [p0, p1, p2], haltedAt: 2 },
+    { kind: 'mineBlast', at: p2, damage: 8, victimUnitId: ctx.victim.id, victimDead: false, mineOwner: ctx.currentPlayer },
+    { kind: 'sound', sound: 'explosion' },
+    { kind: 'popup', at: p2, text: 'LAND MINE!', color: '#EF4444', lift: 34 },
+    { kind: 'popup', at: p2, text: '-8', color: '#FF6D00', lift: 14 },
+    { kind: 'shake', intensity: 9, at: p2 },
+  ];
+};
+
 /** March onto a land mine, then detonate: the director's 150 ms ARM beat depends on the walk. */
 const mineBatch = (ctx: DevEventContext): GameEvent[] => {
   const dy = ctx.victim.y >= 2 ? -1 : 1;
@@ -487,6 +523,14 @@ const RAW_EVENTS: DevEventSpec[] = [
         },
       ];
     },
+  },
+  {
+    kind: 'MINE_BLAST',
+    label: 'MINE BLAST',
+    group: 'IMPACT',
+    hint: 'Non-lethal land mine: short micro kill-cam (*click* -> bomb blast) before mine clears.',
+    ...cue({ subject: 'ATTACK', cause: 'MINE', tier: 'ATTACK', distanceTiles: 0, remainingHp: 6 }),
+    build: ctx => mineAttackBatch(ctx),
   },
 
   // ── Kills by combat profile ─────────────────────────────────────────────────────────────────
@@ -677,6 +721,333 @@ const RAW_EVENTS: DevEventSpec[] = [
     build: ctx => devStructureBatch(ctx, true, 30),
   },
 
+  // ── Tactical weapons (all 11 auditionable through the real FX + audio + camera pipeline) ───
+  {
+    kind: 'TACTICAL_SNAPSHOT',
+    label: 'SNAPSHOT',
+    group: 'TACTICAL',
+    hint: 'Minefield Snapshot: subsurface lidar wave + mine contact pings.',
+    ...cue({ subject: 'ATTACK', cause: 'TACTICAL', tier: 'ATTACK', tacticalItemKey: 'MINEFIELD_SNAPSHOT' }),
+    build: ctx => [
+      {
+        kind: 'tacticalFx',
+        itemKey: 'MINEFIELD_SNAPSHOT',
+        phase: 'ACTIVATE',
+        owner: ctx.currentPlayer,
+        anchor: { x: ctx.killer.x, y: ctx.killer.y },
+        tiles: [{ x: ctx.killer.x, y: ctx.killer.y }],
+        pings: [victimPoint(ctx), ...ctx.flank],
+      },
+    ],
+  },
+  {
+    kind: 'TACTICAL_DRONE',
+    label: 'HUNTER UAV',
+    group: 'TACTICAL',
+    hint: 'Hunter Drone: full-map UAV swoop, 3-round burst (-3 DMG) & optical scan.',
+    ...cue({ subject: 'ATTACK', cause: 'TACTICAL', tier: 'ATTACK', weapon: 'TACTICAL_DRONE', tacticalItemKey: 'RECON_DRONE' }),
+    build: ctx => {
+      const to = victimPoint(ctx);
+      return [
+        {
+          kind: 'tacticalFx',
+          itemKey: 'RECON_DRONE',
+          phase: 'RESOLVE',
+          owner: ctx.currentPlayer,
+          anchor: to,
+          tiles: [to],
+        },
+        { kind: 'hit', targetUnitId: ctx.victim.id, at: to, damage: 3, weapon: 'TACTICAL_DRONE', isKill: false },
+        { kind: 'popup', at: to, text: '-3', color: '#38BDF8', lift: 22 },
+      ];
+    },
+  },
+  {
+    kind: 'TACTICAL_SMOKE',
+    label: 'SMOKE 3×3',
+    group: 'TACTICAL',
+    hint: 'Smoke Screen: triple mortar canisters + billowing 3×3 volumetric cloud.',
+    ...cue({ subject: 'ATTACK', cause: 'TACTICAL', tier: 'ATTACK', tacticalItemKey: 'SMOKE_SCREEN' }),
+    build: ctx => {
+      const c = victimPoint(ctx);
+      const tiles = [];
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          tiles.push({ x: clampTile(c.x + dx, ctx.gridSize), y: clampTile(c.y + dy, ctx.gridSize) });
+        }
+      }
+      return [
+        {
+          kind: 'tacticalFx',
+          itemKey: 'SMOKE_SCREEN',
+          phase: 'ACTIVATE',
+          owner: ctx.currentPlayer,
+          anchor: c,
+          tiles,
+        },
+      ];
+    },
+  },
+  {
+    kind: 'TACTICAL_RADAR',
+    label: 'RADAR SWEEP',
+    group: 'TACTICAL',
+    hint: 'Radar Sweep: full-theater AWACS phosphor scan + enemy contact locks.',
+    ...cue({ subject: 'ATTACK', cause: 'TACTICAL', tier: 'ATTACK', tacticalItemKey: 'RADAR_SWEEP' }),
+    build: ctx => [
+      {
+        kind: 'tacticalFx',
+        itemKey: 'RADAR_SWEEP',
+        phase: 'ACTIVATE',
+        owner: ctx.currentPlayer,
+        anchor: { x: Math.floor(ctx.gridSize / 2), y: Math.floor(ctx.gridSize / 2) },
+        tiles: [],
+        pings: [victimPoint(ctx), ...ctx.flank],
+      },
+    ],
+  },
+  {
+    kind: 'TACTICAL_SABOTAGE',
+    label: 'SABOTAGE EMP',
+    group: 'TACTICAL',
+    hint: 'Sabotage: collapsing violet-cyan EMP discharge + jagged arc bursts.',
+    ...cue({ subject: 'ATTACK', cause: 'TACTICAL', tier: 'ATTACK', tacticalItemKey: 'SABOTAGE' }),
+    build: ctx => [
+      {
+        kind: 'tacticalFx',
+        itemKey: 'SABOTAGE',
+        phase: 'ACTIVATE',
+        owner: ctx.currentPlayer,
+        anchor: victimPoint(ctx),
+        tiles: [victimPoint(ctx)],
+        meta: { sabotageKind: 'CP', cpDrained: 8, victimOwner: ctx.victim.owner },
+      },
+      { kind: 'popup', at: victimPoint(ctx), text: 'SABOTAGE -8 CP', color: '#C084FC', lift: 22 },
+    ],
+  },
+  {
+    kind: 'TACTICAL_PARADROP',
+    label: 'AIRLIFT DROP',
+    group: 'TACTICAL',
+    hint: 'Paradrop: full-map C-130 Cargo Plane airlift from pickup to LZ + swaying parafoil.',
+    ...cue({ subject: 'ATTACK', cause: 'TACTICAL', tier: 'ATTACK', tacticalItemKey: 'PARADROP' }),
+    build: ctx => {
+      const from = { x: ctx.killer.x, y: ctx.killer.y };
+      const to = victimPoint(ctx);
+      return [
+        {
+          kind: 'tacticalFx',
+          itemKey: 'PARADROP',
+          phase: 'ACTIVATE',
+          owner: ctx.currentPlayer,
+          anchor: to,
+          tiles: [from, to],
+          meta: { from, unitType: ctx.killer.type },
+        },
+      ];
+    },
+  },
+  {
+    kind: 'TACTICAL_OVERCLOCK',
+    label: 'OVERCLOCK',
+    group: 'TACTICAL',
+    hint: 'Overclock Core: reactor surge + electric golden-cyan energy tethers.',
+    ...cue({ subject: 'ATTACK', cause: 'TACTICAL', tier: 'ATTACK', tacticalItemKey: 'OVERCLOCK_CORE' }),
+    build: ctx => [
+      {
+        kind: 'tacticalFx',
+        itemKey: 'OVERCLOCK_CORE',
+        phase: 'ACTIVATE',
+        owner: ctx.currentPlayer,
+        anchor: { x: ctx.killer.x, y: ctx.killer.y },
+        tiles: [{ x: ctx.killer.x, y: ctx.killer.y }],
+        pings: [victimPoint(ctx), ...ctx.flank],
+      },
+    ],
+  },
+  {
+    kind: 'TACTICAL_NAPALM',
+    label: 'NAPALM JET',
+    group: 'TACTICAL',
+    hint: 'Napalm Line: swept-wing strike jet flyover + 4-tile incendiary ignition.',
+    ...cue({ subject: 'ATTACK', cause: 'TACTICAL', tier: 'ATTACK', weapon: 'TACTICAL_NAPALM', tacticalItemKey: 'NAPALM_LINE' }),
+    build: ctx => {
+      const startX = clampTile(ctx.victim.x - 1, ctx.gridSize);
+      const tiles = [0, 1, 2, 3].map(i => ({ x: clampTile(startX + i, ctx.gridSize), y: ctx.victim.y }));
+      return [
+        {
+          kind: 'tacticalFx',
+          itemKey: 'NAPALM_LINE',
+          phase: 'ACTIVATE',
+          owner: ctx.currentPlayer,
+          anchor: tiles[0],
+          tiles,
+          axis: 'H',
+        },
+      ];
+    },
+  },
+  {
+    kind: 'TACTICAL_PRECISION_KILL',
+    label: 'PRECISION KILL',
+    group: 'TACTICAL',
+    hint: 'Precision Strike: orbital laser lock, hypersonic JDAM dive & ORBITAL_DROP kill cut.',
+    ...cue({ subject: 'KILL', cause: 'TACTICAL', weapon: 'TACTICAL_STRIKE', tacticalItemKey: 'PRECISION_STRIKE', damage: 20, overkill: 0 }),
+    build: ctx => {
+      const to = victimPoint(ctx);
+      return [
+        {
+          kind: 'tacticalFx',
+          itemKey: 'PRECISION_STRIKE',
+          phase: 'RESOLVE',
+          owner: ctx.currentPlayer,
+          anchor: to,
+          tiles: [to],
+        },
+        { kind: 'hit', targetUnitId: ctx.victim.id, at: to, damage: 20, weapon: 'TACTICAL_STRIKE', isKill: true },
+        { kind: 'popup', at: to, text: '-20', color: '#F43F5E', lift: 22 },
+        {
+          kind: 'killed',
+          unitId: ctx.victim.id,
+          unitType: ctx.victim.type,
+          owner: ctx.victim.owner,
+          rank: ctx.victim.rank,
+          at: to,
+          killerOwner: ctx.currentPlayer,
+          victimPreHp: ctx.victim.hp,
+          cause: 'TACTICAL',
+        },
+      ];
+    },
+  },
+  {
+    kind: 'TACTICAL_CARPET_KILL',
+    label: 'CARPET ×3 KILL',
+    group: 'TACTICAL',
+    hint: 'Carpet Run: full-map stealth bomber releasing 3 homing cruise bombs onto scattered units.',
+    ...cue({ subject: 'KILL', cause: 'TACTICAL', weapon: 'TACTICAL_CARPET', tacticalItemKey: 'CARPET_RUN', damage: 20, overkill: 0 }),
+    build: ctx => {
+      const to = victimPoint(ctx);
+      const targets = [ctx.flank[0], to, ctx.flank[1]];
+      return [
+        {
+          kind: 'tacticalFx',
+          itemKey: 'CARPET_RUN',
+          phase: 'RESOLVE',
+          owner: ctx.currentPlayer,
+          anchor: targets[0],
+          tiles: targets,
+        },
+        { kind: 'hit', targetUnitId: ctx.victim.id, at: to, damage: 20, weapon: 'TACTICAL_CARPET', isKill: true },
+        { kind: 'popup', at: to, text: '-20', color: '#FB923C', lift: 22 },
+        {
+          kind: 'killed',
+          unitId: ctx.victim.id,
+          unitType: ctx.victim.type,
+          owner: ctx.victim.owner,
+          rank: ctx.victim.rank,
+          at: to,
+          killerOwner: ctx.currentPlayer,
+          victimPreHp: ctx.victim.hp,
+          cause: 'TACTICAL',
+        },
+      ];
+    },
+  },
+  {
+    kind: 'TACTICAL_BARRAGE_KILL',
+    label: 'BARRAGE KILL',
+    group: 'TACTICAL',
+    hint: 'Artillery Barrage: 2×10 creeping shell wall & BARRAGE_WALK corridor tracking kill cut.',
+    ...cue({ subject: 'KILL', cause: 'TACTICAL', weapon: 'TACTICAL_BARRAGE', tacticalItemKey: 'ARTILLERY_BARRAGE', damage: 20, overkill: 0 }),
+    build: ctx => {
+      const startX = clampTile(ctx.victim.x - 4, ctx.gridSize);
+      const y1 = clampTile(ctx.victim.y + 1, ctx.gridSize);
+      const tiles: { x: number; y: number }[] = [];
+      for (let s = 0; s < 10; s++) {
+        const x = clampTile(startX + s, ctx.gridSize);
+        tiles.push({ x, y: ctx.victim.y });
+        tiles.push({ x, y: y1 });
+      }
+      const to = victimPoint(ctx);
+      return [
+        {
+          kind: 'tacticalFx',
+          itemKey: 'ARTILLERY_BARRAGE',
+          phase: 'RESOLVE',
+          owner: ctx.currentPlayer,
+          anchor: tiles[0],
+          tiles,
+          axis: 'H',
+          width: 2,
+        },
+        { kind: 'hit', targetUnitId: ctx.victim.id, at: to, damage: 20, weapon: 'TACTICAL_BARRAGE', isKill: true },
+        { kind: 'popup', at: to, text: '-20', color: '#EF4444', lift: 22 },
+        {
+          kind: 'killed',
+          unitId: ctx.victim.id,
+          unitType: ctx.victim.type,
+          owner: ctx.victim.owner,
+          rank: ctx.victim.rank,
+          at: to,
+          killerOwner: ctx.currentPlayer,
+          victimPreHp: ctx.victim.hp,
+          cause: 'TACTICAL',
+        },
+      ];
+    },
+  },
+
+  {
+    kind: 'AIRDROP_FIELD',
+    label: 'FIELD AIRDROP',
+    group: 'TACTICAL',
+    hint: 'Round 3/9 Field Supply Drop: long live C-130 flyover + parachute descent (no camera hijack).',
+    tool: true,
+    build: ctx => [
+      {
+        kind: 'airDrop',
+        dropId: 'dev_airdrop_field',
+        dropKind: 'FIELD',
+        at: victimPoint(ctx),
+        headingRad: -0.34,
+      },
+    ],
+  },
+  {
+    kind: 'AIRDROP_DUAL',
+    label: 'DUAL CONVOY ×2',
+    group: 'TACTICAL',
+    hint: 'Round 6/12 Dual Convoy: long staggered C-130 + Stealth Heavy Lifter flyover (no camera hijack).',
+    tool: true,
+    build: ctx => {
+      const lz1 = { x: clampTile(ctx.victim.x - 3, ctx.gridSize), y: clampTile(ctx.victim.y - 2, ctx.gridSize) };
+      const lz2 = { x: clampTile(ctx.victim.x + 3, ctx.gridSize), y: clampTile(ctx.victim.y + 2, ctx.gridSize) };
+      return [
+        {
+          kind: 'airDrop',
+          dropId: 'dev_airdrop_dual_field',
+          dropKind: 'FIELD',
+          at: lz1,
+          headingRad: -0.34,
+          staggerMs: 0,
+          isDualConvoy: true,
+          companionAt: lz2,
+        },
+        {
+          kind: 'airDrop',
+          dropId: 'dev_airdrop_dual_tac',
+          dropKind: 'TACTICAL',
+          at: lz2,
+          headingRad: 0.42,
+          staggerMs: 950,
+          isDualConvoy: true,
+          companionAt: lz1,
+        },
+      ];
+    },
+  },
+
   // ── Match tools ─────────────────────────────────────────────────────────────────────────────
   { kind: 'POTM_REPLAY', label: 'POTM REPLAY', group: 'REPLAY', hint: 'Replays the highest-drama batch with replays tagged.', tool: true },
   { kind: 'EXPORT_CLIP', label: 'EXPORT CLIP', group: 'REPLAY', hint: 'Exports the Play-of-the-Match clip.', tool: true },
@@ -691,6 +1062,7 @@ export const DEV_EVENT_EXPECTED: Partial<Record<DevEventKind, DevEventOutcome>> 
   ATTACK_HIT: { tier: 'ATTACK', style: 'STANDARD', headline: 'DIRECT HIT', tags: [] },
   GRAZE_1HP: { tier: 'ATTACK', style: 'GRAZE_FAKEOUT', headline: '1 HP · BARELY ALIVE!', tags: ['GRAZE'] },
   OVERWATCH_HIT: { tier: 'ATTACK', style: 'STANDARD', headline: 'DIRECT HIT', tags: [] },
+  MINE_BLAST: { tier: 'ATTACK', style: 'MINE_CLICK', headline: 'LAND MINE BLAST', tags: [] },
   KILL_MICRO: { tier: 'MICRO', style: 'STANDARD', headline: 'ELIMINATED', tags: [] },
   KILL_CINEMATIC: { tier: 'CINEMATIC', style: 'SNIPER_WHIP', headline: 'ACE DOWN', tags: ['GIANT_SLAYER'] },
   KILL_BREACHER: { tier: 'CINEMATIC', style: 'BREACHER_ARC', headline: 'ACE DOWN', tags: [] },
@@ -712,6 +1084,17 @@ export const DEV_EVENT_EXPECTED: Partial<Record<DevEventKind, DevEventOutcome>> 
   HQ_BREACH: { tier: 'STRUCTURE', style: 'STRUCTURE_BLOWOUT', headline: 'HQ BREACHED', tags: [] },
   HQ_DESTROY: { tier: 'STRUCTURE', style: 'STRUCTURE_BLOWOUT', headline: 'FINAL BLOW', tags: ['FINAL_BLOW'] },
   BARRIER_DEMOLISH: { tier: 'STRUCTURE', style: 'STRUCTURE_BLOWOUT', headline: 'BARRIER DEMOLISHED', tags: [] },
+  TACTICAL_SNAPSHOT: { tier: 'ATTACK', style: 'THEATER_SWEEP', headline: 'MINEFIELD SNAPSHOT', tags: [] },
+  TACTICAL_DRONE: { tier: 'ATTACK', style: 'BOMBER_TRACK', headline: 'HUNTER DRONE', tags: [] },
+  TACTICAL_SMOKE: { tier: 'ATTACK', style: 'THEATER_SWEEP', headline: 'SMOKE SCREEN', tags: [] },
+  TACTICAL_RADAR: { tier: 'ATTACK', style: 'THEATER_SWEEP', headline: 'RADAR SWEEP', tags: [] },
+  TACTICAL_SABOTAGE: { tier: 'ATTACK', style: 'THEATER_SWEEP', headline: 'SABOTAGE', tags: [] },
+  TACTICAL_PARADROP: { tier: 'ATTACK', style: 'BOMBER_TRACK', headline: 'PARADROP', tags: [] },
+  TACTICAL_OVERCLOCK: { tier: 'ATTACK', style: 'THEATER_SWEEP', headline: 'OVERCLOCK CORE', tags: [] },
+  TACTICAL_NAPALM: { tier: 'ATTACK', style: 'BOMBER_TRACK', headline: 'NAPALM LINE', tags: [] },
+  TACTICAL_PRECISION_KILL: { tier: 'CINEMATIC', style: 'ORBITAL_DROP', headline: 'PRECISION STRIKE KILL', tags: [] },
+  TACTICAL_CARPET_KILL: { tier: 'CINEMATIC', style: 'BOMBER_TRACK', headline: 'CARPET RUN KILL', tags: [] },
+  TACTICAL_BARRAGE_KILL: { tier: 'CINEMATIC', style: 'BARRAGE_WALK', headline: 'ARTILLERY BARRAGE KILL', tags: [] },
 };
 
 export const DEV_EVENT_CATALOG: DevEventSpec[] = RAW_EVENTS.map(spec => {
@@ -728,6 +1111,7 @@ export const DEV_EVENT_GROUPS: { id: DevEventGroup; label: string }[] = [
   { id: 'KILL', label: 'KILL CUTS' },
   { id: 'CAUSE', label: 'KILL CAUSES' },
   { id: 'STRUCTURE', label: 'STRUCTURES' },
+  { id: 'TACTICAL', label: 'TACTICALS' },
   { id: 'REPLAY', label: 'MATCH TOOLS' },
 ];
 

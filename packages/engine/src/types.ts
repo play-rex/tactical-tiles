@@ -109,6 +109,62 @@ export interface SharedContract {
 /** One Final Push token per player: granted once, spent once. */
 export type FinalPushStatus = 'READY' | 'USED';
 
+// ── Tactical weapons ─────────────────────────────────────────────
+
+export type TacticalId =
+  | 'MINEFIELD_SNAPSHOT'
+  | 'RECON_DRONE'
+  | 'SMOKE_SCREEN'
+  | 'RADAR_SWEEP'
+  | 'PRECISION_STRIKE'
+  | 'SABOTAGE'
+  | 'NAPALM_LINE'
+  | 'PARADROP'
+  | 'CARPET_RUN'
+  | 'ARTILLERY_BARRAGE'
+  | 'OVERCLOCK_CORE';
+
+export type TacticalAxis = 'H' | 'V';
+
+export type TacticalFxPhase = 'ACTIVATE' | 'MARK' | 'RESOLVE' | 'BURN';
+
+/** A telegraphed strike that lands at the start of the buyer's next turn. */
+export interface PendingTactical {
+  id: string;
+  owner: number;
+  itemKey: TacticalId;
+  tiles: string[];
+  damage: number;
+  axis?: TacticalAxis;
+  width?: 1 | 2;
+}
+
+/** A napalm line burning for two round ticks. `hits` enforces the 8-damage cap per unit. */
+export interface BurningLine {
+  id: string;
+  owner: number;
+  tiles: string[];
+  roundsLeft: number;
+  hits: Record<string, number>;
+  axis?: TacticalAxis;
+}
+
+/** A smoke cloud that blocks line of sight for two rounds. */
+export interface SmokeZone {
+  id: string;
+  owner: number;
+  tiles: string[];
+  roundsLeft: number;
+}
+
+/** A recon drone: extra sight for its owner, destroyed by an enemy entering its tile. */
+export interface TacticalSensor {
+  id: string;
+  owner: number;
+  tileId: string;
+  roundsLeft: number;
+}
+
 /** Map-level effects an eliminated player may fire from their window. */
 export type SpectatorEffectId =
   | 'STATIC_STORM'
@@ -141,6 +197,8 @@ export interface GameSettings {
   goldIncome?: number;
   /** Eliminated players may fire one map effect on alternating rounds. Defaults to on. */
   spectatorAttacks?: boolean;
+  /** Periodic 3-round Field / 6-round Tactical theater air drops. Defaults to on (off in Challenge Ops). */
+  airDropsEnabled?: boolean;
   challengeId?: string;
 }
 
@@ -304,7 +362,43 @@ export interface BankReward {
   playerId: number;
 }
 
-export type SupplyLootType = 'AMMO' | 'MEDKIT' | 'FIRST_AID';
+export type ShopConstructId = 'LAND_MINE' | 'BARRIER' | 'BRIDGE' | 'TUNNEL';
+
+export type AirDropKind = 'FIELD' | 'TACTICAL';
+export type AirDropPhase = 'DISPATCH' | 'FLARE';
+
+export type SupplyLootType = 'AMMO' | 'MEDKIT' | 'FIRST_AID' | 'FIELD_SUPPLY' | 'TACTICAL_SUPPLY';
+
+/** An active theater air supply drop progressing from DISPATCH (L-2) -> FLARE (L-1) -> DROP (L). */
+export interface ActiveAirDrop {
+  id: string;
+  kind: AirDropKind;
+  /** Round on which the crate lands (3, 6, 9... for FIELD; 6, 12, 18... for TACTICAL). */
+  landingRound: number;
+  phase: AirDropPhase;
+  /** Approximate 5x5 sector center shown at L-2 before exact LZ is flared at L-1. */
+  sectorCenter: { x: number; y: number };
+  /** Exact landing tile id — populated ONLY at FLARE (L-1) so players cannot peek early. */
+  tileId?: string;
+  /** Exact landing coordinates — populated ONLY at FLARE (L-1). */
+  at?: { x: number; y: number };
+  /** Seeded plane approach heading in radians. */
+  headingRad: number;
+}
+
+/** Bookkeeping for mystery crate landing rounds and Tactical Drop anti-streak / no-repeat memory. */
+export interface AirDropMeta {
+  /** Maps landed mystery crate tileId -> landingRound (drives round-scaled Tactical tier weights on LOOT). */
+  crateRounds: Record<string, number>;
+  /** Tier rolled by the most recent opened Tactical Supply Crate (prevents back-to-back Epics). */
+  lastTacticalTier?: 'COMMON' | 'RARE' | 'EPIC';
+  /** Weapon rolled by the most recent opened Tactical Supply Crate (prevents immediate repeat). */
+  lastTacticalId?: TacticalId;
+  /** Number of mystery crates opened so far (guarantees distinct deterministic RNG streams). */
+  openedCount: number;
+  /** Last LZ coordinates so consecutive drops rotate across map lanes. */
+  lastLz?: { x: number; y: number };
+}
 
 export interface PendingDrop {
   playerId: number;

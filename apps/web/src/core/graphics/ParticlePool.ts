@@ -185,8 +185,8 @@ export const screenUpVector = (rotation: BoardRotation): { x: number; y: number 
 const randRange = (min: number, max: number) => min + Math.random() * (max - min);
 const pick = <T>(arr: readonly T[]): T => arr[Math.floor(Math.random() * arr.length)];
 
-const NORMAL_POOL_CAPACITY = 128;
-const ADDITIVE_POOL_CAPACITY = 96;
+const NORMAL_POOL_CAPACITY = 180;
+const ADDITIVE_POOL_CAPACITY = 140;
 
 export class ParticlePool {
   public readonly root: PIXI.Container;
@@ -959,6 +959,347 @@ export class ParticlePool {
             endScale: 0.05 * s,
             color: i % 3 === 0 ? 0xFFFFFF : col,
             alpha: 0.9,
+          });
+        }
+        break;
+      }
+
+      case 'sonarPing': {
+        const col = req.color ?? 0x22D3EE;
+        for (let i = 0; i < 2; i++) {
+          this.spawn({
+            texture: 'ring',
+            additive: true,
+            x,
+            y,
+            vx: 0,
+            vy: 0,
+            drag: 0,
+            lifeMs: 420 + i * 160,
+            startScale: (0.15 + i * 0.1) * s,
+            endScale: (1.35 + i * 0.45) * s,
+            color: i === 0 ? col : 0x6EE7B7,
+            alpha: 0.88 - i * 0.24,
+            fadeInFrac: 0.06,
+          });
+        }
+        this.spawn({
+          texture: 'glow',
+          additive: true,
+          x,
+          y,
+          vx: 0,
+          vy: 0,
+          drag: 0,
+          lifeMs: 260,
+          startScale: 0.45 * s,
+          endScale: 0.08 * s,
+          color: 0xFFFFFF,
+          alpha: 0.95,
+          fadeInFrac: 0,
+        });
+        break;
+      }
+
+      case 'smokeBloom': {
+        const count = Math.round(9 * s);
+        for (let i = 0; i < count; i++) {
+          const ang = (Math.PI * 2 * i) / count + randRange(-0.28, 0.28);
+          const spd = randRange(24, 82) * s;
+          this.spawn({
+            texture: 'softPuff',
+            x: x + randRange(-12, 12) * s,
+            y: y + randRange(-12, 12) * s,
+            vx: Math.cos(ang) * spd,
+            vy: Math.sin(ang) * spd,
+            upAccel: 34,
+            drag: 2.6,
+            lifeMs: randRange(520, 860),
+            startScale: randRange(0.45, 0.72) * s,
+            endScale: randRange(1.45, 2.05) * s,
+            color: pick([0xF1F5F9, 0xCBD5E1, 0x94A3B8, 0xE2E8F0]),
+            alpha: 0.58,
+            fadeInFrac: 0.14,
+          });
+        }
+        this.spawn({
+          texture: 'ring',
+          x,
+          y,
+          vx: 0,
+          vy: 0,
+          drag: 0,
+          lifeMs: 360,
+          startScale: 0.22 * s,
+          endScale: 1.25 * s,
+          color: 0xE2E8F0,
+          alpha: 0.55,
+          fadeInFrac: 0.05,
+        });
+        break;
+      }
+
+      case 'napalmFlame': {
+        this.spawn({
+          texture: 'glow',
+          additive: true,
+          x,
+          y,
+          vx: 0,
+          vy: 0,
+          drag: 2,
+          lifeMs: 340,
+          startScale: 0.8 * s,
+          endScale: 1.7 * s,
+          color: 0xF97316,
+          alpha: 0.88,
+          fadeInFrac: 0.04,
+        });
+        const embers = Math.round(11 * s);
+        for (let i = 0; i < embers; i++) {
+          const upAng = Math.atan2(up.y, up.x) + randRange(-1.1, 1.1);
+          const spd = randRange(55, 165) * s;
+          this.spawn({
+            texture: i % 2 === 0 ? 'spark' : 'shard',
+            additive: true,
+            x: x + randRange(-14, 14) * s,
+            y: y + randRange(-10, 10) * s,
+            vx: Math.cos(upAng) * spd,
+            vy: Math.sin(upAng) * spd,
+            upAccel: 75,
+            drag: 2.1,
+            lifeMs: randRange(320, 620),
+            startScale: randRange(0.32, 0.56) * s,
+            endScale: 0.06 * s,
+            color: pick([0xFEF08A, 0xFB923C, 0xEF4444, 0xFDE047]),
+            alpha: 0.96,
+            alignToVelocity: i % 2 === 0,
+            vr: randRange(-8, 8),
+          });
+        }
+        for (let i = 0; i < 5; i++) {
+          this.spawn({
+            texture: 'softPuff',
+            x: x + randRange(-10, 10),
+            y: y + randRange(-10, 10),
+            vx: up.x * randRange(24, 65) + randRange(-20, 20),
+            vy: up.y * randRange(24, 65) + randRange(-20, 20),
+            upAccel: 65,
+            drag: 2.2,
+            lifeMs: randRange(460, 740),
+            startScale: 0.42 * s,
+            endScale: 1.35 * s,
+            color: pick([0x1C1917, 0x292524, 0x44403C]),
+            alpha: 0.55,
+            fadeInFrac: 0.12,
+          });
+        }
+        break;
+      }
+
+      case 'empArc': {
+        for (let i = 0; i < 2; i++) {
+          this.spawn({
+            texture: 'ring',
+            additive: true,
+            x,
+            y,
+            vx: 0,
+            vy: 0,
+            drag: 0,
+            lifeMs: 380 + i * 140,
+            startScale: (0.2 + i * 0.14) * s,
+            endScale: (1.55 + i * 0.4) * s,
+            color: i === 0 ? 0xC084FC : 0x38BDF8,
+            alpha: 0.92 - i * 0.25,
+            fadeInFrac: 0.04,
+          });
+        }
+        const arcs = Math.round(14 * s);
+        for (let i = 0; i < arcs; i++) {
+          const ang = (Math.PI * 2 * i) / arcs + randRange(-0.2, 0.2);
+          const spd = randRange(110, 260) * s;
+          this.spawn({
+            texture: 'spark',
+            additive: true,
+            x,
+            y,
+            vx: Math.cos(ang) * spd,
+            vy: Math.sin(ang) * spd,
+            drag: 5.5,
+            lifeMs: randRange(160, 320),
+            startScale: randRange(0.42, 0.72) * s,
+            endScale: 0.08 * s,
+            color: pick([0xF5D0FE, 0xC084FC, 0x38BDF8, 0xFFFFFF]),
+            alpha: 0.98,
+            fadeInFrac: 0,
+            alignToVelocity: true,
+          });
+        }
+        break;
+      }
+
+      case 'orbitalBeam': {
+        this.spawn({
+          texture: 'glow',
+          additive: true,
+          x,
+          y,
+          vx: 0,
+          vy: 0,
+          drag: 2.5,
+          lifeMs: 280,
+          startScale: 1.0 * s,
+          endScale: 2.35 * s,
+          color: 0xFFF1F2,
+          alpha: 0.98,
+          fadeInFrac: 0,
+        });
+        for (let i = 0; i < 2; i++) {
+          this.spawn({
+            texture: 'ring',
+            additive: true,
+            x,
+            y,
+            vx: 0,
+            vy: 0,
+            drag: 0,
+            lifeMs: 360 + i * 140,
+            startScale: 0.2 * s,
+            endScale: (1.75 + i * 0.55) * s,
+            color: i === 0 ? 0xF43F5E : 0xFDA4AF,
+            alpha: 0.92 - i * 0.25,
+            fadeInFrac: 0.03,
+          });
+        }
+        const plasma = Math.round(16 * s);
+        for (let i = 0; i < plasma; i++) {
+          const ang = (Math.PI * 2 * i) / plasma + randRange(-0.18, 0.18);
+          const spd = randRange(140, 340) * s;
+          this.spawn({
+            texture: 'spark',
+            additive: true,
+            x,
+            y,
+            vx: Math.cos(ang) * spd,
+            vy: Math.sin(ang) * spd,
+            upAccel: 90,
+            drag: 3.6,
+            lifeMs: randRange(220, 420),
+            startScale: randRange(0.45, 0.78) * s,
+            endScale: 0.08 * s,
+            color: pick([0xFFFFFF, 0xFDA4AF, 0xF43F5E, 0xFACC15]),
+            alpha: 0.98,
+            fadeInFrac: 0,
+            alignToVelocity: true,
+          });
+        }
+        break;
+      }
+
+      case 'overclockSurge': {
+        this.spawn({
+          texture: 'ring',
+          additive: true,
+          x,
+          y,
+          vx: 0,
+          vy: 0,
+          drag: 0,
+          lifeMs: 460,
+          startScale: 0.22 * s,
+          endScale: 1.45 * s,
+          color: 0xFACC15,
+          alpha: 0.92,
+          fadeInFrac: 0.05,
+        });
+        for (let i = 0; i < 12; i++) {
+          const offset = randRange(-20, 20);
+          const sideX = -up.y * offset;
+          const sideY = up.x * offset;
+          this.spawn({
+            texture: i % 2 === 0 ? 'spark' : 'glow',
+            additive: true,
+            x: x + sideX,
+            y: y + sideY,
+            vx: up.x * randRange(65, 145) * s,
+            vy: up.y * randRange(65, 145) * s,
+            upAccel: 55,
+            drag: 2.0,
+            lifeMs: randRange(340, 580),
+            startScale: randRange(0.24, 0.44) * s,
+            endScale: 0.06 * s,
+            color: i % 3 === 0 ? 0x38BDF8 : 0xFACC15,
+            alpha: 0.96,
+            alignToVelocity: i % 2 === 0,
+          });
+        }
+        break;
+      }
+
+      case 'brassCasing': {
+        const ejectAng = dir + Math.PI * 0.55 + randRange(-0.28, 0.28);
+        const count = Math.max(1, Math.round(2 * s));
+        for (let i = 0; i < count; i++) {
+          const spd = randRange(42, 85);
+          this.spawn({
+            texture: 'shard',
+            x,
+            y,
+            vx: Math.cos(ejectAng) * spd + up.x * 28,
+            vy: Math.sin(ejectAng) * spd + up.y * 28,
+            upAccel: -260,
+            drag: 1.2,
+            lifeMs: randRange(240, 380),
+            startScale: 0.22,
+            endScale: 0.16,
+            color: 0xFBBF24,
+            alpha: 0.92,
+            rotation: randRange(0, Math.PI * 2),
+            vr: randRange(-14, 14),
+          });
+        }
+        break;
+      }
+
+      case 'concreteDebris': {
+        const chunks = Math.round(10 * s);
+        for (let i = 0; i < chunks; i++) {
+          const ang = randRange(0, Math.PI * 2);
+          const spd = randRange(65, 175) * s;
+          this.spawn({
+            texture: 'shard',
+            x: x + randRange(-8, 8),
+            y: y + randRange(-8, 8),
+            vx: Math.cos(ang) * spd + up.x * 48,
+            vy: Math.sin(ang) * spd + up.y * 48,
+            upAccel: -260,
+            drag: 1.8,
+            lifeMs: randRange(360, 620),
+            startScale: randRange(0.34, 0.58) * s,
+            endScale: 0.18 * s,
+            color: pick([0xCBD5E1, 0x94A3B8, 0x64748B, 0x475569]),
+            alpha: 0.95,
+            rotation: randRange(0, Math.PI * 2),
+            vr: randRange(-11, 11),
+          });
+        }
+        for (let i = 0; i < 6; i++) {
+          const ang = randRange(0, Math.PI * 2);
+          const spd = randRange(22, 68) * s;
+          this.spawn({
+            texture: 'softPuff',
+            x: x + randRange(-10, 10),
+            y: y + randRange(-10, 10),
+            vx: Math.cos(ang) * spd,
+            vy: Math.sin(ang) * spd,
+            upAccel: 38,
+            drag: 2.8,
+            lifeMs: randRange(420, 680),
+            startScale: 0.42 * s,
+            endScale: 1.25 * s,
+            color: pick([0xE2E8F0, 0xCBD5E1, 0x94A3B8]),
+            alpha: 0.56,
           });
         }
         break;

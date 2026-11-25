@@ -20,11 +20,32 @@ import {
   RESPAWN_CP_COST,
   RESPAWN_TIMERS,
   SHOP_ITEMS,
+  TACTICAL_COOLDOWN_ROUNDS,
   UNIT_STATS,
   VETERANCY_CONFIG,
 } from '../constants/Config';
-import type { BuildingSubType, DeadUnit, FinalPushStatus, LandMine, LogEntry, MatchPlayerStats, PendingDrop, SharedContract, SupplyLootType, TerrainType, Tile, Unit, UnitType } from '../types';
+import type { ActiveAirDrop, AirDropMeta, BuildingSubType, BurningLine, DeadUnit, FinalPushStatus, LandMine, LogEntry, MatchPlayerStats, PendingDrop, PendingTactical, SharedContract, ShopConstructId, SmokeZone, SupplyLootType, TacticalId, TacticalSensor, TerrainType, Tile, Unit, UnitType } from '../types';
 import { isSpectatorWindowRound, SPECTATOR_EFFECTS } from './SpectatorOps';
+import {
+  advanceAirDropsForRound,
+  rollFieldSupplyCrate,
+  rollTacticalSupplyCrate,
+  type AirDropFlightPlan,
+} from './airDrops';
+import {
+  TACTICAL_ITEMS,
+  TACTICAL_MIN_HP_FLOOR,
+  applyNapalmEntry,
+  hasTacticalVoucher,
+  resolveDueTacticals,
+  resolveTactical,
+  tacticalBlocker,
+  tacticalIsFree,
+  tacticalIsRound2StarterFree,
+  tacticalTilesFor,
+  tickTacticalRoundEnd,
+  type TacticalFxEventInput,
+} from '../tactical';
 import { CONTRACT_DURATION_ROUNDS, CONTRACT_UNDERDOG_CP, CONTRACT_UNDERDOG_GOLD, contractDef, contractProgressFor, dealContract, lastPlaceSeat, toSharedContract, type ContractEvent } from './Contracts';
 import { isPerkForClass, PERK_LABELS } from '../constants/Perks';
 import { getManhattanDistance, getTileByIdFast } from '../grid/Pathfinding';
@@ -189,13 +210,14 @@ class Fx {
       cause,
     });
   }
-  mineBlast(at: Tile, damage: number, victimUnitId?: string, victimDead?: boolean) {
+  mineBlast(at: Tile, damage: number, victimUnitId?: string, victimDead?: boolean, mineOwner?: number) {
     this.events.push({
       kind: 'mineBlast',
       at: pt(at),
       damage,
       ...(victimUnitId ? { victimUnitId } : {}),
       ...(victimDead !== undefined ? { victimDead } : {}),
+      ...(mineOwner !== undefined ? { mineOwner } : {}),
     });
   }
   structureHit(
@@ -245,6 +267,33 @@ class Fx {
   }
   supplyLanded(at: Tile, item: SupplyLootType) {
     this.events.push({ kind: 'supplyLanded', at: pt(at), item });
+  }
+  airDrop(plan: AirDropFlightPlan) {
+    this.events.push({
+      kind: 'airDrop',
+      dropId: plan.dropId,
+      dropKind: plan.dropKind,
+      at: { x: plan.at.x, y: plan.at.y },
+      headingRad: plan.headingRad,
+      ...(plan.staggerMs ? { staggerMs: plan.staggerMs } : {}),
+      ...(plan.isDualConvoy ? { isDualConvoy: true } : {}),
+      ...(plan.rerouted ? { rerouted: true } : {}),
+      ...(plan.companionAt ? { companionAt: { x: plan.companionAt.x, y: plan.companionAt.y } } : {}),
+    });
+  }
+  tacticalFx(input: TacticalFxEventInput) {
+    this.events.push({
+      kind: 'tacticalFx',
+      itemKey: input.itemKey,
+      phase: input.phase,
+      owner: input.owner,
+      anchor: pt(input.anchor),
+      tiles: input.tiles.map(pt),
+      ...(input.pings && input.pings.length > 0 ? { pings: input.pings.map(pt) } : {}),
+      ...(input.axis ? { axis: input.axis } : {}),
+      ...(input.width ? { width: input.width } : {}),
+      ...(input.meta ? { meta: input.meta } : {}),
+    });
   }
 }
 
@@ -353,7 +402,7 @@ const detonateMineOnUnit = (params: {
     unitsList, graveyardList, round, nextPlayerGold, nextMatchStats, extraLogs, fx,
   } = params;
   const victimDead = victim.hp - damage <= 0;
-  fx.mineBlast(tile, damage, victim.id, victimDead);
+  fx.mineBlast(tile, damage, victim.id, victimDead, mineOwner);
   fx.sound('explosion');
   fx.popup(tile, 'LAND MINE!', '#EF4444', 34);
   fx.popup(tile, `-${damage}`, '#FF6D00', 14);
@@ -456,6 +505,20 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     spectatorTurn = null,
     spectatorWindow = 0,
     spectatorUsedRound = null,
+    pendingTacticals = [],
+    burningLines = [],
+    smokeZones = [],
+    sensors = [],
+    tacticalRound = {},
+    tacticalCooldowns = {},
+    freeTacticalRound = {},
+    trapRevealRound = {},
+    radarRound = {},
+    overclockCharges = {},
+    playerShopVouchers = {},
+    playerTacticalVouchers = {},
+    airDrops = [],
+    airDropMeta = { crateRounds: {}, openedCount: 0 },
   } = state;
   const reject = (reason: string): ApplyResult => ({ state, events: [], rejected: reason });
   const fx = new Fx();
@@ -480,11 +543,43 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   let newBankReward = bankRewardPending;
   let newPendingDrops: PendingDrop[] = pendingDrops;
   let newMines: LandMine[] = [...mines];
+  let newPendingTacticals: PendingTactical[] = [...pendingTacticals];
+  let newBurningLines: BurningLine[] = burningLines.map(line => ({ ...line, hits: { ...line.hits } }));
+  let newSmokeZones: SmokeZone[] = [...smokeZones];
+  let newSensors: TacticalSensor[] = [...sensors];
+  const newTacticalRound = { ...tacticalRound };
+  const newTacticalCooldowns: Record<number, Partial<Record<TacticalId, number>>> = {};
+  for (const key of Object.keys(tacticalCooldowns)) {
+    const seatKey = Number(key);
+    newTacticalCooldowns[seatKey] = { ...(tacticalCooldowns[seatKey] ?? {}) };
+  }
+  const newFreeTacticalRound = { ...freeTacticalRound };
+  const newTrapRevealRound = { ...trapRevealRound };
+  const newRadarRound = { ...radarRound };
+  const newOverclockCharges = { ...overclockCharges };
 
   const nextPlayerCp = { ...playerCp };
   const nextPlayerGold = { ...playerGold };
   const nextPlayerRespawns = { ...playerRespawns };
   const nextPlayerInventory = { ...playerInventory };
+  const nextPlayerShopVouchers: Record<number, ShopConstructId[]> = {};
+  for (const key of Object.keys(playerShopVouchers)) {
+    const seatKey = Number(key);
+    nextPlayerShopVouchers[seatKey] = [...(playerShopVouchers[seatKey] ?? [])];
+  }
+  const nextPlayerTacticalVouchers: Record<number, TacticalId[]> = {};
+  for (const key of Object.keys(playerTacticalVouchers)) {
+    const seatKey = Number(key);
+    nextPlayerTacticalVouchers[seatKey] = [...(playerTacticalVouchers[seatKey] ?? [])];
+  }
+  let newAirDrops: ActiveAirDrop[] = airDrops.map(d => ({ ...d, sectorCenter: { ...d.sectorCenter } }));
+  let newAirDropMeta: AirDropMeta = {
+    crateRounds: { ...(airDropMeta?.crateRounds ?? {}) },
+    lastTacticalTier: airDropMeta?.lastTacticalTier,
+    lastTacticalId: airDropMeta?.lastTacticalId,
+    openedCount: airDropMeta?.openedCount ?? 0,
+    lastLz: airDropMeta?.lastLz ? { ...airDropMeta.lastLz } : undefined,
+  };
   const nextMatchStats = cloneMatchStats(state.matchStats, settings.playerCount);
   let newMatchSummary = state.matchSummary;
 
@@ -492,6 +587,64 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   const extraLogs: LogEntry[] = [];
   const currentRound = totalTurns + 1;
   let nextLastHqDamageRound = state.lastHqDamageRound ?? 0;
+
+  const tacticalWeaponVisualFor = (itemKey?: TacticalId): WeaponVisual => {
+    switch (itemKey) {
+      case 'RECON_DRONE':
+        return 'TACTICAL_DRONE';
+      case 'PRECISION_STRIKE':
+        return 'TACTICAL_STRIKE';
+      case 'CARPET_RUN':
+        return 'TACTICAL_CARPET';
+      case 'ARTILLERY_BARRAGE':
+        return 'TACTICAL_BARRAGE';
+      case 'NAPALM_LINE':
+        return 'TACTICAL_NAPALM';
+      default:
+        return 'TACTICAL_STRIKE';
+    }
+  };
+
+  /** Tactical damage is owner-attributed, fog-safe, and strictly non-lethal (never below 2 HP). */
+  const damageTacticalUnit = (
+    fallbackOwner: number,
+    unitId: string,
+    damage: number,
+    label: string,
+    sourceOwner?: number,
+    itemKey?: TacticalId,
+  ): void => {
+    const victim = newUnits.find(u => u.id === unitId);
+    if (!victim || damage <= 0) return;
+    const clamped = Math.min(damage, Math.max(0, victim.hp - TACTICAL_MIN_HP_FLOOR));
+    if (clamped <= 0) return;
+    const owner = sourceOwner ?? fallbackOwner;
+    const weapon = tacticalWeaponVisualFor(itemKey);
+    const tile = getTileByIdFast(newMap, victim.tileId, gridSize);
+    if (nextMatchStats[owner]) nextMatchStats[owner].damageDealt += clamped;
+    if (tile) {
+      fx.hit({ targetUnitId: victim.id, at: tile, damage: clamped, weapon, isKill: false });
+      fx.popup(tile, itemKey === 'NAPALM_LINE' ? `-${clamped} 🔥` : `-${clamped}`, itemKey === 'NAPALM_LINE' ? '#FB923C' : '#FF6D00', 16);
+      fx.shake(4, tile);
+    }
+    newUnits = newUnits.map(u => (u.id === victim.id ? { ...u, hp: victim.hp - clamped } : u));
+    void label;
+  };
+
+  /** Barrages damage barriers; HQs, banks and bridges stay immune. */
+  const damageTacticalBarrier = (tileId: string, damage: number): void => {
+    const tile = getTileByIdFast(newMap, tileId, gridSize);
+    if (!tile || tile.type !== 'BARRIER' || (tile.hp ?? 0) <= 0) return;
+    const hp = Math.max(0, (tile.hp ?? 0) - damage);
+    newMap = newMap.map(t =>
+      t.id !== tileId
+        ? t
+        : hp <= 0
+          ? { ...t, type: 'PLAINS' as const, hp: undefined, maxHp: undefined, height: 1 }
+          : { ...t, hp },
+    );
+    fx.sound('explosion');
+  };
 
   // ── Phase 3 match arc state ──
   let newFirstContactDone = firstContactDone;
@@ -631,6 +784,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         fogOfWar: settings.fogOfWar,
         maxBudget: playerCp[currentPlayer],
         mines: newMines,
+        smokeZones: newSmokeZones,
       });
 
       // Only the CP actually walked is spent (it matters when Overwatch or a Land Mine halts the unit early)
@@ -825,6 +979,28 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           extraLogs.push(createLog(currentRound, currentPlayer, `${UNIT_STATS[mUnit.type].name} stuck in Quicksand!`, 'INFO'));
         }
       }
+
+      // Napalm entry damage: once per move, capped per line, excluding the origin tile so walking off fire does not double-burn.
+      if (newBurningLines.length > 0) {
+        const moveEvent = fx.events.find(e => e.kind === 'movePath' && e.unitId === action.unitId);
+        const walked = moveEvent && moveEvent.kind === 'movePath'
+          ? moveEvent.path.slice(1).map(p => `${p.x},${p.y}`)
+          : destTile && destTile.id !== mUnit.tileId
+            ? [destTile.id]
+            : [];
+        const beforeNapalm = newBurningLines;
+        newBurningLines = applyNapalmEntry(newBurningLines, action.unitId, walked, {
+          units: newUnits,
+          damageUnit: (id, dmg, label, sourceOwner, itemKey) =>
+            damageTacticalUnit(currentPlayer, id, dmg, label, sourceOwner, itemKey),
+          damageBarrier: damageTacticalBarrier,
+          log: (message, type) => extraLogs.push(createLog(currentRound, currentPlayer, message, type)),
+          fx,
+        });
+        if (newBurningLines !== beforeNapalm) {
+          extraLogs.push(createLog(currentRound, currentPlayer, 'Napalm burns a unit crossing the line.', 'COMBAT'));
+        }
+      }
       break;
     }
     case 'OVERWATCH': {
@@ -864,12 +1040,72 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const tile = getTileByIdFast(newMap, action.tileId, gridSize);
       if (!unit || !tile || !tile.loot) return reject('No loot to pick up');
       spendCp(actionCost(action));
-      // Loot goes to the player's inventory, to use later
       const lootItem = tile.loot;
-      const currentInv = nextPlayerInventory[currentPlayer] || [];
-      nextPlayerInventory[currentPlayer] = [...currentInv, lootItem];
       newUnits = newUnits.map(u => u.id === unit.id ? { ...u, completed: true } : u);
       newMap = newMap.map(t => t.id === tile.id ? { ...t, loot: null } : t);
+
+      if (lootItem === 'FIELD_SUPPLY') {
+        const reward = rollFieldSupplyCrate(
+          { mapData: newMap, activeSeed: state.activeSeed },
+          tile.id,
+          currentRound,
+          newAirDropMeta.openedCount,
+        );
+        newAirDropMeta.openedCount += 1;
+        delete newAirDropMeta.crateRounds[tile.id];
+        if (reward.category === 'CONSUMABLE') {
+          const currentInv = nextPlayerInventory[currentPlayer] || [];
+          nextPlayerInventory[currentPlayer] = [...currentInv, reward.item];
+        } else {
+          const curVouchers = nextPlayerShopVouchers[currentPlayer] ?? [];
+          nextPlayerShopVouchers[currentPlayer] = [...curVouchers, reward.itemKey];
+        }
+        fx.popup(tile, `FIELD: ${reward.label.toUpperCase()}!`, '#22D3EE', 30);
+        fx.sound('capture');
+        logEntry = createLog(
+          currentRound,
+          currentPlayer,
+          `Field Supply Crate: ${reward.label}${reward.category === 'CONSTRUCT' ? ' (FREE in Shop)' : ''}`,
+          'ECONOMY',
+        );
+        break;
+      }
+
+      if (lootItem === 'TACTICAL_SUPPLY') {
+        const reward = rollTacticalSupplyCrate(
+          {
+            settings,
+            mines: newMines,
+            activeSeed: state.activeSeed,
+            airDropMeta: newAirDropMeta,
+          },
+          currentPlayer,
+          tile.id,
+          currentRound,
+        );
+        newAirDropMeta.openedCount += 1;
+        newAirDropMeta.lastTacticalTier = reward.tier;
+        newAirDropMeta.lastTacticalId = reward.itemKey;
+        delete newAirDropMeta.crateRounds[tile.id];
+        const curTacVouchers = nextPlayerTacticalVouchers[currentPlayer] ?? [];
+        nextPlayerTacticalVouchers[currentPlayer] = [...curTacVouchers, reward.itemKey];
+        const tierColor = reward.tier === 'EPIC' ? '#FACC15' : reward.tier === 'RARE' ? '#FB923C' : '#38BDF8';
+        fx.popup(tile, `${reward.tier}: ${reward.label.toUpperCase()}!`, tierColor, 34);
+        fx.shake(4, tile);
+        fx.sound('capture');
+        logEntry = createLog(
+          currentRound,
+          currentPlayer,
+          `Tactical Supply Crate: ${reward.label} (${reward.tier} · FREE!)`,
+          'ECONOMY',
+        );
+        break;
+      }
+
+      // Standard loose loot goes to the player's inventory, to use later
+      const currentInv = nextPlayerInventory[currentPlayer] || [];
+      nextPlayerInventory[currentPlayer] = [...currentInv, lootItem];
+      fx.sound('click');
       logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[unit.type].name} retrieved ${lootItem} to Inventory`, 'ECONOMY');
       break;
     }
@@ -963,8 +1199,21 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const tar = newUnits.find(u => u.id === action.targetUnitId);
       if (!att || !tar) return reject('Invalid attack target');
       spendCp(actionCost(action));
+
+      // Overclock Core refunds 2 CP per attack for three attacks, never above the battery cap.
+      const overclock = newOverclockCharges[currentPlayer] ?? 0;
       const attTile = getTileByIdFast(mapData, att.tileId, gridSize);
       const tarTile = getTileByIdFast(mapData, tar.tileId, gridSize);
+      if (overclock > 0) {
+        const cpCap = getEffectiveCpRules(settings.mutators).maxCp;
+        const refund = Math.min(2, Math.max(0, cpCap - (nextPlayerCp[currentPlayer] ?? 0)));
+        if (refund > 0) {
+          nextPlayerCp[currentPlayer] = (nextPlayerCp[currentPlayer] ?? 0) + refund;
+          newOverclockCharges[currentPlayer] = overclock - 1;
+          if (attTile) fx.popup(attTile, `+${refund} CP ⚡`, '#FACC15', 30);
+          extraLogs.push(createLog(currentRound, currentPlayer, `Overclock Core refunded ${refund} CP`, 'ECONOMY'));
+        }
+      }
       const crossfireSupporters = tarTile ? getCrossfireSupporters(att, tarTile, newUnits, mapData, weather, gridSize) : [];
       const crossfireBonus = crossfireSupporters.length > 0 ? COMBAT_BONUSES.CROSSFIRE_DAMAGE : 0;
       const outcome = calculateAttackOutcome(att, attTile, tarTile, tar.owner, tar, crossfireBonus);
@@ -1278,8 +1527,25 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     case 'BUILD': {
       if (!isConstruct(action.itemKey)) return reject('Not something you can build');
       const item = SHOP_ITEMS[action.itemKey as keyof typeof SHOP_ITEMS];
-      if (nextPlayerGold[currentPlayer] < item.cost) return reject('Not enough Euros');
-      const ctx = { playerId: currentPlayer, mapData: newMap, mines: newMines };
+      const shopVouchers = nextPlayerShopVouchers[currentPlayer] ?? [];
+      const voucherIdx = shopVouchers.indexOf(action.itemKey as ShopConstructId);
+      const useVoucher = voucherIdx >= 0;
+      if (!useVoucher && nextPlayerGold[currentPlayer] < item.cost) return reject('Not enough Euros');
+      const payConstructCost = () => {
+        if (useVoucher) {
+          const nextList = [...shopVouchers];
+          nextList.splice(voucherIdx, 1);
+          nextPlayerShopVouchers[currentPlayer] = nextList;
+        } else {
+          spendGold(item.cost);
+        }
+      };
+      const flareTileIds = new Set(
+        newAirDrops
+          .filter(d => d.phase === 'FLARE' && d.tileId)
+          .map(d => d.tileId!),
+      );
+      const ctx = { playerId: currentPlayer, mapData: newMap, mines: newMines, flareTileIds };
 
       if (action.itemKey === 'BARRIER') {
         const targetIds = action.tileIds && action.tileIds.length > 0
@@ -1295,7 +1561,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           targetTiles.push(t);
         }
         spendCp(actionCost(action));
-        spendGold(item.cost);
+        payConstructCost();
         const targetSet = new Set(targetIds);
         newMap = newMap.map(t =>
           targetSet.has(t.id)
@@ -1305,7 +1571,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         fx.build(targetTiles, 'BARRIER');
         fx.sound('capture');
         const coords = targetTiles.map(t => `(${t.x},${t.y})`).join(', ');
-        logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at ${coords}`, 'ECONOMY');
+        logEntry = createLog(currentRound, currentPlayer, `Built ${item.name}${useVoucher ? ' (Free Voucher)' : ''} at ${coords}`, 'ECONOMY');
         break;
       }
 
@@ -1317,7 +1583,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           : newUnits;
         if (!canConstructOnTile('LAND_MINE', tile, unitsForBuild, ctx)) return reject("Can't build there");
         spendCp(actionCost(action));
-        spendGold(item.cost);
+        payConstructCost();
         const hiddenEnemy = newUnits.find(u => u.tileId === tile.id && u.owner !== currentPlayer);
         if (hiddenEnemy) {
           const mineRes = detonateMineOnUnit({
@@ -1339,7 +1605,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           newMines = [...newMines, { id: `mine_${turnCounter}_${newMines.length}_${tile.id}`, tileId: tile.id, owner: currentPlayer }];
           fx.sound('click');
         }
-        logEntry = createLog(currentRound, currentPlayer, `Planted Land Mine at (${tile.x},${tile.y})`, 'ECONOMY');
+        logEntry = createLog(currentRound, currentPlayer, `Planted Land Mine${useVoucher ? ' (Free Voucher)' : ''} at (${tile.x},${tile.y})`, 'ECONOMY');
         break;
       }
 
@@ -1347,11 +1613,11 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         const tunnelTile = getTileByIdFast(newMap, action.tileId, gridSize);
         if (!tunnelTile || !canConstructOnTile('TUNNEL', tunnelTile, newUnits, ctx)) return reject("Can't build there");
         spendCp(actionCost(action));
-        spendGold(item.cost);
+        payConstructCost();
         newMap = newMap.map(t => t.id === tunnelTile.id ? { ...t, type: 'TUNNEL' as const, height: 1, hp: undefined, maxHp: undefined } : t);
         fx.build([tunnelTile], 'TUNNEL');
         fx.sound('capture');
-        logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at (${tunnelTile.x},${tunnelTile.y})`, 'ECONOMY');
+        logEntry = createLog(currentRound, currentPlayer, `Built ${item.name}${useVoucher ? ' (Free Voucher)' : ''} at (${tunnelTile.x},${tunnelTile.y})`, 'ECONOMY');
         break;
       }
 
@@ -1363,11 +1629,121 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           ? 'BRIDGE'
           : resolveBridgeVariant(tile, newMap, gridSize);
       spendCp(actionCost(action));
-      spendGold(item.cost);
+      payConstructCost();
       newMap = newMap.map(t => t.id === tile.id ? { ...t, type: newType, height: 1, hp: undefined, maxHp: undefined } : t);
       fx.build([tile], 'BRIDGE');
       fx.sound('capture');
-      logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at (${tile.x},${tile.y})`, 'ECONOMY');
+      logEntry = createLog(currentRound, currentPlayer, `Built ${item.name}${useVoucher ? ' (Free Voucher)' : ''} at (${tile.x},${tile.y})`, 'ECONOMY');
+      break;
+    }
+    case 'USE_TACTICAL': {
+      const def = TACTICAL_ITEMS[action.itemKey];
+      if (!def) return reject('Unknown tactical weapon');
+      const visible = settings.fogOfWar ? visibleSet(state, currentPlayer) : null;
+      const blocked = tacticalBlocker(state, currentPlayer, action.itemKey, {
+        tileId: action.tileId,
+        tileIds: action.tileIds,
+        unitId: action.unitId,
+        axis: action.axis,
+        width: action.width,
+        visible,
+      });
+      if (blocked) return reject(blocked);
+      const tiles = tacticalTilesFor(
+        newMap,
+        gridSize,
+        action.itemKey,
+        action.tileId,
+        action.axis,
+        2,
+        action.tileIds,
+      );
+      if (!tiles) return reject('That footprint does not fit on the board');
+
+      const usingVoucher = hasTacticalVoucher(state, currentPlayer, action.itemKey);
+      const round2Free = !usingVoucher && tacticalIsRound2StarterFree(state, currentPlayer, action.itemKey);
+      const free = usingVoucher || round2Free || tacticalIsFree(state, currentPlayer, action.itemKey);
+      if (usingVoucher) {
+        const curList = [...(nextPlayerTacticalVouchers[currentPlayer] ?? [])];
+        const vIdx = curList.indexOf(action.itemKey);
+        if (vIdx >= 0) curList.splice(vIdx, 1);
+        nextPlayerTacticalVouchers[currentPlayer] = curList;
+      } else if (!free) {
+        if (nextPlayerGold[currentPlayer] < def.cost) return reject('Not enough Euros');
+        nextPlayerGold[currentPlayer] = nextPlayerGold[currentPlayer] - def.cost;
+      }
+      newTacticalRound[currentPlayer] = currentRound;
+      if (!usingVoucher) {
+        newTacticalCooldowns[currentPlayer] = {
+          ...(newTacticalCooldowns[currentPlayer] ?? {}),
+          [action.itemKey]: currentRound + TACTICAL_COOLDOWN_ROUNDS,
+        };
+      }
+      if (round2Free) newFreeTacticalRound[currentPlayer] = currentRound;
+
+      resolveTactical({
+        state,
+        seat: currentPlayer,
+        round: currentRound,
+        itemKey: action.itemKey,
+        tiles,
+        unitId: action.unitId,
+        axis: action.axis,
+        width: 2,
+        fx,
+        log: (message, type = 'ECONOMY') => extraLogs.push(createLog(currentRound, currentPlayer, message, type)),
+        revealTraps: round => {
+          newTrapRevealRound[currentPlayer] = round;
+        },
+        radar: round => {
+          newRadarRound[currentPlayer] = round;
+        },
+        addPending: pending => {
+          newPendingTacticals.push(pending);
+        },
+        addBurning: line => {
+          newBurningLines.push(line);
+        },
+        addSmoke: zone => {
+          newSmokeZones.push(zone);
+        },
+        addSensor: sensor => {
+          newSensors.push(sensor);
+        },
+        grantOverclock: charges => {
+          newOverclockCharges[currentPlayer] = (newOverclockCharges[currentPlayer] ?? 0) + charges;
+        },
+        stripStructure: tileId => {
+          newMap = newMap.map(t => (t.id === tileId ? { ...t, subType: 'NONE' as const } : t));
+        },
+        drainCp: (owner, amount) => {
+          nextPlayerCp[owner] = Math.max(0, (nextPlayerCp[owner] ?? 0) - amount);
+        },
+        damageUnit: (id, dmg, label, sourceOwner, itemKey) =>
+          damageTacticalUnit(currentPlayer, id, dmg, label, sourceOwner, itemKey),
+        damageBarrier: damageTacticalBarrier,
+        relocateUnit: (unitId, destTileId) => {
+          const unit = newUnits.find(u => u.id === unitId);
+          const fromTile = unit ? getTileByIdFast(newMap, unit.tileId, gridSize) : undefined;
+          const destTile = getTileByIdFast(newMap, destTileId, gridSize);
+          if (!unit || !fromTile || !destTile) return null;
+          newUnits = newUnits.map(u =>
+            u.id === unitId
+              ? {
+                  ...u,
+                  tileId: destTileId,
+                  isRooted: false,
+                  isOverwatching: false,
+                  ...(u.owner === currentPlayer ? { hasMoved: true } : {}),
+                }
+              : u,
+          );
+          // Stepping/dropping onto an enemy sensor destroys it.
+          newSensors = newSensors.filter(s => !(s.tileId === destTileId && s.owner !== unit.owner));
+          return { from: fromTile, to: destTile, unitType: unit.type, owner: unit.owner };
+        },
+      });
+      logEntry = createLog(currentRound, currentPlayer, `Tactical: ${def.name}`, 'ECONOMY');
       break;
     }
     case 'CHOOSE_PERK': {
@@ -1538,10 +1914,35 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       newPendingDrops = [];
 
       const nextId = nextActivePlayer(currentPlayer, settings.playerCount, nextPlayerStatus);
+
+      // Telegraphed strikes land at the start of the buyer's next turn.
+      const dueStrikes = resolveDueTacticals(newPendingTacticals, nextId, {
+        units: newUnits,
+        damageUnit: (id, dmg, label, sourceOwner, itemKey) =>
+          damageTacticalUnit(nextId, id, dmg, label, sourceOwner, itemKey),
+        damageBarrier: damageTacticalBarrier,
+        log: (message, type) => extraLogs.push(createLog(currentRound, nextId, message, type)),
+        fx,
+      });
+      newPendingTacticals = dueStrikes.remaining;
+
       // A fresh turn gets a fresh momentum budget and a fresh Overclock allowance.
       newPlayerCpRefunded[nextId] = 0;
       newPlayerCpBorrowed[nextId] = 0;
       if (nextId === 0 || nextId < currentPlayer) newTotalTurns += 1;
+      if (newTotalTurns > totalTurns) {
+        const tick = tickTacticalRoundEnd(newBurningLines, newSmokeZones, newSensors, {
+          units: newUnits,
+          damageUnit: (id, dmg, label, sourceOwner, itemKey) =>
+            damageTacticalUnit(currentPlayer, id, dmg, label, sourceOwner, itemKey),
+          damageBarrier: damageTacticalBarrier,
+          log: (message, type) => extraLogs.push(createLog(currentRound, -1, message, type)),
+          fx,
+        });
+        newBurningLines = tick.burning;
+        newSmokeZones = tick.smoke;
+        newSensors = tick.sensors;
+      }
       const newTurnCounter = turnCounter + 1;
 
       if (newTurnCounter > 0 && newTurnCounter % 5 === 0 && settings.dynamicWeather) {
@@ -1633,6 +2034,85 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
             pushGraveyard(newGraveyard, u);
             extraLogs.push(createLog(currentRound, -1, `${UNIT_STATS[u.type].name} melted in Lava!`, 'COMBAT'));
           });
+        }
+      }
+
+      // ── Theater Air Supply Drops (3-round Field / 6-round Tactical cadence) ──
+      if (newTotalTurns > totalTurns) {
+        const nextRoundNum = newTotalTurns + 1;
+        const nextDoomsdayRing =
+          settings.victoryMode === 'DEATHMATCH' &&
+          settings.doomsdayEnabled &&
+          newTotalTurns + 2 >= DOOMSDAY_SETTINGS.START_TURN
+            ? Math.floor((newTotalTurns + 2 - DOOMSDAY_SETTINGS.START_TURN) / DOOMSDAY_SETTINGS.SHRINK_INTERVAL)
+            : -1;
+        const dropTick = advanceAirDropsForRound(
+          {
+            settings,
+            activeMission: state.activeMission,
+            mapData: newMap,
+            gridSize,
+            playerStatus: nextPlayerStatus,
+            burningLines: newBurningLines,
+            activeSeed: state.activeSeed,
+            airDrops: newAirDrops,
+            airDropMeta: newAirDropMeta,
+          },
+          nextRoundNum,
+          nextDoomsdayRing,
+        );
+        newAirDrops = dropTick.airDrops;
+        newAirDropMeta = dropTick.airDropMeta;
+
+        for (const plan of dropTick.landed) {
+          const idx = plan.at.y * gridSize + plan.at.x;
+          if (newMap[idx]) {
+            newMap[idx] = {
+              ...newMap[idx],
+              loot: plan.dropKind === 'TACTICAL' ? 'TACTICAL_SUPPLY' : 'FIELD_SUPPLY',
+            };
+          }
+          fx.airDrop(plan);
+          extraLogs.push(
+            createLog(
+              nextRoundNum,
+              -1,
+              `${plan.dropKind === 'TACTICAL' ? 'Tactical' : 'Field'} Supply Crate dropped at (${plan.at.x},${plan.at.y})${plan.rerouted ? ' (re-routed)' : ''}!`,
+              'ECONOMY',
+            ),
+          );
+        }
+        for (const f of dropTick.flared) {
+          if (f.at) {
+            extraLogs.push(
+              createLog(
+                nextRoundNum,
+                -1,
+                `Signal Flare lit at (${f.at.x},${f.at.y}): ${f.kind === 'TACTICAL' ? 'Tactical' : 'Field'} Supply Drop lands next round!`,
+                'INFO',
+              ),
+            );
+          }
+        }
+        if (dropTick.dispatched.length >= 2) {
+          extraLogs.push(
+            createLog(
+              nextRoundNum,
+              -1,
+              `Air Convoy Dispatched: Field + Tactical Supply Drops arriving in 2 rounds (R${dropTick.dispatched[0].landingRound}).`,
+              'INFO',
+            ),
+          );
+        } else if (dropTick.dispatched.length === 1) {
+          const d = dropTick.dispatched[0];
+          extraLogs.push(
+            createLog(
+              nextRoundNum,
+              -1,
+              `Air Dispatch: ${d.kind === 'TACTICAL' ? 'Tactical' : 'Field'} Supply Drop arriving in 2 rounds (R${d.landingRound}).`,
+              'INFO',
+            ),
+          );
         }
       }
 
@@ -1999,6 +2479,10 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       playerRespawns: nextPlayerRespawns,
       playerStatus: nextPlayerStatus,
       playerInventory: nextPlayerInventory,
+      playerShopVouchers: nextPlayerShopVouchers,
+      playerTacticalVouchers: nextPlayerTacticalVouchers,
+      airDrops: newAirDrops,
+      airDropMeta: newAirDropMeta,
       winner: newWinner,
       matchStats: nextMatchStats,
       matchSummary: newMatchSummary,
@@ -2013,6 +2497,16 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       spectatorTurn: newSpectatorTurn,
       spectatorWindow: newSpectatorWindow,
       spectatorUsedRound: newSpectatorUsedRound,
+      tacticalRound: newTacticalRound,
+      tacticalCooldowns: newTacticalCooldowns,
+      freeTacticalRound: newFreeTacticalRound,
+      trapRevealRound: newTrapRevealRound,
+      radarRound: newRadarRound,
+      overclockCharges: newOverclockCharges,
+      pendingTacticals: newPendingTacticals,
+      burningLines: newBurningLines,
+      smokeZones: newSmokeZones,
+      sensors: newSensors,
       turnCounter: action.type === 'END_TURN' ? turnCounter + 1 : turnCounter,
       weather: newWeather,
       currentPlayer: actualNextPlayer,

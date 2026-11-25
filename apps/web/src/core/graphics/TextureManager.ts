@@ -4,6 +4,7 @@ import { Assets } from 'pixi.js';
 import { PLAYER_COLORS } from '@tactical/engine/constants/Config';
 import { UnitType } from '@tactical/engine/types';
 import { createReconTileTexture, createReconUnitTexture } from './TacticalReconRenderer';
+import { buildAllTacticalTextures } from './TacticalAssets';
 
 const TERRAIN_KEYS = [
   'PLAINS', 'FOREST', 'MOUNTAIN', 'WATER', 'BASE',
@@ -58,6 +59,11 @@ export const TextureManager = {
         for (const uType of UNIT_TYPES) {
           registerTex(`UNIT_P${pid}_${uType}`, createReconUnitTexture(color, uType));
         }
+      });
+
+      // Build crisp @2x procedural Tactical Weapon ordnance, UAV, bomber, smoke, and crater textures
+      Object.entries(buildAllTacticalTextures()).forEach(([key, tex]) => {
+        registerTex(key, tex);
       });
 
       const createTextureFromCanvas = (drawFn: (ctx: CanvasRenderingContext2D) => void, w: number, h: number) => {
