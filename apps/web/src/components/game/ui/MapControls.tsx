@@ -1,9 +1,11 @@
-import React from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useViewportContext } from '../../../context/ViewportContext';
 import { useGameStore } from '../../../store/useGameStore';
 import { wakeBattleRenderer } from '../../../store/useEffectStore';
 import { GeoButton, GeoCard } from '../../ui/GeoPrimitives';
 import { frameMap } from '../renderer/GameViewport';
+import { RESPAWN_CP_COST, UNIT_STATS } from '@tactical/engine/constants/Config';
+import { getEffectiveMaxRespawns } from '@tactical/engine/rules/CombatRules';
 
 const Swatch: React.FC<{ color: string; label: string }> = ({ color, label }) => (
   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px', fontWeight: 700, color: 'var(--op-ink)' }}>
@@ -19,6 +21,66 @@ const fitViewport = (viewport: ReturnType<typeof useViewportContext>['viewport']
   frameMap(viewport);
 };
 
+type WebkitFullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitFullscreenEnabled?: boolean;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+type WebkitFullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+};
+
+const currentFullscreenElement = (): Element | null => {
+  const doc = document as WebkitFullscreenDocument;
+  return doc.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+};
+
+const fullscreenSupported = (): boolean => {
+  const doc = document as WebkitFullscreenDocument;
+  const root = document.documentElement as WebkitFullscreenElement;
+  return Boolean(
+    doc.fullscreenEnabled ||
+      doc.webkitFullscreenEnabled ||
+      typeof root.requestFullscreen === 'function' ||
+      typeof root.webkitRequestFullscreen === 'function',
+  );
+};
+
+/** Fullscreens the whole app root so the HUD and modals stay available, not just the map canvas. */
+const useFullscreenMode = () => {
+  const [isFullscreen, setIsFullscreen] = useState(() => Boolean(currentFullscreenElement()));
+  const [supported] = useState(() => fullscreenSupported());
+
+  useEffect(() => {
+    const sync = () => setIsFullscreen(Boolean(currentFullscreenElement()));
+    document.addEventListener('fullscreenchange', sync);
+    document.addEventListener('webkitfullscreenchange', sync);
+    return () => {
+      document.removeEventListener('fullscreenchange', sync);
+      document.removeEventListener('webkitfullscreenchange', sync);
+    };
+  }, []);
+
+  const toggle = useCallback(async () => {
+    const doc = document as WebkitFullscreenDocument;
+    const root = document.documentElement as WebkitFullscreenElement;
+    try {
+      if (currentFullscreenElement()) {
+        if (typeof doc.exitFullscreen === 'function') await doc.exitFullscreen();
+        else await doc.webkitExitFullscreen?.();
+        return;
+      }
+      if (typeof root.requestFullscreen === 'function') await root.requestFullscreen();
+      else await root.webkitRequestFullscreen?.();
+    } catch {
+      // Some embedded browsers expose the API but refuse the transition.
+    }
+  }, []);
+
+  return { isFullscreen, supported, toggle };
+};
+
 /** What the turn buttons need: whether you can act and how many of your units still can. */
 const useTurnControls = () => {
   const readyUnitCount = useGameStore(state => {
@@ -28,20 +90,79 @@ const useTurnControls = () => {
     }
     return count;
   });
-  const isMyTurn = useGameStore(state => !state.isAiTurn && state.winner === null);
+  const isMyTurn = useGameStore(
+    state => !state.isAiTurn && state.winner === null && (state.mode !== 'ONLINE' || state.currentPlayer === state.mySeat)
+  );
   const canUndoMove = useGameStore(
     state => state.mode === 'LOCAL' && state.lastMoveSnapshot !== null && !state.isAiTurn && state.winner === null && !state.settings.fogOfWar
   );
   const endTurn = useGameStore(state => state.endTurn);
   const selectNextReadyUnit = useGameStore(state => state.selectNextReadyUnit);
   const undoLastMove = useGameStore(state => state.undoLastMove);
-  return { isMyTurn, readyUnitCount, canUndoMove, endTurn, selectNextReadyUnit, undoLastMove };
+
+  // Fallen squad: surface the next redeploy right beside END TURN, so a loss is never a silent
+  // roster change. The button explains a wait, a CP shortfall, or an exhausted respawn budget.
+  const graveyard = useGameStore(state => state.graveyard);
+  const playerRespawns = useGameStore(state => state.playerRespawns);
+  const playerCp = useGameStore(state => state.playerCp);
+  const currentPlayer = useGameStore(state => state.currentPlayer);
+  const mutators = useGameStore(state => state.settings.mutators);
+  const handleGraveyardSelect = useGameStore(state => state.handleGraveyardSelect);
+  const respawnsLeft = Math.max(0, getEffectiveMaxRespawns(mutators) - (playerRespawns[currentPlayer] ?? 0));
+  const fallen = graveyard.filter(dead => dead.owner === currentPlayer);
+  const cp = playerCp[currentPlayer] ?? 0;
+  const readyNow = fallen.filter(dead => (dead.turnsUntilRespawn ?? 0) <= 0);
+  const readyFallen = respawnsLeft > 0 ? readyNow.find(dead => cp >= RESPAWN_CP_COST[dead.type]) ?? null : null;
+  const cheapestReady = readyNow.reduce((min, dead) => Math.min(min, RESPAWN_CP_COST[dead.type]), Number.POSITIVE_INFINITY);
+  const soonestFallen = fallen.reduce((min, dead) => Math.min(min, dead.turnsUntilRespawn ?? 0), Number.POSITIVE_INFINITY);
+  const showRespawn = isMyTurn && fallen.length > 0;
+  const respawnLabel = !showRespawn
+    ? null
+    : readyFallen
+      ? `↻ RESPAWN (${fallen.length})`
+      : readyNow.length > 0 && respawnsLeft > 0
+        ? `↻ NEED ${Math.max(0, cheapestReady - cp)} CP`
+        : respawnsLeft <= 0
+          ? '↻ NO DEPLOYS'
+          : `↻ RESPAWN IN ${Number.isFinite(soonestFallen) ? soonestFallen : 0}T`;
+  const respawnTitle = readyFallen
+    ? `Redeploy ${UNIT_STATS[readyFallen.type].name} for ${RESPAWN_CP_COST[readyFallen.type]} CP — click, then pick a green spawn tile`
+    : readyNow.length > 0 && respawnsLeft > 0
+      ? `Fallen unit is ready but needs ${Math.max(0, cheapestReady - cp)} more CP`
+      : respawnsLeft <= 0
+        ? 'No redeploys left this match'
+        : `Fallen unit is ready to redeploy in ${Number.isFinite(soonestFallen) ? soonestFallen : 0} round(s)`;
+
+  return {
+    isMyTurn,
+    readyUnitCount,
+    canUndoMove,
+    endTurn,
+    selectNextReadyUnit,
+    undoLastMove,
+    respawnLabel,
+    respawnTitle,
+    readyFallen,
+    handleGraveyardSelect,
+  };
 };
 
 /** Under-map Cursor-Zone Dock pairing Legend + Camera Keys with Turn Controls. */
 export const MapControls: React.FC = () => {
   const { viewport } = useViewportContext();
-  const { isMyTurn, readyUnitCount, canUndoMove, endTurn, selectNextReadyUnit, undoLastMove } = useTurnControls();
+  const {
+    isMyTurn,
+    readyUnitCount,
+    canUndoMove,
+    endTurn,
+    selectNextReadyUnit,
+    undoLastMove,
+    respawnLabel,
+    respawnTitle,
+    readyFallen,
+    handleGraveyardSelect,
+  } = useTurnControls();
+  const { isFullscreen, supported: fullscreenAvailable, toggle: toggleFullscreen } = useFullscreenMode();
 
   const handleZoomIn = () => {
     if (!viewport || viewport.destroyed) return;
@@ -113,10 +234,37 @@ export const MapControls: React.FC = () => {
             <GeoButton onClick={handleZoomIn} title="Zoom In (+)" coreStyle={{ padding: '5px 10px' }}>
               +
             </GeoButton>
+            <span style={{ width: '1px', height: '24px', background: 'var(--op-line)', margin: '0 3px' }} />
+            <GeoButton
+              onClick={toggleFullscreen}
+              disabled={!fullscreenAvailable}
+              variant={isFullscreen ? 'softAmber' : 'default'}
+              title={
+                !fullscreenAvailable
+                  ? 'Fullscreen is not supported by this browser'
+                  : isFullscreen
+                    ? 'Exit fullscreen (Esc)'
+                    : 'Enter fullscreen game view'
+              }
+              coreStyle={{ padding: '5px 10px', whiteSpace: 'nowrap' }}
+            >
+              {isFullscreen ? '⛶ EXIT FULL' : '⛶ FULLSCREEN'}
+            </GeoButton>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: 'auto' }}>
             <div style={{ width: '1px', height: '24px', background: 'var(--op-line)', marginRight: '4px' }} />
+            {respawnLabel && (
+              <GeoButton
+                variant={readyFallen ? 'softBlue' : 'default'}
+                disabled={!readyFallen}
+                onClick={() => readyFallen && handleGraveyardSelect(readyFallen.id)}
+                title={respawnTitle}
+                coreStyle={{ padding: '6px 10px', whiteSpace: 'nowrap', fontWeight: 900 }}
+              >
+                {respawnLabel}
+              </GeoButton>
+            )}
             {canUndoMove && (
               <GeoButton
                 variant="softAmber"

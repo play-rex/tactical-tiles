@@ -77,7 +77,7 @@ test('tactical tiers open at round 2 / 5 / 10, first Common in round 2 is free, 
     { type: 'USE_TACTICAL', itemKey: 'RECON_DRONE', tileId: enemy.tileId },
   );
   assert.equal(round3.rejected, undefined);
-  assert.equal(round3.state.playerGold[0], 900, 'from round 3 a Common is paid');
+  assert.equal(round3.state.playerGold[0], 875, 'from round 3 Hunter Drone costs €125');
   const expectedDroneHp = computeTacticalPercentDamage({ hp: enemyHp }, 0.4).hpAfter;
   assert.equal(round3.state.units.find(u => u.id === enemy.id)!.hp, expectedDroneHp, 'Hunter Drone deals 40% current HP');
   assert.equal(round3.state.sensors?.length ?? 0, 0, 'Hunter Drone skips sensor placement when Fog of War is OFF');
@@ -203,7 +203,7 @@ test('Carpet Run hits 1 to 3 distinct visible enemy units immediately for 50% cu
     tileIds: enemies.map(e => e.tileId),
   });
   assert.equal(res.rejected, undefined);
-  assert.equal(res.state.playerGold[0], 725);
+  assert.equal(res.state.playerGold[0], 750);
   assert.equal(res.state.pendingTacticals?.length ?? 0, 0, 'Carpet Run resolves immediately');
   for (const e of enemies) {
     assert.equal(res.state.units.find(u => u.id === e.id)!.hp, 9, 'each targeted enemy takes 50% current HP (18 -> 9)');
@@ -232,7 +232,7 @@ test('Artillery Barrage is always 2x10 and deals instant 50% current HP to units
     width: 2,
   });
   assert.equal(buy.rejected, undefined);
-  assert.equal(buy.state.playerGold[0], 700);
+  assert.equal(buy.state.playerGold[0], 725);
   assert.equal(buy.state.pendingTacticals?.length ?? 0, 0, 'Barrage resolves immediately');
   assert.equal(buy.state.units.find(u => u.id === victim.id)!.hp, 10, 'deals 50% current HP (20 -> 10) across 2x10 lane');
 });

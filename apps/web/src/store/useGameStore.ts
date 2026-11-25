@@ -201,6 +201,8 @@ interface GameStore extends GameState {
   clearSelection: () => void;
   setHoveredTile: (tileId: string | null) => void;
   handleGraveyardSelect: (deadUnitId: string) => void;
+  /** Select a unit straight from the HUD roster (no map click): command it if it can act, else inspect it. */
+  selectUnitById: (unitId: string) => void;
   selectInventoryItem: (index: number | null) => void;
   selectNextReadyUnit: () => void;
   reloadUnit: () => void;
@@ -1324,6 +1326,35 @@ export const useGameStore = create<GameStore>((set, get) => {
         hoveredTileId: state.hoveredTileId,
         selectedGraveyardUnitId: deadUnitId,
         validSpawnTiles: getSpawnTiles(state, state.currentPlayer),
+      });
+    },
+
+    selectUnitById: (unitId) => {
+      const state = get();
+      if (state.winner !== null) return;
+      const unit = state.units.find(u => u.id === unitId);
+      if (!unit) return;
+      const viewer = viewerSeat(state);
+      if (!isUnitVisible(unit, viewer, state.settings.fogOfWar, state.visibleTiles)) return;
+      const canCommand =
+        !state.isAiTurn &&
+        !unit.completed &&
+        unit.owner === state.currentPlayer &&
+        state.playerStatus[state.currentPlayer] !== 'ELIMINATED';
+      if (canCommand) {
+        set({
+          ...CLEAR_SELECTION,
+          ...optionsSelectionFor(state, unit, state.visibleTiles),
+          hoveredTileId: unit.tileId,
+        });
+        return;
+      }
+      // Already acted, or it isn't this seat's turn: look at it without offering commands.
+      set({
+        ...CLEAR_SELECTION,
+        selectedUnitId: unit.id,
+        selectedTileId: unit.tileId,
+        hoveredTileId: unit.tileId,
       });
     },
 

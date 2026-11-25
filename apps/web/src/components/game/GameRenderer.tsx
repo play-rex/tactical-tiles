@@ -33,6 +33,7 @@ import { LivingMapLayer } from './renderer/LivingMapLayer';
 import { DropAndPromoLayer } from './renderer/DropAndPromoLayer';
 import { PerimeterApronLayer } from './renderer/PerimeterApronLayer';
 import { KillCamSchematicLayer } from './renderer/KillCamSchematicLayer';
+import { UnitLocatePingLayer } from './renderer/UnitLocatePingLayer';
 import { setLivePixiApp, getLivePixiApp } from '../../core/graphics/livePixiRef';
 import { WeatherSystemMemo as WeatherSystem } from './renderer/WeatherSystem.tsx'; // Explicit .tsx extension
 import { FxMode, subscribeRendererWake, useEffectStore, wakeBattleRenderer } from '../../store/useEffectStore';
@@ -1811,6 +1812,9 @@ export const GameRenderer = () => {
                             gridSize={gridSize}
                             particlePoolRef={particlePoolRef}
                         />
+
+                        {/* 7. HUD LOCATOR PULSE (squad strip click → rings on that unit's tile) */}
+                        <UnitLocatePingLayer />
                     </Container>
 
                     {/* Phase 4: Weather System (Atmosphere) - stays unrotated above board so rain/wind stay screen-upright */}

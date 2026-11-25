@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './src/styles/opChamferGeo.css';
 import './src/styles/killCam.css';
@@ -30,6 +30,7 @@ import { getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { canUnitAttackFromTile } from '@tactical/engine/rules/CombatRules';
 import { SoundFX } from './src/core/audio/SoundFX';
 import { useEffectStore } from './src/store/useEffectStore';
+import { subscribeUnitLocate } from './src/core/unitLocate';
 
 const OnlineErrorToast: React.FC = () => {
   const mode = useGameStore(state => state.mode);
@@ -317,6 +318,10 @@ type Sheet = 'SQUADS' | 'INTEL' | null;
 /** Phones: the map takes the screen; squads, shop, intel and the log open as a sheet over it. */
 const PhoneBattle: React.FC = () => {
   const [sheet, setSheet] = useState<Sheet>(null);
+
+  // Tapping a squad chip pings the board, so get the sheet out of the way.
+  useEffect(() => subscribeUnitLocate(() => setSheet(null)), []);
+
   return (
     <div
       className="opgeo-stage"

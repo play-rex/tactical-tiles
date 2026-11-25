@@ -1,8 +1,9 @@
 
-import { Unit, Tile, AIDifficulty, WeatherState } from '../types';
+import { Unit, Tile, AIDifficulty, WeatherState, SmokeZone } from '../types';
 import { UNIT_STATS } from '../constants/Config';
 import { getManhattanDistance, getTileByIdFast, hasLineOfSight } from '../grid/Pathfinding';
 import { calculateAttackOutcome, canUnitAttackFromTile, getUnitRange } from '../rules/CombatRules';
+import { smokeBlocksLine } from '../tactical/geometry';
 
 interface CombatSimulationResult {
     damageDealt: number; 
@@ -29,7 +30,8 @@ export const findBestTarget = (
     difficulty: AIDifficulty,
     weather: WeatherState,
     gridSize: number,
-    knownEnemies?: Unit[]
+    knownEnemies?: Unit[],
+    smokeZones?: SmokeZone[]
 ): { unit: Unit, score: number } | null => {
     const enemies = knownEnemies ?? allUnits.filter(u => u.owner !== attacker.owner);
     const attTile = getTileByIdFast(mapData, attacker.tileId, gridSize);
@@ -46,7 +48,10 @@ export const findBestTarget = (
         const dist = getManhattanDistance(attTile, enemyTile);
         if (dist > effectiveRange) continue;
 
-        if (hasLineOfSight(attTile, enemyTile, mapData, attacker.type, weather, gridSize)) {
+        if (
+            hasLineOfSight(attTile, enemyTile, mapData, attacker.type, weather, gridSize) &&
+            !smokeBlocksLine(smokeZones, attTile, enemyTile)
+        ) {
             validTargets.push({ unit: enemy, tile: enemyTile, dist });
         }
     }

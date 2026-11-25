@@ -797,6 +797,18 @@ Do this instead:
   Sabotage, a 4-line/3-line/10-lane that catches enough enemies, a flank drop for Paradrop, and
   Overclock only when the battery is low. One purchase per round, tier gates included. EASY
   bots opt out; bots skip Smoke until their target picker models the LOS it removes.
+- **Tactical usage audit (100 HARD bot matches):** fog off — 705 uses; Hunter Drone 486 (69%),
+  Minefield Snapshot 121, Precision 29, Paradrop 20, Sabotage 18, Napalm 13, Overclock 9,
+  Barrage 7, Carpet 2; Smoke 0. Fog on — Radar 100, Hunter 398/834 (48%). Hunter dominates
+  because it is the cheapest weapon with a reliable target and bots average only ~110 gold at
+  the purchase window; value/saving experiments barely moved it, so gold priority is the lever.
+- **Supply drops (shipped):** `AIBrain` builds a path-distance field from landed FIELD/TACTICAL
+  mystery crates plus lit FLARE LZs. Within ~10 path tiles a crate pulls a squad (18 per step,
+  45 for stepping onto it), and a crate underfoot is worth more than a normal objective. Across
+  30 bot-vs-bot sims (MEDIUM), crate claims went from 34 Field / 19 Tactical to **90 / 53**,
+  with 29/30 matches claiming a Field crate and 27/30 a Tactical one. A 100-seed paired
+  HARD combat check found **0 stalls in both arms**; kills 7.87→8.08, hits 26.4→28.5, HQ
+  damage 51.7→53.1, rounds 12.4→13.2, attacks 10.7→10.0 — no sign of bots avoiding fights.
 - `sim-playtest.ts`: add a weapon ledger (bought / used / payoff per weapon) so the lab can
   report weapons bought per match and payoff events per weapon. Success = weapons appear in
   ~60–80% of matches, and the dead-turn % does not rise (a weapon turn must still be a turn).

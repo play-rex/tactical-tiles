@@ -1,4 +1,5 @@
-import { Tile, Unit, GameSettings, WeatherState, AIDifficulty, VictoryMode, SupplyLootType, LandMine, PerkId, SharedContract, FinalPushStatus } from '../types';
+import { Tile, Unit, GameSettings, WeatherState, AIDifficulty, VictoryMode, SupplyLootType, LandMine, PerkId, SharedContract, FinalPushStatus, ActiveAirDrop, SmokeZone } from '../types';
+import { smokeBlocksLine } from '../tactical/geometry';
 import { UNIT_STATS, TERRAIN_DEFENSE, RESPAWN_CP_COST, CP_SYSTEM, SHOP_ITEMS, DOOMSDAY_SETTINGS, TERRAIN_COSTS, BANK_STATS, BASE_STATS, OVERWATCH_STATS, AGGRESSION_AFTER_ROUNDS, AGGRESSION_START_ROUND } from '../constants/Config';
 import {
     getValidMovesWithParents,
@@ -60,6 +61,10 @@ interface GameStateProxy {
   contract?: SharedContract | null;
   /** The bot's Final Push token, if the endgame has granted one. */
   finalPush?: FinalPushStatus;
+  /** Incoming Theater Air Supply Drops; FLARE entries expose the exact LZ. */
+  airDrops?: ActiveAirDrop[];
+  /** Active Smoke Screen clouds blocking LOS and Overwatch both ways. */
+  smokeZones?: SmokeZone[];
 }
 
 const BFS_DIRS = [[0, -1], [0, 1], [-1, 0], [1, 0]] as const;
@@ -172,7 +177,8 @@ const evaluatePosition = (
     doomsdayEnabled: boolean,
     totalTurns: number,
     gridSize: number,
-    fogEnabled: boolean
+    fogEnabled: boolean,
+    supplyDistField: Int32Array | null = null
 ): number => {
   let score = 0;
   const unitStats = UNIT_STATS[unit.type];
@@ -257,8 +263,20 @@ const evaluatePosition = (
   if (tile.type === 'BANK' && (tile.hackProgress || 0) < 100) {
       score += 45;
   }
-  if (tile.loot) {
+  if (tile.loot && tile.loot !== 'FIELD_SUPPLY' && tile.loot !== 'TACTICAL_SUPPLY') {
       score += 80;
+  }
+
+  // E2. Supply drops. A mystery crate underfoot is the strongest local objective, and a
+  // nearby crate (or a lit FLARE LZ) pulls a squad in from up to 8 path tiles. Beyond that
+  // the troop keeps playing the normal objective game instead of crossing the map.
+  const rawSupplyDist = supplyDistField ? supplyDistField[tileIdx] : -1;
+  if (tile.loot === 'TACTICAL_SUPPLY') {
+      score += 150;
+  } else if (tile.loot === 'FIELD_SUPPLY') {
+      score += 110;
+  } else if (rawSupplyDist > 0 && rawSupplyDist <= 8) {
+      score += (9 - rawSupplyDist) * 6;
   }
 
   // F. Base Siege (Conquer Mode)
@@ -498,7 +516,7 @@ const AI_PERK_CHOICE: Record<Unit['type'], PerkId> = {
 };
 
 const checkOverclock = (gameState: GameStateProxy): AIAction | null => {
-  const { playerCp, playerCpDebt = 0, playerCpBorrowed = 0, units, currentPlayer, mapData, weather, gridSize } = gameState;
+  const { playerCp, playerCpDebt = 0, playerCpBorrowed = 0, units, currentPlayer, mapData, weather, gridSize, smokeZones } = gameState;
   if (playerCpBorrowed > 0 || playerCpDebt > 0) return null;
   const enemies = units.filter(u => u.owner !== currentPlayer);
   const borrow = (cost: number): number => {
@@ -517,7 +535,7 @@ const checkOverclock = (gameState: GameStateProxy): AIAction | null => {
       for (const enemy of enemies) {
         const et = getTileByIdFast(mapData, enemy.tileId, gridSize);
         if (!et || getManhattanDistance(tile, et) > range) continue;
-        if (!hasLineOfSight(tile, et, mapData, unit.type, weather, gridSize)) continue;
+        if (!hasLineOfSight(tile, et, mapData, unit.type, weather, gridSize) || smokeBlocksLine(smokeZones, tile, et)) continue;
         if (enemy.hp <= getUnitBaseDamage(unit)) return { type: 'OVERCLOCK', amount: atkShort };
       }
     }
@@ -533,7 +551,7 @@ const checkOverclock = (gameState: GameStateProxy): AIAction | null => {
       for (const t of mapData) {
         if (t.type !== 'BANK' || (t.hp ?? 0) <= 0 || (t.hackProgress ?? 0) >= 100) continue;
         if (getManhattanDistance(tile, t) > range) continue;
-        if (!hasLineOfSight(tile, t, mapData, unit.type, weather, gridSize)) continue;
+        if (!hasLineOfSight(tile, t, mapData, unit.type, weather, gridSize) || smokeBlocksLine(smokeZones, tile, t)) continue;
         if ((t.hp ?? 0) <= calculateSiegeDamage(unit, tile, 'BANK')) return { type: 'OVERCLOCK', amount: atkShort };
       }
     }
@@ -542,7 +560,7 @@ const checkOverclock = (gameState: GameStateProxy): AIAction | null => {
 };
 
 export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
-  const { mapData, units, currentPlayer, playerCp, playerGold, playerRespawns, graveyard, difficulty, weather, victoryMode, gridSize, settings, totalTurns } = gameState;
+  const { mapData, units, currentPlayer, playerCp, playerGold, playerRespawns, graveyard, difficulty, weather, victoryMode, gridSize, settings, totalTurns, smokeZones } = gameState;
   const myUnits = units.filter(u => u.owner === currentPlayer && !u.completed && !u.isRooted);
 
   // --- LAST-STAND ENDGAME: every remaining side fields ≤1 unit and I cannot
@@ -622,6 +640,17 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
   const baseDistCache = new Map<string, Int32Array | null>();
   const barTiles = mapData.filter(t => t.type === 'BARRIER' && t.hp !== undefined && t.hp > 0);
 
+  // Supply objectives: landed mystery crates plus the exact LZ of a flared incoming drop,
+  // so a squad is already close when the crate touches down.
+  const supplyTiles = mapData.filter(t => t.loot === 'FIELD_SUPPLY' || t.loot === 'TACTICAL_SUPPLY');
+  for (const d of gameState.airDrops ?? []) {
+      if (d.phase !== 'FLARE') continue;
+      const lz = d.tileId ? getTileByIdFast(mapData, d.tileId, gridSize) : undefined;
+      if (lz && !supplyTiles.includes(lz)) supplyTiles.push(lz);
+  }
+  const groundSupplyDistField = computePathDistanceField(supplyTiles, mapData, gridSize, false);
+  const sniperSupplyDistField = computePathDistanceField(supplyTiles, mapData, gridSize, true);
+
   // Precompute Overwatch coverage ONCE instead of per-candidate-tile; defer enemy team vision unless a path actually touches Overwatch
   const visibleOverwatchers = difficulty === 'HARD'
       ? enemyUnits.filter(u => u.isOverwatching === true && u.ammo > 0)
@@ -644,6 +673,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
     const adj = [uTile, ...getNeighbors(uTile, mapData, gridSize)];
     const canClimbMountain = unit.type === 'SNIPER';
     const enemyDistField = canClimbMountain ? sniperEnemyDistField : groundEnemyDistField;
+    const supplyDistField = canClimbMountain ? sniperSupplyDistField : groundSupplyDistField;
 
     // Pick closest enemy base for this unit
     let targetBase: Tile | undefined;
@@ -715,7 +745,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
 
     // D. Attack Unit
     if (playerCp >= attackCost && unit.ammo > 0 && canAttackFromHere) {
-        const result = findBestTarget(unit, enemyUnits, mapData, difficulty, weather, gridSize, enemyUnits);
+        const result = findBestTarget(unit, enemyUnits, mapData, difficulty, weather, gridSize, enemyUnits, smokeZones);
         // Contract weighting: a kill that finishes the round's card is worth more than a body.
         const contractAttackBonus = !result || !liveContract ? 0
             : liveContract === 'ACE_HUNT' ? ((result.unit.rank ?? 0) >= 2 ? 45 : 0)
@@ -735,7 +765,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         (!aiVisibleSet || aiVisibleSet.has(targetBase.id))) {
          const dist = getManhattanDistance(uTile, targetBase);
          if (dist <= effectiveRange) {
-             const hasLOS = hasLineOfSight(uTile, targetBase, mapData, unit.type, weather, gridSize);
+             const hasLOS = hasLineOfSight(uTile, targetBase, mapData, unit.type, weather, gridSize) && !smokeBlocksLine(smokeZones, uTile, targetBase);
              if (hasLOS) {
                  const siegeDmg = calculateSiegeDamage(unit, uTile);
                  let siegeScore = difficulty === 'EASY' ? 50 : 120;
@@ -753,7 +783,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
     // E2. Siege unbreached Bank vaults (breaching runs for Scouts & Breachers — Snipers can't crack vaults)
     if (unit.type !== 'SNIPER' && playerCp >= attackCost && unit.ammo > 0 && canAttackFromHere) {
         const vault = activeBanks
-            .filter(b => (!aiVisibleSet || aiVisibleSet.has(b.id)) && getManhattanDistance(uTile, b) <= effectiveRange && hasLineOfSight(uTile, b, mapData, unit.type, weather, gridSize))
+            .filter(b => (!aiVisibleSet || aiVisibleSet.has(b.id)) && getManhattanDistance(uTile, b) <= effectiveRange && hasLineOfSight(uTile, b, mapData, unit.type, weather, gridSize) && !smokeBlocksLine(smokeZones, uTile, b))
             .sort((a, c) => getManhattanDistance(uTile, a) - getManhattanDistance(uTile, c))[0];
         if (vault) {
             const vaultDmg = calculateSiegeDamage(unit, uTile, 'BANK');
@@ -772,7 +802,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         for (const barrier of barTiles) {
             if (getManhattanDistance(uTile, barrier) > effectiveRange) continue;
             if (aiVisibleSet && !aiVisibleSet.has(barrier.id)) continue;
-            const hasLOS = hasLineOfSight(uTile, barrier, mapData, unit.type, weather, gridSize);
+            const hasLOS = hasLineOfSight(uTile, barrier, mapData, unit.type, weather, gridSize) && !smokeBlocksLine(smokeZones, uTile, barrier);
             if (hasLOS) {
                 let demolishScore = 20;
                 if (unit.type === 'ASSAULTER') demolishScore += 20;
@@ -791,7 +821,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         const currentScore = evaluatePosition(
             uTile, unit, enemyTiles, activeBanks, enemyBases, difficulty, victoryMode,
             targetBase, enemyDistField, baseDistField,
-            settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar
+            settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar, supplyDistField
         );
 
         const { validMoves: moveMap, parents: moveParents } = getValidMovesWithParents(
@@ -819,11 +849,22 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
             const destScore = evaluatePosition(
                 destTile, unit, enemyTiles, activeBanks, enemyBases, difficulty, victoryMode,
                 targetBase, enemyDistField, baseDistField,
-                settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar
+                settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar, supplyDistField
             );
 
             // Net positional gain minus tiny CP friction; avoids stepping back onto worse tiles
             let moveValue = (destScore - currentScore) - cost * 0.5;
+
+            // Supply contest: a step that closes on a crate (or a flared LZ) is worth a detour.
+            // The score term above is relative, so without this a 6-point-per-tile gradient is
+            // too weak to pull a squad off its combat lane and the crate is never claimed.
+            if (supplyDistField) {
+                const before = supplyDistField[uTile.y * gridSize + uTile.x];
+                const after = supplyDistField[destTile.y * gridSize + destTile.x];
+                if (after >= 0 && after <= 10 && (before < 0 || after < before)) {
+                    moveValue += after === 0 ? 45 : 18;
+                }
+            }
 
             const neighbors = getNeighbors(destTile, mapData, gridSize);
             if (neighbors.some(n => n.type === 'BANK' && (n.hackProgress || 0) < 100)) moveValue += 18;
@@ -843,7 +884,8 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
                     const canStrikeFrom = (t: Tile) =>
                         canUnitAttackFromTile(unit, t) &&
                         getManhattanDistance(t, hunt) <= getUnitRange(unit, mapData, weather, t) &&
-                        hasLineOfSight(t, hunt, mapData, unit.type, weather, gridSize);
+                        hasLineOfSight(t, hunt, mapData, unit.type, weather, gridSize) &&
+                        !smokeBlocksLine(smokeZones, t, hunt);
                     // Last stand is all-or-nothing; the aggression clock only tilts the choice.
                     const strikeBonus = lastStand ? 500 : 260;
                     const stepBonus = lastStand ? 200 : 40;

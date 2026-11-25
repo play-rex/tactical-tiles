@@ -31,5 +31,7 @@ export function botAction(state: GameState, difficulty: AIDifficulty = state.set
     lastHqDamageRound: state.lastHqDamageRound,
     contract: state.contract ?? null,
     finalPush: state.finalPush?.[p],
+    airDrops: state.airDrops,
+    smokeZones: state.smokeZones,
   }) as GameAction;
 }

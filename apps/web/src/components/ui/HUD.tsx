@@ -5,6 +5,7 @@ import { useEffectStore } from '../../store/useEffectStore';
 import { useOnline } from '../../net/useOnline';
 import { useCopyState } from '../../hooks/useCopyState';
 import { TacticalShop } from './TacticalShop';
+import { PlayerSquadStrip } from './PlayerSquadStrip';
 import { getHoverMoveResolution, computeUnitAttackPreview, getHoveredEnemyBlocker } from '../../core/hoverMovePreview';
 import {
   UNIT_STATS,
@@ -13,7 +14,6 @@ import {
   CP_SYSTEM,
   GOLD_SETTINGS,
   LAND_MINE_STATS,
-  RESPAWN_CP_COST,
   SHOP_ITEMS,
   BUILDING_STATS,
   BARRIER_STATS,
@@ -358,11 +358,10 @@ export const LeftPanel: React.FC = React.memo(() => {
   const executeAiAction = useGameStore(state => state.executeAiAction);
   const playerGold = useGameStore(state => state.playerGold);
   const playerRespawns = useGameStore(state => state.playerRespawns);
+  const viewer = useGameStore(viewerSeat);
   const playerStatus = useGameStore(state => state.playerStatus);
   const playerInventory = useGameStore(state => state.playerInventory);
   const playerShopVouchers = useGameStore(state => state.playerShopVouchers);
-  const handleGraveyardSelect = useGameStore(state => state.handleGraveyardSelect);
-  const selectedGraveyardUnitId = useGameStore(state => state.selectedGraveyardUnitId);
   const selectInventoryItem = useGameStore(state => state.selectInventoryItem);
   const selectedInventoryItemIndex = useGameStore(state => state.selectedInventoryItemIndex);
   const graveyard = useGameStore(state => state.graveyard);
@@ -549,6 +548,23 @@ export const LeftPanel: React.FC = React.memo(() => {
             </GeoButton>
           )}
 
+          {/* Collapsed 5–6P card: make fallen units impossible to miss even before expanding. */}
+          {isCompactMode && !isExpanded && pid === viewer && casualties.length > 0 && (
+            <GeoButton
+              variant="softBlue"
+              fullWidth
+              onClick={e => {
+                e.stopPropagation();
+                setExpandedId(pid);
+              }}
+              title="Fallen units are waiting — expand this squad to redeploy them"
+              coreStyle={{ padding: '4px 8px', justifyContent: 'space-between', fontSize: '10px', fontWeight: 900 }}
+            >
+              <span>⚑ {casualties.length} FALLEN</span>
+              <span>RESPAWN →</span>
+            </GeoButton>
+          )}
+
           {/* Expanded Section: Inventory & Respawn Queue */}
           {isExpanded && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', animation: 'fadeIn 0.25s' }}>
@@ -581,78 +597,15 @@ export const LeftPanel: React.FC = React.memo(() => {
                 </div>
               )}
 
-              {casualties.length > 0 ? (
-                <div style={{ borderTop: '1px solid var(--op-line)', paddingTop: '5px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--op-ink-muted)', fontWeight: 800, marginBottom: '4px' }}>
-                    <span>CASUALTIES</span>
-                    <span>{respawnsLeft} LEFT</span>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '110px', overflowY: 'auto' }} className="opgeo-scroll">
-                    {casualties.map(unit => {
-                      const cost = RESPAWN_CP_COST[unit.type];
-                      const canAfford = (playerCp[pid] ?? 0) >= cost;
-                      const isReady = unit.turnsUntilRespawn === 0;
-                      const isSelected = selectedGraveyardUnitId === unit.id;
-                      const hasRespawns = respawnsLeft > 0;
-                      const canSpawn = isCurrent && isReady && canAfford && hasRespawns;
-
-                      if (canSpawn || isSelected) {
-                        return (
-                          <GeoButton
-                            key={unit.id}
-                            variant={isSelected ? 'mint' : 'softBlue'}
-                            fullWidth
-                            onClick={e => {
-                              e.stopPropagation();
-                              handleGraveyardSelect(unit.id);
-                            }}
-                            coreStyle={{ padding: '4px 8px', justifyContent: 'space-between' }}
-                          >
-                            <span>{UNIT_STATS[unit.type].name.toUpperCase()}</span>
-                            <span>{cost} CP</span>
-                          </GeoButton>
-                        );
-                      }
-
-                      return (
-                        <GeoWell
-                          key={unit.id}
-                          coreStyle={{
-                            padding: '4px 8px',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            fontSize: '12px',
-                            fontWeight: 700,
-                            opacity: isCurrent && isReady && !canAfford ? 0.55 : 1,
-                          }}
-                        >
-                          <span style={{ color: pTheme.ink }}>{UNIT_STATS[unit.type].name.toUpperCase()}</span>
-                          <span style={{ color: 'var(--op-ink-muted)' }}>
-                            {isReady ? `${cost} CP` : `${unit.turnsUntilRespawn}t`}
-                          </span>
-                        </GeoWell>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : (
-                <div
-                  style={{
-                    borderTop: '1px solid var(--op-line)',
-                    paddingTop: '5px',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    fontSize: '12px',
-                    color: 'var(--op-ink-muted)',
-                    fontWeight: 700,
-                  }}
-                >
-                  <span>CASUALTIES • Clear</span>
-                  <span style={{ fontWeight: 800 }}>{respawnsLeft} LEFT</span>
-                </div>
+              {pid === viewer && (
+                <PlayerSquadStrip
+                  seat={pid}
+                  casualties={casualties}
+                  respawnsLeft={respawnsLeft}
+                  cp={playerCp[pid] ?? 0}
+                  canAct={isCurrent && !isAiTurn && winner === null}
+                  accentColor={pTheme.border}
+                />
               )}
             </div>
           )}
