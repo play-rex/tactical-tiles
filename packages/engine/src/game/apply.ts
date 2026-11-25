@@ -8,17 +8,27 @@ import {
   BARRIER_STATS,
   BASE_STATS,
   COMBAT_BONUSES,
+  CP_OVERFLOW_GOLD_RATE,
+  CP_SYSTEM,
+  DOOMSDAY_ESCALATION,
+  DOOMSDAY_SETTINGS,
   GOLD_SETTINGS,
+  MOMENTUM_REFUNDS,
   LAND_MINE_STATS,
+  MATCH_ROUND_CAP,
   OVERWATCH_STATS,
+  RESPAWN_CP_COST,
   RESPAWN_TIMERS,
   SHOP_ITEMS,
   UNIT_STATS,
   VETERANCY_CONFIG,
 } from '../constants/Config';
-import type { BuildingSubType, DeadUnit, LandMine, LogEntry, MatchPlayerStats, PendingDrop, SupplyLootType, TerrainType, Tile, Unit, UnitType } from '../types';
+import type { BuildingSubType, DeadUnit, FinalPushStatus, LandMine, LogEntry, MatchPlayerStats, PendingDrop, SharedContract, SupplyLootType, TerrainType, Tile, Unit, UnitType } from '../types';
+import { isSpectatorWindowRound, SPECTATOR_EFFECTS } from './SpectatorOps';
+import { CONTRACT_DURATION_ROUNDS, CONTRACT_UNDERDOG_CP, CONTRACT_UNDERDOG_GOLD, contractDef, contractProgressFor, dealContract, lastPlaceSeat, toSharedContract, type ContractEvent } from './Contracts';
+import { isPerkForClass, PERK_LABELS } from '../constants/Perks';
 import { getManhattanDistance, getTileByIdFast } from '../grid/Pathfinding';
-import { updateDoomsdayState } from '../grid/DoomsdayManager';
+import { getDoomsdayEscalation, updateDoomsdayState } from '../grid/DoomsdayManager';
 import {
   applyUnitXp,
   calculateAttackOutcome,
@@ -433,20 +443,35 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   const {
     mapData, units, currentPlayer, playerCp, playerGold, graveyard, settings, weather, playerRespawns,
     totalTurns, turnCounter, playerStatus, gridSize, bankRewardPending, pendingDrops, playerInventory,
+    playerCpDebt = {},
+    playerCpBorrowed = {},
+    playerCpRefunded = {},
     mines = [],
+    firstContactDone = false,
+    contract = null,
+    contractsUsed = [],
+    contractProgress = {},
+    contractMisses = 0,
+    finalPush = {},
+    spectatorTurn = null,
+    spectatorWindow = 0,
+    spectatorUsedRound = null,
   } = state;
   const reject = (reason: string): ApplyResult => ({ state, events: [], rejected: reason });
   const fx = new Fx();
 
   if (state.winner !== null) return reject('Match is already over');
 
-  // Not enough CP for the action (ending the turn is always free)
-  if (action.type !== 'END_TURN' && playerCp[currentPlayer] < actionCost(action)) {
+  // Not enough CP for the action (ending the turn and a spectator window are always free)
+  if (action.type !== 'END_TURN' && action.type !== 'SPECTATOR_ATTACK' && playerCp[currentPlayer] < actionCost(action)) {
     return reject('Not enough CP');
   }
 
   let newMap = [...mapData];
   let newUnits = [...units];
+  const newPlayerCpDebt = { ...playerCpDebt };
+  const newPlayerCpBorrowed = { ...playerCpBorrowed };
+  const newPlayerCpRefunded = { ...playerCpRefunded };
   let newGraveyard = [...graveyard];
   let newWinner = state.winner;
   let newTotalTurns = totalTurns;
@@ -466,12 +491,130 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   let logEntry: LogEntry | null = null;
   const extraLogs: LogEntry[] = [];
   const currentRound = totalTurns + 1;
+  let nextLastHqDamageRound = state.lastHqDamageRound ?? 0;
+
+  // ── Phase 3 match arc state ──
+  let newFirstContactDone = firstContactDone;
+  let newContract: SharedContract | null = contract;
+  let newContractsUsed = [...contractsUsed];
+  let newContractProgress = { ...contractProgress };
+  let newContractMisses = contractMisses;
+  const newFinalPush: Record<number, FinalPushStatus> = { ...finalPush };
+  let newSpectatorTurn: number | null = spectatorTurn;
+  let newSpectatorWindow = spectatorWindow;
+  let newSpectatorUsedRound: number | null = spectatorUsedRound;
 
   const spendCp = (cost: number) => {
     nextPlayerCp[currentPlayer] -= cost;
   };
   const spendGold = (cost: number) => {
     nextPlayerGold[currentPlayer] -= cost;
+  };
+  /**
+   * Momentum refund: pays outstanding Overclock debt first, then adds CP, and stops at the
+   * per-turn cap so a chain of kills cannot refill the whole battery.
+   */
+  /** True when a living ally with Bulwark stands next to the target. */
+  const hasAdjacentBulwark = (target: Unit): boolean => {
+    const t = getTileByIdFast(newMap, target.tileId, gridSize);
+    if (!t) return false;
+    return newUnits.some(u => {
+      if (u.id === target.id || u.owner !== target.owner || u.perk !== 'BULWARK') return false;
+      const ut = getTileByIdFast(newMap, u.tileId, gridSize);
+      return !!ut && getManhattanDistance(t, ut) === 1;
+    });
+  };
+  const refundCp = (playerId: number, amount: number): number => {
+    const used = newPlayerCpRefunded[playerId] ?? 0;
+    const granted = Math.min(amount, Math.max(0, MOMENTUM_REFUNDS.CAP - used));
+    if (granted <= 0) return 0;
+    newPlayerCpRefunded[playerId] = used + granted;
+    const debt = newPlayerCpDebt[playerId] ?? 0;
+    const toDebt = Math.min(debt, granted);
+    if (toDebt > 0) newPlayerCpDebt[playerId] = debt - toDebt;
+    const toCp = granted - toDebt;
+    if (toCp > 0) nextPlayerCp[playerId] = (nextPlayerCp[playerId] ?? 0) + toCp;
+    return granted;
+  };
+
+  // ── Phase 3 match arc ──
+  const arcCpRules = getEffectiveCpRules(settings.mutators);
+  /** Adds CP up to the battery cap and pays any overflow out as gold. Returns CP granted. */
+  const awardCp = (playerId: number, amount: number): number => {
+    if (amount <= 0) return 0;
+    const held = nextPlayerCp[playerId] ?? 0;
+    const room = Math.max(0, arcCpRules.maxCp - held);
+    const granted = Math.min(amount, room);
+    nextPlayerCp[playerId] = held + granted;
+    const overflow = amount - granted;
+    if (overflow > 0) {
+      const converted = overflow * CP_OVERFLOW_GOLD_RATE;
+      nextPlayerGold[playerId] = (nextPlayerGold[playerId] ?? 0) + converted;
+      extraLogs.push(createLog(
+        currentRound,
+        playerId,
+        `Battery full: ${overflow} CP converted to +€${converted}`,
+        'ECONOMY',
+      ));
+    }
+    return granted;
+  };
+
+  /**
+   * The first direct exchange of the match pays both sides once: the attacker for starting it,
+   * the defender so being shot is not a silent tempo loss. Direct attacks and Overwatch hits
+   * only — mines, turrets and artillery are the map, not two armies meeting.
+   */
+  const grantFirstContact = (attacker: number, defender: number, at?: Tile): void => {
+    if (newFirstContactDone || attacker === defender) return;
+    newFirstContactDone = true;
+    awardCp(attacker, 3);
+    awardCp(defender, 2);
+    extraLogs.push(createLog(currentRound, attacker, 'FIRST CONTACT! +3 CP (+2 CP to the defender)', 'COMBAT'));
+    if (at) {
+      fx.popup(at, 'FIRST CONTACT!', '#FDE047', 42);
+      fx.sound('click');
+    }
+  };
+
+  /** Scores one event toward the round's shared contract, and pays it out on completion. */
+  const recordContract = (playerId: number, event: ContractEvent): void => {
+    const live = newContract;
+    if (!live || live.claimedBy !== null) return;
+    const delta = contractProgressFor(live.id, event);
+    if (delta <= 0) return;
+    const next = Math.min(live.target, (newContractProgress[playerId] ?? 0) + delta);
+    newContractProgress[playerId] = next;
+    if (next < live.target) return;
+
+    const def = contractDef(live.id);
+    if (def?.claimableBy && !def.claimableBy(newUnits, playerId)) return;
+
+    // The underdog bonus follows the completion, not the deal: the leader can still race for it.
+    const underdog = lastPlaceSeat(nextPlayerStatus, newUnits, nextPlayerGold) === playerId;
+    const multiplier = newContractMisses > 0 ? 2 : 1;
+    const bonusCp = underdog ? CONTRACT_UNDERDOG_CP * multiplier : 0;
+    const bonusGold = underdog ? CONTRACT_UNDERDOG_GOLD * multiplier : 0;
+    const totalCp = live.rewardCp + bonusCp;
+    const totalGold = live.rewardGold + bonusGold;
+    const grantedCp = awardCp(playerId, totalCp);
+    nextPlayerGold[playerId] = (nextPlayerGold[playerId] ?? 0) + totalGold;
+    newContract = { ...live, claimedBy: playerId };
+    newContractMisses = 0;
+
+    const purse = [grantedCp > 0 ? `+${grantedCp} CP` : '', totalGold > 0 ? `+€${totalGold}` : ''].filter(Boolean).join(' ');
+    extraLogs.push(createLog(
+      currentRound,
+      playerId,
+      `CONTRACT: ${def?.name ?? live.id} complete! ${purse}${underdog ? ' (underdog)' : ''}`,
+      'ECONOMY',
+    ));
+    const holder = newUnits.find(u => u.owner === playerId);
+    const holderTile = holder ? getTileByIdFast(newMap, holder.tileId, gridSize) : undefined;
+    if (holderTile) {
+      fx.popup(holderTile, grantedCp > 0 ? `CONTRACT +${grantedCp} CP` : 'CONTRACT COMPLETE', '#34D399', 46);
+      fx.sound('capture');
+    }
   };
 
   switch (action.type) {
@@ -548,6 +691,11 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
               killerUnitId: shooter.id,
               killerUnitType: shooter.type,
             });
+            const refund = refundCp(shooter.owner, MOMENTUM_REFUNDS.KILL[mUnit.type]);
+            if (refund > 0) {
+              fx.popup(interceptTile, `+${refund} CP`, '#38BDF8', 34);
+              extraLogs.push(createLog(currentRound, shooter.owner, `Momentum: +${refund} CP`, 'ECONOMY'));
+            }
           }
 
           newUnits = newUnits.map(u => {
@@ -617,6 +765,16 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
             extraLogs,
             fx,
           });
+          recordContract(shooter.owner, { kind: 'DAMAGE', amount: trig.damage });
+          if (trig.victimDead) {
+            recordContract(shooter.owner, {
+              kind: 'KILL',
+              victimRank: mUnit.rank ?? 0,
+              viaOverwatch: true,
+              crossfire: false,
+            });
+          }
+          grantFirstContact(shooter.owner, mUnit.owner, shooterTile);
         }
       }
 
@@ -777,9 +935,15 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].buildingsSecured += 1;
       if (!alreadyCapturedByPlayer) {
         newUnits = grantUnitXp(newUnits, unit.id, 1, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
+        const refund = refundCp(currentPlayer, MOMENTUM_REFUNDS.CAPTURE);
+        if (refund > 0) {
+          fx.popup(targetTile, `+${refund} CP`, '#38BDF8', 30);
+          extraLogs.push(createLog(currentRound, currentPlayer, `Momentum: +${refund} CP`, 'ECONOMY'));
+        }
       }
       fx.capture(targetTile, currentPlayer, targetTile.subType);
       fx.sound('capture');
+      recordContract(currentPlayer, { kind: 'SECURE' });
       logEntry = createLog(currentRound, currentPlayer, `Secured a Building`, 'ECONOMY');
       break;
     }
@@ -804,7 +968,8 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const crossfireSupporters = tarTile ? getCrossfireSupporters(att, tarTile, newUnits, mapData, weather, gridSize) : [];
       const crossfireBonus = crossfireSupporters.length > 0 ? COMBAT_BONUSES.CROSSFIRE_DAMAGE : 0;
       const outcome = calculateAttackOutcome(att, attTile, tarTile, tar.owner, tar, crossfireBonus);
-      const finalDmg = outcome.damage;
+      const bulwarkArmor = hasAdjacentBulwark(tar) ? 1 : 0;
+      const finalDmg = Math.max(1, outcome.damage - bulwarkArmor);
       const remainingHp = tar.hp - finalDmg;
       const isKill = remainingHp <= 0;
       const zeroCpClutch = isKill && action.cost > 0 && (nextPlayerCp[currentPlayer] ?? 0) === 0;
@@ -842,6 +1007,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         });
         fx.popup(tarTile, `-${finalDmg}`, '#FF0000', 10);
         if (crossfireBonus > 0) fx.popup(tarTile, `CROSSFIRE +${crossfireBonus}`, '#F59E0B', 26);
+        if (bulwarkArmor > 0) fx.popup(tarTile, 'BULWARK -1', '#22D3EE', 22);
         fx.shake(finalDmg > 5 ? 12 : 4, tarTile);
         if (isKill) {
           fx.killed(tar, tarTile, 'COMBAT', currentPlayer, {
@@ -893,6 +1059,23 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         extraLogs,
         fx,
       });
+      recordContract(currentPlayer, { kind: 'DAMAGE', amount: finalDmg });
+      if (hitResult.killed) {
+        recordContract(currentPlayer, {
+          kind: 'KILL',
+          victimRank: tar.rank ?? 0,
+          viaOverwatch: false,
+          crossfire: crossfireBonus > 0,
+        });
+      }
+      grantFirstContact(currentPlayer, tar.owner, tarTile);
+      if (hitResult.killed) {
+        const refund = refundCp(currentPlayer, MOMENTUM_REFUNDS.KILL[tar.type]);
+        if (refund > 0) {
+          if (tarTile) fx.popup(tarTile, `+${refund} CP`, '#38BDF8', 34);
+          extraLogs.push(createLog(currentRound, currentPlayer, `Momentum: +${refund} CP`, 'ECONOMY'));
+        }
+      }
       const msg = `${UNIT_STATS[att.type].name} hit ${UNIT_STATS[tar.type].name} for ${finalDmg} dmg${crossfireBonus > 0 ? ' (Crossfire)' : ''}${hitResult.killed ? ' (KILL)' : ''}`;
       logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
       break;
@@ -906,6 +1089,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const attTile = getTileByIdFast(mapData, att.tileId, gridSize);
       const siegeDmg = calculateSiegeDamage(att, attTile, isBank ? 'BANK' : 'BASE');
       const newHp = Math.max(0, targetTile.hp - siegeDmg);
+      if (!isBank && siegeDmg > 0) nextLastHqDamageRound = currentRound;
       newMap = newMap.map(t => t.id === action.tileId
         ? { ...t, hp: newHp, ...(isBank && newHp === 0 ? { hackProgress: 100 } : {}) }
         : t);
@@ -932,6 +1116,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         msg = `${UNIT_STATS[att.type].name} shelled Bank Vault (-${siegeDmg} HP)`;
         if (newHp === 0) {
           if (nextMatchStats[currentPlayer]) nextMatchStats[currentPlayer].heists += 1;
+          recordContract(currentPlayer, { kind: 'HEIST' });
           newUnits = grantUnitXp(newUnits, att.id, 2, newMap, gridSize, currentPlayer, currentRound, nextMatchStats, extraLogs, fx);
           fx.heist(targetTile, currentPlayer);
           fx.sound('heist');
@@ -954,6 +1139,11 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
           } else {
             nextPlayerCp[currentPlayer] += cpReward;
             msg = `Vault came up dry — seized intel +${cpReward} CP`;
+          }
+          const refund = refundCp(currentPlayer, MOMENTUM_REFUNDS.BANK);
+          if (refund > 0) {
+            fx.popup(targetTile, `+${refund} CP`, '#38BDF8', 30);
+            extraLogs.push(createLog(currentRound, currentPlayer, `Momentum: +${refund} CP`, 'ECONOMY'));
           }
           logKind = 'ECONOMY';
         }
@@ -993,6 +1183,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       if (newHp === 0) {
         // A destroyed barrier leaves plains
         newMap = newMap.map(t => t.id === action.tileId ? { ...t, type: 'PLAINS', hp: undefined, maxHp: undefined, height: 1 } : t);
+        recordContract(currentPlayer, { kind: 'BARRIER_DESTROYED' });
         msg = `${UNIT_STATS[att.type].name} destroyed a Barrier!`;
       }
       logEntry = createLog(currentRound, currentPlayer, msg, 'COMBAT');
@@ -1002,15 +1193,18 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       if ((nextPlayerRespawns[currentPlayer] || 0) >= getEffectiveMaxRespawns(settings.mutators)) {
         return reject('No respawns left');
       }
-      const goldCost = action.goldCost || 0;
-      if (nextPlayerGold[currentPlayer] < goldCost) return reject('Not enough Euros');
       if (!action.deadUnitId) return reject('Missing unit to redeploy');
+      const fallen = newGraveyard.find(u => u.id === action.deadUnitId && u.owner === currentPlayer);
+      if (!fallen) return reject('Missing unit to redeploy');
+      // The price comes from the fallen unit's class, not from the message, so a redeploy can't
+      // be bought at another class's CP price.
+      const cpCost = RESPAWN_CP_COST[fallen.type] ?? 0;
+      if (playerCp[currentPlayer] < cpCost) return reject('Not enough CP');
       if (!isValidSpawnTile({ mapData: newMap, units: newUnits, gridSize }, currentPlayer, action.tileId)) {
         return reject("Can't redeploy there");
       }
-      spendCp(actionCost(action));
-      spendGold(goldCost);
-      const unitType = action.unitType as UnitType;
+      spendCp(cpCost);
+      const unitType = fallen.type as UnitType;
       newGraveyard = newGraveyard.filter(u => u.id !== action.deadUnitId);
       nextPlayerRespawns[currentPlayer] = (nextPlayerRespawns[currentPlayer] || 0) + 1;
       newUnits.push(createUnit({
@@ -1176,6 +1370,158 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       logEntry = createLog(currentRound, currentPlayer, `Built ${item.name} at (${tile.x},${tile.y})`, 'ECONOMY');
       break;
     }
+    case 'CHOOSE_PERK': {
+      const unit = newUnits.find(u => u.id === action.unitId && u.owner === currentPlayer);
+      if (!unit) return reject('Pick one of your units');
+      if ((unit.rank ?? 0) < 1) return reject('Only a Veteran can take a perk');
+      if (unit.perk) return reject('That unit already has a perk');
+      if (!isPerkForClass(unit.type, action.perkId)) return reject('That perk is not available to this class');
+      newUnits = newUnits.map(u => u.id === unit.id ? { ...u, perk: action.perkId } : u);
+      logEntry = createLog(currentRound, currentPlayer, `${UNIT_STATS[unit.type].name} took ${PERK_LABELS[action.perkId]}`, 'INFO');
+      break;
+    }
+    case 'OVERCLOCK': {
+      const amount = Math.floor(action.amount);
+      if (!Number.isInteger(amount) || amount < 1 || amount > CP_SYSTEM.OVERCLOCK_MAX) {
+        return reject(`Borrow 1 to ${CP_SYSTEM.OVERCLOCK_MAX} CP`);
+      }
+      if ((newPlayerCpBorrowed[currentPlayer] ?? 0) > 0 || (newPlayerCpDebt[currentPlayer] ?? 0) > 0) {
+        return reject('Already overclocked this turn');
+      }
+      const cpRules = getEffectiveCpRules(settings.mutators);
+      const cap = cpRules.maxCp;
+      const held = nextPlayerCp[currentPlayer] ?? 0;
+      if (held >= cap) return reject('Battery is already full');
+      const granted = Math.min(amount, cap - held);
+      nextPlayerCp[currentPlayer] = held + granted;
+      newPlayerCpDebt[currentPlayer] = granted;
+      newPlayerCpBorrowed[currentPlayer] = granted;
+      fx.sound('click');
+      logEntry = createLog(currentRound, currentPlayer, `Overclocked +${granted} CP (repays next turn)`, 'ECONOMY');
+      break;
+    }
+    case 'SPECTATOR_ATTACK': {
+      if (settings.spectatorAttacks === false) return reject('Spectator attacks are off for this match');
+      const seat = newSpectatorTurn;
+      if (seat === null || seat === undefined || nextPlayerStatus[seat] !== 'ELIMINATED') {
+        return reject('No spectator window is open');
+      }
+      if (newSpectatorUsedRound === currentRound) return reject('Window already used this round');
+      const def = SPECTATOR_EFFECTS.find(e => e.id === action.effectId);
+      if (!def) return reject('Unknown spectator effect');
+
+      const rng = state.activeSeed
+        ? createSeededRng(`${state.activeSeed}_spectator_${currentRound}_${seat}`)
+        : Math.random;
+      const openTiles = newMap.filter(t =>
+        (t.type === 'PLAINS' || t.type === 'FOREST' || t.type === 'SAND' || t.type === 'DUNES') &&
+        t.hazardState !== 'LAVA' &&
+        !newUnits.some(u => u.tileId === t.id),
+      );
+      const pickOpenTile = (): Tile | undefined =>
+        openTiles.length > 0 ? openTiles[Math.floor(rng() * openTiles.length)] : undefined;
+      let msg = '';
+
+      switch (action.effectId) {
+        case 'WAR_LEVY': {
+          for (let pid = 0; pid < settings.playerCount; pid++) {
+            if (nextPlayerStatus[pid] !== 'ACTIVE') continue;
+            nextPlayerGold[pid] = (nextPlayerGold[pid] ?? 0) + 30;
+          }
+          msg = 'War Levy — every surviving player +€30';
+          break;
+        }
+        case 'BANK_BOOM': {
+          newMap = newMap.map(t =>
+            t.type === 'BANK' && (t.hackProgress ?? 0) < 100 && (t.bankGoldReward ?? 0) > 0
+              ? { ...t, bankGoldReward: (t.bankGoldReward ?? 0) + 50 }
+              : t,
+          );
+          msg = 'Bank Boom — every open vault +€50';
+          break;
+        }
+        case 'SUPPLY_DROP': {
+          const tile = pickOpenTile();
+          if (!tile) return reject('No open ground for a supply drop');
+          const items: SupplyLootType[] = ['AMMO', 'FIRST_AID', 'MEDKIT'];
+          const item = items[Math.floor(rng() * items.length)];
+          newMap = newMap.map(t => (t.id === tile.id ? { ...t, loot: item } : t));
+          fx.supplyLanded(tile, item);
+          fx.sound('capture');
+          msg = `Supply Drop — ${item} crate landed`;
+          break;
+        }
+        case 'REPAIR_SURGE': {
+          const worstSeat = lastPlaceSeat(nextPlayerStatus, newUnits, nextPlayerGold);
+          const hurt = newUnits
+            .filter(u => u.hp < (u.maxHp ?? u.hp))
+            .sort((a, b) => {
+              const aLost = a.hp / (a.maxHp ?? a.hp);
+              const bLost = b.hp / (b.maxHp ?? b.hp);
+              if (worstSeat >= 0 && (a.owner === worstSeat) !== (b.owner === worstSeat)) {
+                return a.owner === worstSeat ? -1 : 1;
+              }
+              return aLost - bLost;
+            })[0];
+          if (!hurt) return reject('No damaged unit to repair');
+          const healed = Math.min(5, (hurt.maxHp ?? hurt.hp) - hurt.hp);
+          newUnits = newUnits.map(u => (u.id === hurt.id ? { ...u, hp: u.hp + healed } : u));
+          const hurtTile = getTileByIdFast(newMap, hurt.tileId, gridSize);
+          if (hurtTile) {
+            fx.heal(hurt.id, hurtTile, healed, 'FIRST_AID');
+            fx.popup(hurtTile, `+${healed} HP`, '#4ADE80', 24);
+          }
+          msg = `Repair Surge — P${hurt.owner + 1} ${UNIT_STATS[hurt.type].name} +${healed} HP`;
+          break;
+        }
+        case 'STATIC_STORM': {
+          const tile = pickOpenTile();
+          if (!tile) return reject('No open ground for a storm');
+          const victims = newUnits.filter(u => {
+            const ut = getTileByIdFast(newMap, u.tileId, gridSize);
+            return ut && getManhattanDistance(ut, tile) <= 1;
+          });
+          let hits = 0;
+          for (const victim of victims) {
+            // Never lethal: a spectator may soften a lane, not decide a fight.
+            const dmg = Math.min(2, Math.max(0, victim.hp - 1));
+            if (dmg <= 0) continue;
+            newUnits = newUnits.map(u => (u.id === victim.id ? { ...u, hp: u.hp - dmg } : u));
+            const vt = getTileByIdFast(newMap, victim.tileId, gridSize);
+            if (vt) {
+              fx.hit({ targetUnitId: victim.id, at: vt, damage: dmg, weapon: 'ARTILLERY' });
+              fx.popup(vt, `-${dmg}`, '#A78BFA', 18);
+            }
+            hits += 1;
+          }
+          msg = hits > 0 ? `Static Storm — ${hits} unit(s) caught for 2` : 'Static Storm — the storm missed';
+          break;
+        }
+      }
+
+      newSpectatorUsedRound = currentRound;
+      fx.sound('click');
+      logEntry = createLog(currentRound, seat, `SPECTATOR ATTACK — ${msg}`, 'COMBAT');
+      break;
+    }
+    case 'FINAL_PUSH': {
+      if (settings.victoryMode !== 'DEATHMATCH') return reject('Final Push is a Deathmatch rule');
+      if (newFinalPush[currentPlayer] !== 'READY') return reject('No Final Push token');
+      newFinalPush[currentPlayer] = 'USED';
+      const rules = getEffectiveCpRules(settings.mutators);
+      nextPlayerCp[currentPlayer] = rules.maxCp;
+      newPlayerCpDebt[currentPlayer] = 0;
+      // The borrow flag stays set: a refill must not unlock a second Overclock this turn.
+      const holder = newUnits.find(u => u.owner === currentPlayer);
+      const holderTile = holder ? getTileByIdFast(newMap, holder.tileId, gridSize) : undefined;
+      if (holderTile) {
+        fx.popup(holderTile, 'FINAL PUSH', '#F472B6', 44);
+        fx.shake(6, holderTile);
+      }
+      fx.sound('turn');
+      logEntry = createLog(currentRound, currentPlayer, 'FINAL PUSH! Battery refilled.', 'ECONOMY');
+      break;
+    }
     case 'END_TURN': {
       newBankReward = null;
       logEntry = createLog(currentRound, currentPlayer, `Ended Turn`, 'INFO');
@@ -1192,6 +1538,9 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       newPendingDrops = [];
 
       const nextId = nextActivePlayer(currentPlayer, settings.playerCount, nextPlayerStatus);
+      // A fresh turn gets a fresh momentum budget and a fresh Overclock allowance.
+      newPlayerCpRefunded[nextId] = 0;
+      newPlayerCpBorrowed[nextId] = 0;
       if (nextId === 0 || nextId < currentPlayer) newTotalTurns += 1;
       const newTurnCounter = turnCounter + 1;
 
@@ -1214,7 +1563,30 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
 
       const cp = nextPlayerCp[nextId];
       const cpRules = getEffectiveCpRules(settings.mutators);
-      nextPlayerCp[nextId] = Math.min(cpRules.maxCp, cp + cpRules.regenAmount + overwatchRefund);
+      const doomsdayActive = settings.victoryMode === 'DEATHMATCH' && settings.doomsdayEnabled;
+      const escalation = getDoomsdayEscalation(newTotalTurns, doomsdayActive);
+      const regenAmount = cpRules.regenAmount + escalation.regenBonus;
+      const collapseTurn = DOOMSDAY_SETTINGS.START_TURN;
+      const meltdownTurn = collapseTurn + DOOMSDAY_ESCALATION.MELTDOWN_RING * DOOMSDAY_SETTINGS.SHRINK_INTERVAL;
+      if (doomsdayActive && (newTotalTurns === collapseTurn || newTotalTurns === meltdownTurn)) {
+        extraLogs.push(createLog(currentRound, -1, `Doomsday ${escalation.label}: all CP regen +${escalation.regenBonus}`, 'ECONOMY'));
+      }
+      // Relay counts once per player, no matter how many Scouts carry it.
+      const relayBonus = newUnits.some(u => u.owner === nextId && u.perk === 'RELAY') ? 1 : 0;
+      if (relayBonus > 0) {
+        extraLogs.push(createLog(currentRound, nextId, `Relay: +1 CP regen`, 'ECONOMY'));
+      }
+      // Overclock debt is collected automatically out of this regen before any CP is added.
+      const debt = newPlayerCpDebt[nextId] ?? 0;
+      const repaid = Math.min(debt, regenAmount);
+      if (repaid > 0) {
+        newPlayerCpDebt[nextId] = debt - repaid;
+        extraLogs.push(createLog(currentRound, nextId, `Overclock debt repaid -${repaid} CP`, 'ECONOMY'));
+      }
+      nextPlayerCp[nextId] = Math.min(
+        cpRules.maxCp,
+        cp + regenAmount - repaid + overwatchRefund + relayBonus,
+      );
       if (overwatchRefund > 0) {
         extraLogs.push(createLog(currentRound, nextId, `Unfired Overwatch refunded +${overwatchRefund} CP`, 'INFO'));
       }
@@ -1223,7 +1595,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         if (newMap[i].type === 'BUILDING' && newMap[i].owner === nextId) ownedBuildings++;
       }
       const buildingGold = ownedBuildings * GOLD_SETTINGS.BUILDING_INCOME;
-      nextPlayerGold[nextId] += GOLD_SETTINGS.INCOME_PER_TURN + buildingGold;
+      nextPlayerGold[nextId] += (settings.goldIncome ?? GOLD_SETTINGS.INCOME_PER_TURN) + buildingGold;
       if (buildingGold > 0) {
         extraLogs.push(createLog(currentRound, nextId, `Territory income: +€${buildingGold} from ${ownedBuildings} Building${ownedBuildings > 1 ? 's' : ''}`, 'ECONOMY'));
       }
@@ -1413,6 +1785,41 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     }
   }
 
+  // ── Match-level stalemate backstop ──
+  // Some boards (islands, fog, heavy forest) let both sides settle into a standoff that neither
+  // can break: no HQ damage, no eliminations, just passing until the action cap. Rather than let
+  // that run forever, fortress strength decides at the cap — HQ HP first, then surviving army,
+  // then unspent CP — exactly the tiebreak already used for mutual annihilation.
+  if (newWinner === null && !state.activeMission && newTotalTurns >= MATCH_ROUND_CAP) {
+    let bestPid = -1;
+    let bestScore = -1;
+    let tie = false;
+    for (let pid = 0; pid < settings.playerCount; pid++) {
+      if (nextPlayerStatus[pid] !== 'ACTIVE') continue;
+      const hqHp = newMap
+        .filter(t => t.type === 'BASE' && t.owner === pid)
+        .reduce((sum, t) => sum + (t.hp || 0), 0);
+      const armyHp = newUnits.filter(u => u.owner === pid).reduce((sum, u) => sum + u.hp, 0);
+      const score = hqHp * 1000 + armyHp * 10 + (nextPlayerCp[pid] ?? 0);
+      if (score > bestScore) {
+        bestScore = score;
+        bestPid = pid;
+        tie = false;
+      } else if (score === bestScore) {
+        tie = true;
+      }
+    }
+    newWinner = tie || bestPid === -1 ? 'DRAW' : bestPid;
+    extraLogs.push(createLog(
+      currentRound,
+      -1,
+      newWinner === 'DRAW'
+        ? `Round ${MATCH_ROUND_CAP} — fortresses and armies stand equal. Draw!`
+        : `Round ${MATCH_ROUND_CAP} — Player ${newWinner + 1} holds the strongest position!`,
+      'COMBAT',
+    ));
+  }
+
   const actualNextPlayer = action.type === 'END_TURN'
     ? nextActivePlayer(state.currentPlayer, settings.playerCount, nextPlayerStatus)
     : currentPlayer;
@@ -1442,6 +1849,98 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       } else if (mission.turnLimit && elapsedCompleted >= mission.turnLimit) {
         newWinner = 1;
         extraLogs.push(createLog(currentRound, -1, `Turn Limit (${mission.turnLimit} rounds) expired — Mission Failed`, 'INFO'));
+      }
+    }
+  }
+
+  // ── Phase 3 match arc: Final Push tokens and the next round's contract ──
+  if (newWinner === null && !mission) {
+    // Final Push: one battery refill per player, granted by match state rather than a round number.
+    if (settings.victoryMode === 'DEATHMATCH') {
+      const doomsdayActive = Boolean(settings.doomsdayEnabled);
+      const living = newUnits.length;
+      const someoneAtOne = Object.keys(nextPlayerStatus).some(key => {
+        const pid = Number(key);
+        return nextPlayerStatus[pid] === 'ACTIVE' && newUnits.filter(u => u.owner === pid).length === 1;
+      });
+      const triggered = doomsdayActive
+        ? newTotalTurns >= DOOMSDAY_SETTINGS.START_TURN
+        : living <= 4 || someoneAtOne;
+      if (triggered) {
+        for (let pid = 0; pid < settings.playerCount; pid++) {
+          if (nextPlayerStatus[pid] !== 'ACTIVE' || newFinalPush[pid]) continue;
+          newFinalPush[pid] = 'READY';
+          extraLogs.push(createLog(currentRound, pid, 'FINAL PUSH ready: refill your battery (once).', 'INFO'));
+        }
+      }
+    }
+
+    // Contracts run a fixed window (CONTRACT_DURATION_ROUNDS) so the table has time to finish
+    // one. A card is only replaced after its window closes; an unclaimed one counts as a miss.
+    // The deck refreshes rather than leaving the HUD empty once every card has been used.
+    const activeCount = Object.values(nextPlayerStatus).filter(status => status === 'ACTIVE').length;
+    if (newTotalTurns > totalTurns && activeCount >= 2) {
+      const nextRound = newTotalTurns + 1;
+      const expiresRound = newContract
+        ? (newContract.expiresRound ?? newContract.round + CONTRACT_DURATION_ROUNDS - 1)
+        : 0;
+      if (nextRound > expiresRound) {
+        const ending = newContract;
+        if (ending && ending.claimedBy === null) {
+          newContractMisses += 1;
+          extraLogs.push(createLog(
+            nextRound,
+            -1,
+            `Contract expired: ${contractDef(ending.id)?.name ?? ending.id}`,
+            'INFO',
+          ));
+        }
+        newContract = null;
+        const board = { ...state, units: newUnits, mapData: newMap, matchStats: nextMatchStats };
+        let dealt = dealContract(board, nextRound, newContractsUsed, {
+          preferLowerTier: newContractMisses > 0,
+        });
+        if (!dealt && newContractsUsed.length > 0) {
+          // Deck exhausted: start a fresh cycle, avoiding an immediate repeat of the card just closed.
+          newContractsUsed = ending ? [ending.id] : [];
+          dealt = dealContract(board, nextRound, newContractsUsed, {
+            preferLowerTier: newContractMisses > 0,
+          });
+        }
+        if (dealt) {
+          newContract = toSharedContract(dealt, nextRound);
+          newContractProgress = {};
+          newContractsUsed = [...newContractsUsed, dealt.id];
+          extraLogs.push(createLog(
+            nextRound,
+            -1,
+            `Contract: ${dealt.name} — ${dealt.requirement} (+${dealt.cp} CP${dealt.gold ? `, +€${dealt.gold}` : ''})`,
+            'INFO',
+          ));
+        }
+      }
+    }
+
+    // ── Spectator attacks: eliminated seats take turns holding a window ──
+    // One window every two rounds, rotating through the eliminated seats, so the table never
+    // takes a spectator effect on back-to-back rounds.
+    if (newTotalTurns > totalTurns) {
+      const nextRound = newTotalTurns + 1;
+      const eliminated = Array.from({ length: settings.playerCount }, (_, pid) => pid)
+        .filter(pid => nextPlayerStatus[pid] === 'ELIMINATED');
+      if (settings.spectatorAttacks !== false && eliminated.length > 0 && isSpectatorWindowRound(nextRound)) {
+        const seat = eliminated[newSpectatorWindow % eliminated.length];
+        newSpectatorTurn = seat;
+        newSpectatorWindow += 1;
+        newSpectatorUsedRound = null;
+        extraLogs.push(createLog(
+          nextRound,
+          -1,
+          `Spectator window: P${seat + 1} may fire one map effect this round.`,
+          'INFO',
+        ));
+      } else {
+        newSpectatorTurn = null;
       }
     }
   }
@@ -1493,6 +1992,9 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       units: newUnits,
       graveyard: newGraveyard,
       playerCp: nextPlayerCp,
+      playerCpDebt: newPlayerCpDebt,
+      playerCpBorrowed: newPlayerCpBorrowed,
+      playerCpRefunded: newPlayerCpRefunded,
       playerGold: nextPlayerGold,
       playerRespawns: nextPlayerRespawns,
       playerStatus: nextPlayerStatus,
@@ -1501,6 +2003,16 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       matchStats: nextMatchStats,
       matchSummary: newMatchSummary,
       totalTurns: newTotalTurns,
+      lastHqDamageRound: nextLastHqDamageRound,
+      firstContactDone: newFirstContactDone,
+      contract: newContract,
+      contractsUsed: newContractsUsed,
+      contractMisses: newContractMisses,
+      contractProgress: newContractProgress,
+      finalPush: newFinalPush,
+      spectatorTurn: newSpectatorTurn,
+      spectatorWindow: newSpectatorWindow,
+      spectatorUsedRound: newSpectatorUsedRound,
       turnCounter: action.type === 'END_TURN' ? turnCounter + 1 : turnCounter,
       weather: newWeather,
       currentPlayer: actualNextPlayer,

@@ -18,10 +18,12 @@ import {
   type GameAction,
   type GameState,
 } from '../src/index';
-import { BANK_STATS, BASE_STATS, COMBAT_BONUSES, GOLD_SETTINGS, LAND_MINE_STATS, SHOP_ITEMS } from '../src/constants/Config';
+import { BANK_STATS, BASE_STATS, COMBAT_BONUSES, CP_SYSTEM, GOLD_SETTINGS, LAND_MINE_STATS, MOMENTUM_REFUNDS, RESPAWN_CP_COST, SHOP_ITEMS } from '../src/constants/Config';
+import { getDoomsdayEscalation } from '../src/grid/DoomsdayManager';
 import { getUnitAttackCost, isWithinEnemyHqExclusion } from '../src/rules/CombatRules';
 import { initBankVaults } from '../src/game/setup';
 import { getStepCost } from '../src/grid/Pathfinding';
+import { calculateAttackOutcome, calculateDemolishDamage, calculateOverwatchOutcome } from '../src/rules/CombatRules';
 import type { GameSettings, Tile, Unit } from '../src/types';
 
 const settings = (over: Partial<GameSettings> = {}): GameSettings => ({ ...DEFAULT_GAME_SETTINGS, ...over });
@@ -336,6 +338,53 @@ test('captured buildings grant territory gold on END_TURN and BUY_ITEM allows ta
   if (faTileId !== chosenTileId) {
     assert.equal(afterEnd.state.mapData.find(t => t.id === faTileId)?.loot, 'FIRST_AID');
   }
+});
+
+test('gold economy settings drive starting gold and turn income', () => {
+  assert.equal(DEFAULT_GAME_SETTINGS.startingGold, 200);
+  assert.equal(DEFAULT_GAME_SETTINGS.goldIncome, 20);
+
+  const base = createGeneratedGame(settings({
+    mapSeed: 'GOLDECON', fogOfWar: false, playerCount: 2, startingGold: 300, goldIncome: 15,
+  }));
+  assert.equal(base.playerGold[0], 300);
+  assert.equal(base.playerGold[1], 300);
+
+  const p1Buildings = base.mapData.filter(t => t.type === 'BUILDING' && t.owner === 1).length;
+  const after = applyAction(base, { type: 'END_TURN' });
+  assert.equal(after.rejected, undefined);
+  assert.equal(after.state.playerGold[1], 300 + 15 + p1Buildings * GOLD_SETTINGS.BUILDING_INCOME);
+});
+
+test('Doomsday escalation raises CP regen at Collapse and Meltdown', () => {
+  assert.equal(getDoomsdayEscalation(29, true).stage, 'SKIRMISH');
+  assert.equal(getDoomsdayEscalation(30, true).stage, 'COLLAPSE');
+  assert.equal(getDoomsdayEscalation(30, true).regenBonus, 2);
+  assert.equal(getDoomsdayEscalation(39, true).stage, 'COLLAPSE');
+  assert.equal(getDoomsdayEscalation(40, true).stage, 'MELTDOWN');
+  assert.equal(getDoomsdayEscalation(40, true).regenBonus, 4);
+  assert.equal(getDoomsdayEscalation(40, false).regenBonus, 0);
+
+  const base = createGeneratedGame(settings({
+    mapSeed: 'DOOMSTAGE', fogOfWar: false, playerCount: 2, victoryMode: 'DEATHMATCH', doomsdayEnabled: true,
+  }));
+  const stateAt = (totalTurns: number): GameState => ({
+    ...base,
+    totalTurns,
+    // The last seat ends the round, so the completed-round counter advances before P0 regens.
+    currentPlayer: 1,
+    playerCp: { 0: 5, 1: 10 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpBorrowed: { 0: 0, 1: 0 },
+    playerCpRefunded: { 0: 0, 1: 0 },
+  });
+
+  const collapse = applyAction(stateAt(29), { type: 'END_TURN' }).state;
+  assert.equal(collapse.currentPlayer, 0);
+  assert.equal(collapse.playerCp[0], 5 + CP_SYSTEM.REGEN_AMOUNT + 2);
+
+  const meltdown = applyAction(stateAt(39), { type: 'END_TURN' }).state;
+  assert.equal(meltdown.playerCp[0], 5 + CP_SYSTEM.REGEN_AMOUNT + 4);
 });
 
 test('getAttackBlocker returns accurate tactical reasons when a shot is unavailable', () => {
@@ -882,7 +931,8 @@ test('bank raids: 15 HP vaults breached by siege, snipers barred, vaults randomi
   assert.equal(dry.rejected, undefined);
   assert.equal(dry.state.mapData.find(t => t.id === '2,2')!.hackProgress, 100);
   assert.equal(dry.state.bankRewardPending, null);
-  assert.equal(dry.state.playerCp[0], 20 - getUnitAttackCost(scout) + 12);
+  assert.equal(dry.state.playerCp[0], 20 - getUnitAttackCost(scout) + 12 + MOMENTUM_REFUNDS.BANK);
+  assert.equal(dry.state.playerCpRefunded?.[0], MOMENTUM_REFUNDS.BANK);
 });
 
 test('mutual annihilation: stronger surviving fortress wins, exact tie is an explicit draw', () => {
@@ -1019,11 +1069,11 @@ test('units cannot move onto, pass through, or spawn on Bank, Base, or Barrier t
   assert.equal(spawnTiles.includes('3,2'), false, 'spawn tiles exclude breached Bank');
   for (const badSpawn of ['2,2', '2,3', '3,2']) {
     assert.equal(
-      prepareAction(state, 0, { type: 'SPAWN', unitType: 'SOLDIER', tileId: badSpawn, cost: 0, goldCost: 50, deadUnitId: 'dead_sc' }).ok,
+      prepareAction(state, 0, { type: 'SPAWN', unitType: 'SOLDIER', tileId: badSpawn, cost: 3, deadUnitId: 'dead_sc' }).ok,
       false,
     );
     assert.ok(
-      applyAction(state, { type: 'SPAWN', unitType: 'SOLDIER', tileId: badSpawn, cost: 0, goldCost: 50, deadUnitId: 'dead_sc' }).rejected,
+      applyAction(state, { type: 'SPAWN', unitType: 'SOLDIER', tileId: badSpawn, cost: 3, deadUnitId: 'dead_sc' }).rejected,
     );
   }
 
@@ -1039,6 +1089,407 @@ test('units cannot move onto, pass through, or spawn on Bank, Base, or Barrier t
     assert.notEqual(t.type, 'BANK');
     assert.notEqual(t.type, 'BARRIER');
   }
+});
+
+test('a redeploy the battery cannot pay for is rejected and spends no CP or gold', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'CPRSPN', fogOfWar: false, playerCount: 2 }));
+  const cpCost = RESPAWN_CP_COST.SNIPER;
+  const state: GameState = {
+    ...base,
+    graveyard: [{ id: 'dead_sn', type: 'SNIPER', owner: 0, turnsUntilRespawn: 0 }],
+    currentPlayer: 0,
+    playerCp: { 0: cpCost - 1, 1: 20 },
+    playerGold: { 0: 500, 1: 500 },
+    playerRespawns: { 0: 0, 1: 0 },
+  };
+  const tileId = getSpawnTiles(state, 0)[0];
+  assert.ok(tileId, 'the generated board has a spawn tile');
+
+  // prepareAction prices the Sniper from its class and refuses while one CP short.
+  const prepared = prepareAction(state, 0, {
+    type: 'SPAWN',
+    unitType: 'SNIPER',
+    tileId,
+    cost: cpCost,
+    deadUnitId: 'dead_sn',
+  });
+  assert.equal(prepared.ok, false);
+  assert.equal(prepared.ok === false && prepared.error, 'Not enough CP');
+
+  // A client that claims the redeploy is free cannot underpay: applyAction re-derives the class
+  // price and leaves CP, gold, respawns and the graveyard exactly as they were.
+  const rejected = applyAction(state, {
+    type: 'SPAWN',
+    unitType: 'SNIPER',
+    tileId,
+    cost: 0,
+    deadUnitId: 'dead_sn',
+  });
+  assert.equal(rejected.rejected, 'Not enough CP');
+  assert.equal(rejected.state, state);
+  assert.equal(rejected.state.playerCp[0], cpCost - 1);
+  assert.equal(rejected.state.playerGold[0], 500);
+  assert.equal(rejected.state.playerRespawns[0], 0);
+  assert.equal(rejected.state.graveyard.length, 1);
+
+  // The same redeploy succeeds with exactly enough CP, and still costs no gold.
+  const paid = applyAction({ ...state, playerCp: { 0: cpCost, 1: 20 } }, {
+    type: 'SPAWN',
+    unitType: 'SNIPER',
+    tileId,
+    cost: 0,
+    deadUnitId: 'dead_sn',
+  });
+  assert.equal(paid.rejected, undefined);
+  assert.equal(paid.state.playerCp[0], 0);
+  assert.equal(paid.state.playerGold[0], 500);
+  assert.equal(paid.state.playerRespawns[0], 1);
+  assert.equal(paid.state.graveyard.length, 0);
+});
+
+test('Overclock borrows CP once per turn and repays it automatically from the next regen', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'OVRCLK', fogOfWar: false, playerCount: 2 }));
+  const state: GameState = {
+    ...base,
+    currentPlayer: 0,
+    playerCp: { 0: 15, 1: 10 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpBorrowed: { 0: 0, 1: 0 },
+    playerGold: { 0: 500, 1: 500 },
+  };
+
+  const prepared = prepareAction(state, 0, { type: 'OVERCLOCK', amount: 5 });
+  assert.equal(prepared.ok, true);
+  if (prepared.ok) assert.deepEqual(prepared.action, { type: 'OVERCLOCK', amount: 5 });
+
+  const borrowed = applyAction(state, { type: 'OVERCLOCK', amount: 5 });
+  assert.equal(borrowed.rejected, undefined);
+  assert.equal(borrowed.state.playerCp[0], 20);
+  assert.equal(borrowed.state.playerCpDebt?.[0], 5);
+  assert.equal(borrowed.state.playerCpBorrowed?.[0], 5);
+
+  // One borrow per turn.
+  const again = applyAction(borrowed.state, { type: 'OVERCLOCK', amount: 1 });
+  assert.equal(again.rejected, 'Already overclocked this turn');
+  assert.equal(again.state, borrowed.state);
+
+  // P1's turn does not repay P0's debt; it is collected from P0's own next regen.
+  const p1Turn = applyAction(borrowed.state, { type: 'END_TURN' });
+  assert.equal(p1Turn.state.currentPlayer, 1);
+  assert.equal(p1Turn.state.playerCpDebt?.[0], 5);
+  const backToP0 = applyAction(p1Turn.state, { type: 'END_TURN' });
+  assert.equal(backToP0.state.currentPlayer, 0);
+  assert.equal(backToP0.state.playerCpDebt?.[0], 0);
+  assert.equal(backToP0.state.playerCpBorrowed?.[0], 0);
+  assert.equal(backToP0.state.playerCp[0], 30); // 20 + 15 regen - 5 repaid
+});
+
+test('Overclock cannot push CP above the battery', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'OVRCLK2', fogOfWar: false, playerCount: 2 }));
+  const state: GameState = {
+    ...base,
+    currentPlayer: 0,
+    playerCp: { 0: 28, 1: 10 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpBorrowed: { 0: 0, 1: 0 },
+  };
+
+  // The validator trims a 5 CP request to the 2 CP that still fit under the 30 CP battery.
+  const prepared = prepareAction(state, 0, { type: 'OVERCLOCK', amount: 5 });
+  assert.equal(prepared.ok, true);
+  if (prepared.ok) assert.deepEqual(prepared.action, { type: 'OVERCLOCK', amount: 2 });
+
+  const borrowed = applyAction(state, { type: 'OVERCLOCK', amount: 5 });
+  assert.equal(borrowed.rejected, undefined);
+  assert.equal(borrowed.state.playerCp[0], 30);
+  assert.equal(borrowed.state.playerCpDebt?.[0], 2);
+  assert.equal(borrowed.state.playerCpBorrowed?.[0], 2);
+
+  // At the battery ceiling there is nothing left to borrow.
+  const full = applyAction({ ...state, playerCp: { 0: 30, 1: 10 } }, { type: 'OVERCLOCK', amount: 1 });
+  assert.equal(full.rejected, 'Battery is already full');
+  assert.equal(full.state.playerCp[0], 30);
+});
+
+test('a momentum refund cannot unlock a second Overclock', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'OVRCLK3', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => ({
+    ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined, height: 1,
+  }));
+  const attacker = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '4,4', completed: false, hasMoved: false };
+  const victim = { ...base.units.find(u => u.owner === 1 && u.type === 'SNIPER')!, tileId: '4,5', hp: 1, completed: false };
+  const reserve = { ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!, tileId: '9,9', completed: false };
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [attacker, victim, reserve],
+    currentPlayer: 0,
+    playerCp: { 0: 18, 1: 20 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpBorrowed: { 0: 0, 1: 0 },
+    playerCpRefunded: { 0: 0, 1: 0 },
+    // Isolate momentum: no first-contact grant and no live contract payout.
+    firstContactDone: true,
+    contract: null,
+  };
+
+  const overclocked = applyAction(state, { type: 'OVERCLOCK', amount: 2 });
+  assert.equal(overclocked.rejected, undefined);
+  assert.equal(overclocked.state.playerCpDebt?.[0], 2);
+
+  const attack = applyAction(overclocked.state, {
+    type: 'ATTACK', attackerId: attacker.id, targetUnitId: victim.id, cost: getUnitAttackCost(attacker),
+  });
+  assert.equal(attack.rejected, undefined);
+  assert.equal(attack.state.playerCpDebt?.[0], 0); // the 4 CP kill refund cleared the debt
+  assert.equal(attack.state.playerCp[0], 19); // 20 - 3 attack + 2 refund left after debt
+  assert.equal(attack.state.playerCpBorrowed?.[0], 2); // but the borrow still happened this turn
+
+  const second = applyAction(attack.state, { type: 'OVERCLOCK', amount: 1 });
+  assert.equal(second.rejected, 'Already overclocked this turn');
+  assert.equal(second.state, attack.state);
+
+  const p1Turn = applyAction(attack.state, { type: 'END_TURN' });
+  const backToP0 = applyAction(p1Turn.state, { type: 'END_TURN' });
+  assert.equal(backToP0.state.playerCpBorrowed?.[0], 0, 'the next turn restores the borrow');
+});
+
+test('the AI overclocks only to finish a kill it is a few CP short of', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'AIOC1', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => ({
+    ...t,
+    type: 'PLAINS' as const,
+    subType: undefined,
+    owner: undefined,
+    hazardState: undefined,
+    height: 1,
+  }));
+  const soldier = {
+    ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!,
+    tileId: '4,4',
+    completed: false,
+    hasMoved: false,
+  };
+  const victim = {
+    ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!,
+    tileId: '4,5',
+    hp: 1,
+    completed: false,
+  };
+  const shortByOne: GameState = {
+    ...base,
+    mapData: map,
+    units: [soldier, victim],
+    currentPlayer: 0,
+    playerCp: { 0: getUnitAttackCost(soldier) - 1, 1: 20 },
+    playerCpDebt: { 0: 0, 1: 0 },
+  };
+  assert.deepEqual(botAction(shortByOne), { type: 'OVERCLOCK', amount: 1 });
+
+  // With the shot already affordable there is nothing to borrow.
+  const affordable: GameState = { ...shortByOne, playerCp: { 0: getUnitAttackCost(soldier), 1: 20 } };
+  assert.notEqual(botAction(affordable).type, 'OVERCLOCK');
+});
+
+test('a kill refunds momentum CP, paying Overclock debt first', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'MOM1', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => ({
+    ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined, height: 1,
+  }));
+  const attacker = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '4,4', completed: false, hasMoved: false };
+  const victim = { ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!, tileId: '4,5', hp: 1, completed: false };
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [attacker, victim],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerCpDebt: { 0: 2, 1: 0 },
+    playerCpRefunded: { 0: 0, 1: 0 },
+    playerGold: { 0: 500, 1: 500 },
+    firstContactDone: true,
+    contract: null,
+  };
+
+  const result = applyAction(state, {
+    type: 'ATTACK', attackerId: attacker.id, targetUnitId: victim.id, cost: getUnitAttackCost(attacker),
+  });
+  assert.equal(result.rejected, undefined);
+  assert.equal(result.state.playerCpRefunded?.[0], 2);
+  assert.equal(result.state.playerCpDebt?.[0], 0); // refund pays the debt before adding CP
+  assert.equal(result.state.playerCp[0], 17); // 20 - 3 attack; the 2 CP refund went to debt
+});
+
+test('capturing a building refunds momentum CP', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'MOM2', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t =>
+    t.id === '4,5'
+      ? { ...t, type: 'BUILDING' as const, subType: 'WATCHTOWER' as const, owner: 1, hp: 20, maxHp: 20, hazardState: undefined }
+      : { ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined, height: 1 }
+  );
+  const scout = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '4,4', completed: false, hasMoved: false };
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [scout],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpRefunded: { 0: 0, 1: 0 },
+    firstContactDone: true,
+    contract: null,
+  };
+
+  const result = applyAction(state, { type: 'SECURE', unitId: scout.id, tileId: '4,5', cost: 4 });
+  assert.equal(result.rejected, undefined);
+  assert.equal(result.state.playerCpRefunded?.[0], 3);
+  assert.equal(result.state.playerCp[0], 19); // 20 - 4 secure + 3 refund
+});
+
+test('momentum refunds stop at the per-turn cap', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'MOM3', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => ({
+    ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined, height: 1,
+  }));
+  const a1 = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, id: 'a1', tileId: '4,4', completed: false, hasMoved: false };
+  const a2 = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, id: 'a2', tileId: '6,4', completed: false, hasMoved: false };
+  const v1 = { ...base.units.find(u => u.owner === 1 && u.type === 'SNIPER')!, id: 'v1', tileId: '4,5', hp: 1, completed: false };
+  const v2 = { ...base.units.find(u => u.owner === 1 && u.type === 'SNIPER')!, id: 'v2', tileId: '6,5', hp: 1, completed: false };
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [a1, a2, v1, v2],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpRefunded: { 0: 0, 1: 0 },
+    firstContactDone: true,
+    contract: null,
+  };
+
+  const first = applyAction(state, { type: 'ATTACK', attackerId: 'a1', targetUnitId: 'v1', cost: getUnitAttackCost(a1) });
+  assert.equal(first.rejected, undefined);
+  assert.equal(first.state.playerCpRefunded?.[0], 4);
+  const second = applyAction(first.state, { type: 'ATTACK', attackerId: 'a2', targetUnitId: 'v2', cost: getUnitAttackCost(a2) });
+  assert.equal(second.rejected, undefined);
+  assert.equal(second.state.playerCpRefunded?.[0], 6); // 4 + 4 capped at 6
+  assert.equal(second.state.playerCp[0], 20); // 20 - 3 + 4 - 3 + 2
+});
+
+test('a Veteran takes exactly one perk from its class, for free', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'PERK1', fogOfWar: false, playerCount: 2 }));
+  const soldier = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, rank: 1 as const };
+  const enemy = base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!;
+  const state: GameState = {
+    ...base,
+    units: [soldier, enemy],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpRefunded: { 0: 0, 1: 0 },
+  };
+
+  const rookie = prepareAction({ ...state, units: [{ ...soldier, rank: 0 as const }] }, 0, {
+    type: 'CHOOSE_PERK', unitId: soldier.id, perkId: 'RELAY',
+  });
+  assert.equal(rookie.ok, false);
+  assert.match((rookie as { error: string }).error, /Veteran/i);
+
+  const wrongClass = prepareAction(state, 0, { type: 'CHOOSE_PERK', unitId: soldier.id, perkId: 'COLD_BORE' });
+  assert.equal(wrongClass.ok, false);
+  assert.match((wrongClass as { error: string }).error, /class/i);
+
+  const prepared = prepareAction(state, 0, { type: 'CHOOSE_PERK', unitId: soldier.id, perkId: 'RELAY' });
+  assert.ok(prepared.ok);
+  const result = applyAction(state, prepared.action);
+  assert.equal(result.state.units[0].perk, 'RELAY');
+  assert.equal(result.state.playerCp[0], 20); // choosing costs no CP
+  assert.equal(result.state.units[0].completed, false); // and does not consume the unit's action
+
+  const duplicate = prepareAction(result.state, 0, { type: 'CHOOSE_PERK', unitId: soldier.id, perkId: 'SKIRMISHER' });
+  assert.equal(duplicate.ok, false);
+  assert.match((duplicate as { error: string }).error, /already/i);
+});
+
+test('promotion damage perks apply in the right situations', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'PERKDMG', fogOfWar: false, playerCount: 2 }));
+  const plains = base.mapData.find(t => t.type === 'PLAINS')!;
+  const forest: Tile = { ...plains, type: 'FOREST' };
+  const target = base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!;
+
+  const sniper = { ...base.units.find(u => u.owner === 0 && u.type === 'SNIPER')!, perk: 'COLD_BORE' as const, hasMoved: false };
+  const still = calculateAttackOutcome(sniper, plains, plains, 1, target).damage;
+  const moved = calculateAttackOutcome({ ...sniper, hasMoved: true }, plains, plains, 1, target).damage;
+  assert.equal(still, moved + 2);
+
+  const scout = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, perk: 'SKIRMISHER' as const };
+  const fromCover = calculateAttackOutcome(scout, forest, plains, 1, target).damage;
+  const fromOpen = calculateAttackOutcome({ ...scout, perk: undefined }, forest, plains, 1, target).damage;
+  assert.equal(fromCover, fromOpen + 1);
+  assert.equal(
+    calculateAttackOutcome(scout, plains, plains, 1, target).damage,
+    calculateAttackOutcome({ ...scout, perk: undefined }, plains, plains, 1, target).damage,
+    'Skirmisher pays nothing without cover',
+  );
+
+  const breacher = { ...base.units.find(u => u.owner === 0 && u.type === 'ASSAULTER')!, perk: 'SAPPER' as const };
+  assert.equal(
+    calculateDemolishDamage(breacher, plains),
+    calculateDemolishDamage({ ...breacher, perk: undefined }, plains) + 2,
+  );
+
+  const watcher = { ...base.units.find(u => u.owner === 0 && u.type === 'SNIPER')!, perk: 'OVERWATCH_PLUS' as const };
+  assert.equal(
+    calculateOverwatchOutcome(watcher, plains, plains, 1, target).damage,
+    calculateOverwatchOutcome({ ...watcher, perk: undefined }, plains, plains, 1, target).damage + 2,
+  );
+});
+
+test('Bulwark reduces incoming attack damage for adjacent allies', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'PERKBW', fogOfWar: false, playerCount: 2 }));
+  const map: Tile[] = base.mapData.map(t => ({
+    ...t, type: 'PLAINS' as const, subType: undefined, owner: undefined, hazardState: undefined, height: 1,
+  }));
+  const attacker = { ...base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!, tileId: '4,4', completed: false, hasMoved: false };
+  const target = { ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!, tileId: '4,5', hp: 15, maxHp: 15, completed: false };
+  const guard = { ...base.units.find(u => u.owner === 1 && u.type === 'ASSAULTER')!, tileId: '5,5', perk: 'BULWARK' as const, completed: false };
+  const state: GameState = {
+    ...base,
+    mapData: map,
+    units: [attacker, target, guard],
+    currentPlayer: 0,
+    playerCp: { 0: 20, 1: 20 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpRefunded: { 0: 0, 1: 0 },
+  };
+
+  const guarded = applyAction(state, { type: 'ATTACK', attackerId: attacker.id, targetUnitId: target.id, cost: getUnitAttackCost(attacker) });
+  assert.equal(guarded.rejected, undefined);
+  assert.equal(guarded.state.units.find(u => u.id === target.id)!.hp, 11); // 5 - 1
+
+  const unguarded = applyAction(
+    { ...state, units: [attacker, target] },
+    { type: 'ATTACK', attackerId: attacker.id, targetUnitId: target.id, cost: getUnitAttackCost(attacker) },
+  );
+  assert.equal(unguarded.state.units.find(u => u.id === target.id)!.hp, 10);
+});
+
+test('Relay adds one CP regen for its owner', () => {
+  const base = createGeneratedGame(settings({ mapSeed: 'PERKRL', fogOfWar: false, playerCount: 2 }));
+  const relay = { ...base.units.find(u => u.owner === 1 && u.type === 'SOLDIER')!, perk: 'RELAY' as const };
+  const scout = base.units.find(u => u.owner === 0 && u.type === 'SOLDIER')!;
+  const state: GameState = {
+    ...base,
+    units: [scout, relay],
+    currentPlayer: 0,
+    playerCp: { 0: 10, 1: 5 },
+    playerCpDebt: { 0: 0, 1: 0 },
+    playerCpRefunded: { 0: 0, 1: 0 },
+  };
+
+  const result = applyAction(state, { type: 'END_TURN' });
+  assert.equal(result.state.currentPlayer, 1);
+  assert.equal(result.state.playerCp[1], 21); // 5 + 15 regen + 1 Relay
 });
 
 test('ATTACK emits DamageBreakdown, zeroCpClutch, victimPreHp, and isMatchWinning, and eventsFor redacts hidden shooters', () => {

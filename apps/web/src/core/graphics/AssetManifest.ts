@@ -26,34 +26,34 @@ export const ASSET_MANIFEST = {
 
                 // UNITS
                 // Player 0 (Red)
-                { alias: 'UNIT_P0_SOLDIER', src: '/assets/units/p0_soldier.png' },
-                { alias: 'UNIT_P0_ASSAULTER', src: '/assets/units/p0_assaulter.png' },
-                { alias: 'UNIT_P0_SNIPER', src: '/assets/units/p0_sniper.png' },
+                { alias: 'UNIT_P0_SOLDIER', src: '/assets/legacyunits/p0_soldier.png' },
+                { alias: 'UNIT_P0_ASSAULTER', src: '/assets/legacyunits/p0_assaulter.png' },
+                { alias: 'UNIT_P0_SNIPER', src: '/assets/legacyunits/p0_sniper.png' },
                 
                 // Player 1 (Blue)
-                { alias: 'UNIT_P1_SOLDIER', src: '/assets/units/p1_soldier.png' },
-                { alias: 'UNIT_P1_ASSAULTER', src: '/assets/units/p1_assaulter.png' },
-                { alias: 'UNIT_P1_SNIPER', src: '/assets/units/p1_sniper.png' },
+                { alias: 'UNIT_P1_SOLDIER', src: '/assets/legacyunits/p1_soldier.png' },
+                { alias: 'UNIT_P1_ASSAULTER', src: '/assets/legacyunits/p1_assaulter.png' },
+                { alias: 'UNIT_P1_SNIPER', src: '/assets/legacyunits/p1_sniper.png' },
 
                 // Player 2 (Green)
-                { alias: 'UNIT_P2_SOLDIER', src: '/assets/units/p2_soldier.png' },
-                { alias: 'UNIT_P2_ASSAULTER', src: '/assets/units/p2_assaulter.png' },
-                { alias: 'UNIT_P2_SNIPER', src: '/assets/units/p2_sniper.png' },
+                { alias: 'UNIT_P2_SOLDIER', src: '/assets/legacyunits/p2_soldier.png' },
+                { alias: 'UNIT_P2_ASSAULTER', src: '/assets/legacyunits/p2_assaulter.png' },
+                { alias: 'UNIT_P2_SNIPER', src: '/assets/legacyunits/p2_sniper.png' },
 
                 // Player 3 (Yellow)
-                { alias: 'UNIT_P3_SOLDIER', src: '/assets/units/p3_soldier.png' },
-                { alias: 'UNIT_P3_ASSAULTER', src: '/assets/units/p3_assaulter.png' },
-                { alias: 'UNIT_P3_SNIPER', src: '/assets/units/p3_sniper.png' },
+                { alias: 'UNIT_P3_SOLDIER', src: '/assets/legacyunits/p3_soldier.png' },
+                { alias: 'UNIT_P3_ASSAULTER', src: '/assets/legacyunits/p3_assaulter.png' },
+                { alias: 'UNIT_P3_SNIPER', src: '/assets/legacyunits/p3_sniper.png' },
 
                 // Player 4 (Purple)
-                { alias: 'UNIT_P4_SOLDIER', src: '/assets/units/p4_soldier.png' },
-                { alias: 'UNIT_P4_ASSAULTER', src: '/assets/units/p4_assaulter.png' },
-                { alias: 'UNIT_P4_SNIPER', src: '/assets/units/p4_sniper.png' },
+                { alias: 'UNIT_P4_SOLDIER', src: '/assets/legacyunits/p4_soldier.png' },
+                { alias: 'UNIT_P4_ASSAULTER', src: '/assets/legacyunits/p4_assaulter.png' },
+                { alias: 'UNIT_P4_SNIPER', src: '/assets/legacyunits/p4_sniper.png' },
 
                 // Player 5 (Cyan)
-                { alias: 'UNIT_P5_SOLDIER', src: '/assets/units/p5_soldier.png' },
-                { alias: 'UNIT_P5_ASSAULTER', src: '/assets/units/p5_assaulter.png' },
-                { alias: 'UNIT_P5_SNIPER', src: '/assets/units/p5_sniper.png' },
+                { alias: 'UNIT_P5_SOLDIER', src: '/assets/legacyunits/p5_soldier.png' },
+                { alias: 'UNIT_P5_ASSAULTER', src: '/assets/legacyunits/p5_assaulter.png' },
+                { alias: 'UNIT_P5_SNIPER', src: '/assets/legacyunits/p5_sniper.png' },
             ],
         },
     ],

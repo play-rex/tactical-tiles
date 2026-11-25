@@ -10,7 +10,7 @@ import { useGameStore } from '../store/useGameStore';
 import { GameSettings, SavedMap, MissionConfig, Tile } from '@tactical/engine/types';
 import { PRESET_MAPS } from '@tactical/engine/assets/Presets';
 import { CHALLENGE_OPERATIONS } from '@tactical/engine/assets/ChallengeOps';
-import { UNIT_STATS } from '@tactical/engine/constants/Config';
+import { GOLD_SETTINGS, UNIT_STATS } from '@tactical/engine/constants/Config';
 import { MapStorage } from '../core/storage/MapStorageManager';
 import { generateSectorSeed, normalizeSeed } from '@tactical/engine/utils/SeededRandom';
 import { CareerStorage } from '@tactical/engine/storage/CareerStatsManager';
@@ -21,8 +21,10 @@ import {
   BrandHeader,
   DifficultyButtons,
   EnvironmentToggles,
+  GoldEconomyControl,
   MutatorToggles,
   SECTION_LABEL,
+  SpectatorAttacksControl,
   SquadLoadoutControls,
   StageShell,
   VictoryModeControl,
@@ -151,7 +153,10 @@ export const GameSetup: React.FC = () => {
       victoryMode: 'CONQUER',
       aiDifficulty: 'MEDIUM',
       mapSeed: fallbackSeed,
-      mutators: { blitzCp: false, scarcity: false, ironman: false },
+      mutators: { classicCp: false, scarcity: false, ironman: false },
+      startingGold: GOLD_SETTINGS.INITIAL_GOLD,
+      goldIncome: GOLD_SETTINGS.INCOME_PER_TURN,
+      spectatorAttacks: true,
     };
     // Keep last match's names: the store survives resetGame (same session),
     // localStorage survives reloads (across sessions).
@@ -517,7 +522,7 @@ export const GameSetup: React.FC = () => {
                 const activeRuleTags = [
                   selectedChallenge.settings.fogOfWar ? 'FOG OF WAR' : null,
                   selectedChallenge.settings.doomsdayEnabled ? `DOOMSDAY R${(selectedChallenge.startingRound ?? 0) + 1}` : null,
-                  muts?.blitzCp ? 'BLITZ CP (30/+15)' : null,
+                  muts?.classicCp ? 'CLASSIC CP (20/+10)' : null,
                   muts?.scarcity ? 'SCARCITY (50% AMMO)' : null,
                   muts?.ironman ? 'IRONMAN (0 RESPAWNS)' : null,
                   `AI: ${selectedChallenge.settings.aiDifficulty || 'HARD'}`,
@@ -674,8 +679,25 @@ export const GameSetup: React.FC = () => {
                     />
                   </div>
 
-                  {/* COLUMN B: SQUAD LOADOUT & MUTATORS */}
+                  {/* COLUMN B: ECONOMY, SQUAD LOADOUT & MUTATORS */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <div style={{ ...SECTION_LABEL }}>
+                      GOLD ECONOMY
+                    </div>
+                    <GoldEconomyControl
+                      startingGold={settings.startingGold ?? GOLD_SETTINGS.INITIAL_GOLD}
+                      goldIncome={settings.goldIncome ?? GOLD_SETTINGS.INCOME_PER_TURN}
+                      onChange={(startingGold, goldIncome) => patchSettings({ startingGold, goldIncome })}
+                    />
+
+                    <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>
+                      ELIMINATED PLAYER ATTACKS
+                    </div>
+                    <SpectatorAttacksControl
+                      value={settings.spectatorAttacks !== false}
+                      onChange={spectatorAttacks => patchSettings({ spectatorAttacks })}
+                    />
+
                     <div style={{ ...SECTION_LABEL, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
                       <span>3. STARTING SQUAD ({totalUnits} UNITS)</span>
                       <SquadGuideButton />

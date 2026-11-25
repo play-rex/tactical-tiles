@@ -29,3 +29,6 @@ deploy/.deployed
 
 # Saved tables in development
 apps/server/data
+
+# Simulation output
+packages/engine/sim-results

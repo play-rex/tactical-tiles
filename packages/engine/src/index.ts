@@ -8,6 +8,7 @@ export * from './game/islandArchipelago';
 export * from './grid/BridgePlacement';
 export * from './game/options';
 export * from './game/apply';
+export * from './game/SpectatorOps';
 export * from './game/validate';
 export * from './game/view';
 export * from './game/bot';

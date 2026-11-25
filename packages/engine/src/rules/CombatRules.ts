@@ -2,18 +2,18 @@ import { GameMutators, LandMine, TerrainType, Tile, Unit, UnitRank, UnitType, We
 import { BUILDING_STATS, TERRAIN_DEFENSE, UNIT_STATS, BASE_STATS, LAND_MINE_STATS, VETERANCY_CONFIG, OVERWATCH_STATS, MUTATOR_CONFIG, CP_SYSTEM, MAX_RESPAWNS, GOLD_SETTINGS } from '../constants/Config';
 
 /**
- * Returns active CP caps and regeneration accounting for the Blitz CP mutator.
+ * Returns active CP caps and regeneration accounting for the Classic CP mutator.
  */
 export const getEffectiveCpRules = (mutators?: GameMutators): {
     maxCp: number;
     regenAmount: number;
     p1Round1Cp: number;
 } => {
-    if (mutators?.blitzCp) {
+    if (mutators?.classicCp) {
         return {
-            maxCp: MUTATOR_CONFIG.BLITZ_CP.MAX_CP,
-            regenAmount: MUTATOR_CONFIG.BLITZ_CP.REGEN_AMOUNT,
-            p1Round1Cp: MUTATOR_CONFIG.BLITZ_CP.P1_ROUND1_CP
+            maxCp: MUTATOR_CONFIG.CLASSIC_CP.MAX_CP,
+            regenAmount: MUTATOR_CONFIG.CLASSIC_CP.REGEN_AMOUNT,
+            p1Round1Cp: MUTATOR_CONFIG.CLASSIC_CP.P1_ROUND1_CP
         };
     }
     return {
@@ -274,7 +274,10 @@ export const calculateAttackOutcome = (
     targetUnit?: Unit,
     crossfireBonus = 0
 ): AttackOutcome => {
-    return computeDamageOutcome(getUnitBaseDamage(attacker), attacker, attTile, targetTile, targetOwner, targetUnit, crossfireBonus);
+    let base = getUnitBaseDamage(attacker);
+    if (attacker.perk === 'COLD_BORE' && !attacker.hasMoved) base += 2;
+    if (attacker.perk === 'SKIRMISHER' && attTile && (TERRAIN_DEFENSE[attTile.type] || 0) > 0) base += 1;
+    return computeDamageOutcome(base, attacker, attTile, targetTile, targetOwner, targetUnit, crossfireBonus);
 };
 
 /**
@@ -287,7 +290,8 @@ export const calculateOverwatchOutcome = (
     targetOwner: number,
     targetUnit?: Unit
 ): AttackOutcome => {
-    return computeDamageOutcome(OVERWATCH_STATS[attacker.type].damage, attacker, attTile, targetTile, targetOwner, targetUnit);
+    const base = OVERWATCH_STATS[attacker.type].damage + (attacker.perk === 'OVERWATCH_PLUS' ? 2 : 0);
+    return computeDamageOutcome(base, attacker, attTile, targetTile, targetOwner, targetUnit);
 };
 
 /**
@@ -313,7 +317,7 @@ export const calculateSiegeDamage = (attacker: Unit, attTile: Tile | undefined, 
  * Computes damage dealt to a Barrier during a Demolish action.
  */
 export const calculateDemolishDamage = (attacker: Unit, attTile: Tile | undefined): number => {
-    let dmg = getUnitBaseDamage(attacker);
+    let dmg = getUnitBaseDamage(attacker) + (attacker.perk === 'SAPPER' ? 2 : 0);
     if (
         attTile &&
         attTile.type === 'BUILDING' &&

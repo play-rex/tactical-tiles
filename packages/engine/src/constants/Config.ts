@@ -34,23 +34,51 @@ export const LAND_MINE_STATS = {
 
 export const MAX_RESPAWNS = 2;
 
+/**
+ * Stalemate backstop: a match where no HQ has fallen by this round is decided on fortress
+ * strength instead of running forever. Longest healthy cell in the playtest lab is 62 rounds.
+ */
+export const MATCH_ROUND_CAP = 80;
+
+/** Rounds without any HQ damage before bots abandon Overwatch and march on the objective. */
+export const AGGRESSION_AFTER_ROUNDS = 10;
+
+/** The aggression clock never starts before this round, so healthy short matches are untouched. */
+export const AGGRESSION_START_ROUND = 20;
+
 export const DOOMSDAY_SETTINGS = {
   START_TURN: 30,
   SHRINK_INTERVAL: 5,
   DAMAGE: 999
 };
 
+/** Doomsday-only escalation, tied to the ring clock rather than fixed match rounds. */
+export const DOOMSDAY_ESCALATION = {
+  COLLAPSE_REGEN_BONUS: 2,
+  MELTDOWN_REGEN_BONUS: 4,
+  /** Ring index that triggers Meltdown: 0 is the edge, so 2 is the third ring. */
+  MELTDOWN_RING: 2,
+} as const;
+
 // Command Point (Battery) System
 export const CP_SYSTEM = {
-  MAX_CP: 20,
-  REGEN_AMOUNT: 10,
-  P1_ROUND1_CP: 15,
+  MAX_CP: 30,
+  REGEN_AMOUNT: 15,
+  P1_ROUND1_CP: 22,
   RELOAD_COST: 5,
+  /** CP a player may borrow on their turn; repaid automatically from the next regen. */
+  OVERCLOCK_MAX: 5,
 };
 
+/**
+ * Gold paid for a CP reward that would overflow the battery. Priced off the verbs: a 75€ mine
+ * deals about what a 5 CP attack does, so 1 CP ≈ 15€. Never let a capped reward evaporate.
+ */
+export const CP_OVERFLOW_GOLD_RATE = 15;
+
 export const GOLD_SETTINGS = {
-  INITIAL_GOLD: 150,
-  INCOME_PER_TURN: 10,
+  INITIAL_GOLD: 200,
+  INCOME_PER_TURN: 20,
   BUILDING_INCOME: 5,
   HEIST_REWARD_GOLD: 200,
   HEIST_REWARD_CP: 10,
@@ -66,11 +94,16 @@ export const RESPAWN_TIMERS = {
   SNIPER: 5,
 };
 
-export const UNIT_COSTS = {
-  SOLDIER: 50,
-  ASSAULTER: 150,
-  SNIPER: 300,
+/**
+ * CP price to bring a fallen unit back. Redeploying is a tempo purchase, not a gold purchase:
+ * it costs about what that unit costs to fire, so the choice is "the body or another action".
+ */
+export const RESPAWN_CP_COST = {
+  SOLDIER: 3,
+  ASSAULTER: 5,
+  SNIPER: 8,
 };
+
 
 export const SHOP_ITEMS = {
   AMMO_REFILL: { cost: 50, name: 'Ammo Drop', type: 'CONSUMABLE' },
@@ -211,6 +244,14 @@ export const VETERANCY_CONFIG = {
   ACE_BREACHER_DMG_BONUS: 2,
 };
 
+/** CP paid back when a turn produces a real result; the loop that funds the next play. */
+export const MOMENTUM_REFUNDS = {
+  CAP: 6,
+  KILL: { SOLDIER: 2, ASSAULTER: 3, SNIPER: 4 } as Record<'SOLDIER' | 'ASSAULTER' | 'SNIPER', number>,
+  BANK: 4,
+  CAPTURE: 3,
+};
+
 export const OVERWATCH_STATS: Record<'SOLDIER' | 'ASSAULTER' | 'SNIPER', { cost: number; damage: number; refund: number }> = {
   SOLDIER: { cost: 3, damage: 4, refund: 1 },
   ASSAULTER: { cost: 4, damage: 7, refund: 2 },
@@ -218,10 +259,10 @@ export const OVERWATCH_STATS: Record<'SOLDIER' | 'ASSAULTER' | 'SNIPER', { cost:
 };
 
 export const MUTATOR_CONFIG = {
-  BLITZ_CP: {
-    MAX_CP: 30,
-    REGEN_AMOUNT: 15,
-    P1_ROUND1_CP: 22,
+  CLASSIC_CP: {
+    MAX_CP: 20,
+    REGEN_AMOUNT: 10,
+    P1_ROUND1_CP: 15,
   },
   SCARCITY: {
     AMMO_MULT: 0.5,

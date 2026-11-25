@@ -454,12 +454,12 @@ test('Store: MAX_RESPAWNS is strictly enforced and RELOAD restores ammo', () => 
         unitType: 'SOLDIER',
         tileId: '0,1',
         cost: 0,
-        goldCost: 50,
         deadUnitId: 'dead_1'
     });
     let state = useGameStore.getState();
     assert.equal(state.units.length, 1);
     assert.equal(state.playerGold[0], 500);
+    assert.equal(state.playerCp[0], 20); // a rejected redeploy stays free
 
     // Field reload restores ceil(3/2)=2 ammo for 5 CP
     useGameStore.getState().executeAiAction({ type: 'RELOAD', unitId: 'u0', cost: 5 });
@@ -706,7 +706,14 @@ test('Store Veterancy Rules: anti-exploit XP (SECURE/DEMOLISH/SIEGE), Ace $75 bo
         playerInventory: { 0: ['FIRST_AID', 'MEDKIT', 'AMMO'], 1: [] },
         weather: clearWeather,
         gameLog: [],
-        matchSummary: null
+        matchSummary: null,
+        // This test measures XP and the Ace bounty only: no match-arc payouts in the way.
+        firstContactDone: true,
+        contract: null,
+        contractProgress: {},
+        contractsUsed: [],
+        contractMisses: 0,
+        finalPush: {}
     });
 
     // 1. DEMOLISH awards 0 XP
@@ -764,9 +771,9 @@ test('Store Veterancy Rules: anti-exploit XP (SECURE/DEMOLISH/SIEGE), Ace $75 bo
         unitType: 'SOLDIER',
         tileId: '5,4',
         cost: 0,
-        goldCost: 50,
         deadUnitId: 'p1_ace'
     });
+    assert.equal(useGameStore.getState().playerCp[1], 37); // Scout redeploy costs 3 CP
     const respawned = useGameStore.getState().units.find(u => u.id === 'p1_ace')!;
     assert.equal(respawned.rank, 0);
     assert.equal(respawned.xp, 0);
@@ -1037,7 +1044,7 @@ test('Store Overwatch Mechanics: Step interception, walked CP, collision step-ba
     assert.equal(ebAfter.hp, 36 - OVERWATCH_STATS.SOLDIER.damage);
     assert.equal(st.playerCp[0], 11);
 
-    // Suppression counterplay & 50% CP refund clamped to MAX_CP=20
+    // Suppression counterplay & 50% CP refund
     const p1SniperOw: Unit = {
         id: 'p1_snow',
         type: 'SNIPER',
@@ -1109,11 +1116,11 @@ test('Store Overwatch Mechanics: Step interception, walked CP, collision step-ba
     useGameStore.getState().executeAiAction({ type: 'ATTACK', attackerId: 'p0_scoot', targetUnitId: 'p1_how', cost: 3 });
     assert.equal(useGameStore.getState().units.find(u => u.id === 'p1_how')?.isOverwatching, false);
 
-    // End turn P0 -> P1: unfired Sniper Overwatch refunds +3 CP (9 + 10 regen + 3 = 22 -> clamped to MAX_CP 20)
+    // End turn P0 -> P1: unfired Sniper Overwatch refunds +3 CP (9 + 15 regen + 3 = 27)
     useGameStore.getState().endTurn();
     st = useGameStore.getState();
     assert.equal(st.currentPlayer, 1);
-    assert.equal(st.playerCp[1], CP_SYSTEM.MAX_CP);
+    assert.equal(st.playerCp[1], 27);
     assert.equal(st.units.find(u => u.id === 'p1_unfired')?.isOverwatching, false);
     useGameStore.getState().resetGame();
 });
@@ -1211,14 +1218,23 @@ test('AI Overwatch & Fog Stealth: Fog prevents blind ambush and AI prioritizes S
     assert.equal(bestTarget?.unit.id, 'e_ow');
 });
 
-test('Mutators: Blitz CP, Scarcity ammo & bank payouts, and Ironman zero respawns', () => {
-    const blitz = { blitzCp: true, scarcity: false, ironman: false };
-    const cpRules = getEffectiveCpRules(blitz);
-    assert.equal(cpRules.maxCp, MUTATOR_CONFIG.BLITZ_CP.MAX_CP);
-    assert.equal(cpRules.regenAmount, MUTATOR_CONFIG.BLITZ_CP.REGEN_AMOUNT);
-    assert.equal(cpRules.p1Round1Cp, MUTATOR_CONFIG.BLITZ_CP.P1_ROUND1_CP);
+test('Mutators: Classic CP, Scarcity ammo & bank payouts, and Ironman zero respawns', () => {
+    const standard = getEffectiveCpRules();
+    assert.equal(standard.maxCp, CP_SYSTEM.MAX_CP);
+    assert.equal(standard.regenAmount, CP_SYSTEM.REGEN_AMOUNT);
+    assert.equal(standard.p1Round1Cp, CP_SYSTEM.P1_ROUND1_CP);
 
-    const scarcity = { blitzCp: false, scarcity: true, ironman: false };
+    const classic = { classicCp: true, scarcity: false, ironman: false };
+    const cpRules = getEffectiveCpRules(classic);
+    assert.equal(cpRules.maxCp, MUTATOR_CONFIG.CLASSIC_CP.MAX_CP);
+    assert.equal(cpRules.regenAmount, MUTATOR_CONFIG.CLASSIC_CP.REGEN_AMOUNT);
+    assert.equal(cpRules.p1Round1Cp, MUTATOR_CONFIG.CLASSIC_CP.P1_ROUND1_CP);
+    // Classic must never become a no-op next to the default battery.
+    assert.ok(cpRules.maxCp < standard.maxCp, 'Classic max CP is below the default');
+    assert.ok(cpRules.regenAmount < standard.regenAmount, 'Classic regen is below the default');
+    assert.ok(cpRules.p1Round1Cp < standard.p1Round1Cp, 'Classic opening CP is below the default');
+
+    const scarcity = { classicCp: false, scarcity: true, ironman: false };
     assert.equal(getEffectiveUnitAmmo('SOLDIER', scarcity), 5);
     assert.equal(getEffectiveUnitAmmo('ASSAULTER', scarcity), 3);
     assert.equal(getEffectiveUnitAmmo('SNIPER', scarcity), 2);
@@ -1226,7 +1242,7 @@ test('Mutators: Blitz CP, Scarcity ammo & bank payouts, and Ironman zero respawn
     assert.equal(bankRewards.gold, 300);
     assert.equal(bankRewards.cp, 15);
 
-    const ironman = { blitzCp: false, scarcity: false, ironman: true };
+    const ironman = { classicCp: false, scarcity: false, ironman: true };
     assert.equal(getEffectiveMaxRespawns(ironman), 0);
 
     // Start random match with all 3 mutators enabled cleanly
@@ -1237,20 +1253,20 @@ test('Mutators: Blitz CP, Scarcity ammo & bank payouts, and Ironman zero respawn
         victoryMode: 'DEATHMATCH',
         unitCounts: { SOLDIER: 1, ASSAULTER: 1, SNIPER: 1 },
         mapSeed: 'MUT888',
-        mutators: { blitzCp: true, scarcity: true, ironman: true }
+        mutators: { classicCp: true, scarcity: true, ironman: true }
     });
     store.startGame();
     let st = useGameStore.getState();
-    assert.equal(st.playerCp[0], 22);
-    assert.equal(st.playerCp[1], 30);
+    assert.equal(st.playerCp[0], 15);
+    assert.equal(st.playerCp[1], 20);
     assert.equal(st.units.find(u => u.owner === 0 && u.type === 'SNIPER')?.maxAmmo, 2);
 
-    // Spend P0 CP to 2, pass P0->P1->P0 -> P0 regens +15 CP (to 17), clamped <= 30
+    // Spend P0 CP to 2, pass P0->P1->P0 -> P0 regens +10 CP (to 12)
     useGameStore.setState({ playerCp: { 0: 2, 1: 10 } });
     useGameStore.getState().endTurn();
     useGameStore.getState().endTurn();
     st = useGameStore.getState();
-    assert.equal(st.playerCp[0], 17);
+    assert.equal(st.playerCp[0], 12);
 
     // Ironman blocks AI checkSpawn even with ready graveyard units and gold
     const gMap = makeGrid(6);
@@ -1278,7 +1294,7 @@ test('Mutators: Blitz CP, Scarcity ammo & bank payouts, and Ironman zero respawn
             gameMode: 'PVE',
             victoryMode: 'DEATHMATCH',
             aiDifficulty: 'HARD',
-            mutators: { blitzCp: false, scarcity: false, ironman: true }
+            mutators: { classicCp: false, scarcity: false, ironman: true }
         },
         totalTurns: 1
     });

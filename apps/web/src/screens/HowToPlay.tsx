@@ -4,7 +4,7 @@ import {
   UNIT_STATS,
   TERRAIN_DEFENSE,
   TERRAIN_COSTS,
-  UNIT_COSTS,
+  RESPAWN_CP_COST,
   CP_SYSTEM,
   BASE_STATS,
   BANK_STATS,
@@ -144,7 +144,7 @@ export const HowToPlay: React.FC = () => {
                   <GeoWell coreStyle={{ padding: '14px' }}>
                     <h4 style={{ color: 'var(--acc-red-ink)', margin: '0 0 6px 0', fontSize: '14px' }}>☠️ DEATHMATCH (DOOMSDAY)</h4>
                     <p style={{ margin: 0, color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.55 }}>
-                      <strong>Objective:</strong> Eliminate <strong>ALL</strong> enemy units. If Doomsday is enabled, at Turn 30 map edges turn to <strong>LAVA</strong> shrinking inward every 5 turns.
+                      <strong>Objective:</strong> Eliminate <strong>ALL</strong> enemy units. If Doomsday is enabled, at Turn 30 map edges turn to <strong>LAVA</strong> shrinking inward every 5 turns. Collapse adds <strong>+2 CP regen</strong>; when the third ring begins, <strong>Meltdown</strong> raises it to <strong>+4 CP regen</strong>.
                     </p>
                   </GeoWell>
                 </div>
@@ -223,7 +223,7 @@ export const HowToPlay: React.FC = () => {
 
               <Section title="8. TACTICAL OPS & SETUP MUTATORS">
                 <ul style={{ color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.75, margin: 0, paddingLeft: '20px' }}>
-                  <li><strong>Blitz CP:</strong> 30 MAX CP battery with +15 CP/turn regeneration (22 CP opening turn).</li>
+                  <li><strong>Classic CP:</strong> 20 MAX CP battery with +10 CP/turn regeneration (15 CP opening turn).</li>
                   <li><strong>Scarcity:</strong> Cuts unit starting &amp; max ammo by 50% while boosting Bank vault rewards +50%.</li>
                   <li><strong>Ironman:</strong> Sets graveyard respawns to 0 — every loss is permanent.</li>
                 </ul>
@@ -248,7 +248,7 @@ export const HowToPlay: React.FC = () => {
                         }}
                       >
                         <strong style={{ fontSize: '15px' }}>{stats.name.toUpperCase()}</strong>
-                        <GeoChip variant="softAmber">€{UNIT_COSTS[key as UnitType]}</GeoChip>
+                        <GeoChip variant="softAmber">Redeploy {RESPAWN_CP_COST[key as UnitType]} CP</GeoChip>
                       </div>
                       <StatRow label="HP" value={stats.hp} />
                       <StatRow label="Attack" value={stats.damage} />

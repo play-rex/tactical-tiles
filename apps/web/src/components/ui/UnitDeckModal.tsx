@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { getTexture, preloadTextures } from '../../core/graphics/TextureManager';
-import { RESPAWN_TIMERS, UNIT_COSTS, UNIT_STATS } from '@tactical/engine/constants/Config';
+import { RESPAWN_CP_COST, RESPAWN_TIMERS, UNIT_STATS } from '@tactical/engine/constants/Config';
 import type { UnitType } from '@tactical/engine/types';
 import { GeoButton, GeoCard, GeoChip, GeoWell } from './GeoPrimitives';
 
@@ -112,7 +112,7 @@ const UnitDeckCard: React.FC<{ type: UnitType }> = ({ type }) => {
     ['RESPAWN', RESPAWN_TIMERS[type] + 't'],
     ['MOVE', stats.moveCost + ' CP'],
     ['SHOT', stats.attackCost + ' CP'],
-    ['REDEPLOY', '€' + UNIT_COSTS[type]],
+    ['REDEPLOY', RESPAWN_CP_COST[type] + ' CP'],
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 }}>

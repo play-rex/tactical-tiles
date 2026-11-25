@@ -4,9 +4,11 @@
  * rules say. The local game skips this (its UI only offers legal actions); the server and
  * the bots always go through it.
  */
-import { BARRIER_STATS, CP_SYSTEM, OVERWATCH_STATS, SHOP_ITEMS, UNIT_COSTS } from '../constants/Config';
+import { BARRIER_STATS, CP_SYSTEM, OVERWATCH_STATS, RESPAWN_CP_COST, SHOP_ITEMS } from '../constants/Config';
 import { getManhattanDistance, getValidMovesWithParents, hasLineOfSight } from '../grid/Pathfinding';
-import { canConstructOnTile, canUnitAttackFromTile, canUnitEnterOverwatch, getUnitAttackCost, getUnitRange } from '../rules/CombatRules';
+import { canConstructOnTile, canUnitAttackFromTile, canUnitEnterOverwatch, getEffectiveCpRules, getUnitAttackCost, getUnitRange } from '../rules/CombatRules';
+import { isPerkForClass } from '../constants/Perks';
+import { SPECTATOR_EFFECTS } from './SpectatorOps';
 import {
   INTERACT_COST,
   dropTilesFor,
@@ -30,6 +32,17 @@ const ok = (action: GameAction): Prepared => ({ ok: true, action });
 
 export function prepareAction(state: GameState, seat: number, action: GameAction, knownVisible?: Set<string>): Prepared {
   if (state.winner !== null) return fail('The match is over');
+
+  // An eliminated seat acts out of turn, but only inside its own window and only once.
+  if (action.type === 'SPECTATOR_ATTACK') {
+    if (state.settings.spectatorAttacks === false) return fail('Spectator attacks are off');
+    if (seat !== state.spectatorTurn) return fail('No spectator window is open');
+    if (state.playerStatus[seat] !== 'ELIMINATED') return fail('Only an eliminated player holds that window');
+    if (state.spectatorUsedRound === state.totalTurns + 1) return fail('Window already used this round');
+    if (!SPECTATOR_EFFECTS.some(e => e.id === action.effectId)) return fail('Unknown spectator effect');
+    return ok({ type: 'SPECTATOR_ATTACK', effectId: action.effectId });
+  }
+
   if (seat !== state.currentPlayer) return fail("It isn't your turn");
   if (state.playerStatus[seat] === 'ELIMINATED') return fail("You're out of this match");
 
@@ -57,6 +70,34 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
   switch (action.type) {
     case 'END_TURN':
       return ok({ type: 'END_TURN' });
+
+    case 'CHOOSE_PERK': {
+      const unit = ownUnit(action.unitId);
+      if (!unit) return fail('Pick one of your units');
+      if ((unit.rank ?? 0) < 1) return fail('Only a Veteran can take a perk');
+      if (unit.perk) return fail('That unit already has a perk');
+      if (!isPerkForClass(unit.type, action.perkId)) return fail('That perk is not available to this class');
+      return ok({ type: 'CHOOSE_PERK', unitId: unit.id, perkId: action.perkId });
+    }
+
+    case 'FINAL_PUSH': {
+      if (state.settings.victoryMode !== 'DEATHMATCH') return fail('Final Push is a Deathmatch rule');
+      if ((state.finalPush?.[seat] ?? null) !== 'READY') return fail('No Final Push token');
+      return ok({ type: 'FINAL_PUSH' });
+    }
+
+    case 'OVERCLOCK': {
+      const amount = Math.floor(action.amount);
+      if (!Number.isInteger(amount) || amount < 1 || amount > CP_SYSTEM.OVERCLOCK_MAX) {
+        return fail(`Borrow 1 to ${CP_SYSTEM.OVERCLOCK_MAX} CP`);
+      }
+      if ((state.playerCpBorrowed?.[seat] ?? 0) > 0 || (state.playerCpDebt?.[seat] ?? 0) > 0) {
+        return fail('Already overclocked this turn');
+      }
+      const cap = getEffectiveCpRules(state.settings.mutators).maxCp;
+      if (cp >= cap) return fail('Battery is already full');
+      return ok({ type: 'OVERCLOCK', amount: Math.min(amount, cap - cp) });
+    }
 
     case 'MOVE': {
       const unit = readyUnit(action.unitId);
@@ -168,12 +209,12 @@ export function prepareAction(state: GameState, seat: number, action: GameAction
       if (blocked) return fail(blocked);
       if (!isValidSpawnTile(state, seat, action.tileId)) return fail("Can't redeploy there");
       const dead = state.graveyard.find(u => u.id === action.deadUnitId)!;
-      return ok({
+      const cost = RESPAWN_CP_COST[dead.type];
+      return afford(cost, {
         type: 'SPAWN',
         unitType: dead.type,
         tileId: action.tileId,
-        cost: 0,
-        goldCost: UNIT_COSTS[dead.type],
+        cost,
         deadUnitId: dead.id,
       });
     }

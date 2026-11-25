@@ -18,8 +18,10 @@ import {
   BrandHeader,
   DifficultyButtons,
   EnvironmentToggles,
+  GoldEconomyControl,
   MutatorToggles,
   SECTION_LABEL,
+  SpectatorAttacksControl,
   SquadLoadoutControls,
   StageShell,
   TurnClockControls,
@@ -161,6 +163,21 @@ const RulesPanel: React.FC<{ settings: TableSettings; isHost: boolean; hasBots: 
 
       <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>TURN CLOCK (ONLINE)</div>
       <TurnClockControls turnBaseS={settings.turnBaseS ?? 30} turnIncrementS={settings.turnIncrementS ?? 15} disabled={!isHost} onPatch={set} />
+
+      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>GOLD ECONOMY</div>
+      <GoldEconomyControl
+        startingGold={settings.startingGold}
+        goldIncome={settings.goldIncome}
+        disabled={!isHost}
+        onChange={(startingGold, goldIncome) => set({ startingGold, goldIncome })}
+      />
+
+      <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>ELIMINATED PLAYER ATTACKS</div>
+      <SpectatorAttacksControl
+        value={settings.spectatorAttacks !== false}
+        disabled={!isHost}
+        onChange={spectatorAttacks => set({ spectatorAttacks })}
+      />
 
       <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>MUTATORS</div>
       <MutatorToggles mutators={settings.mutators} disabled={!isHost} onChange={mutators => set({ mutators })} />

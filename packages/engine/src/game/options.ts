@@ -2,7 +2,7 @@
  * What a player may do right now. The web UI highlights these; the server checks actions
  * against them, so the two can never disagree.
  */
-import { SHOP_ITEMS, UNIT_COSTS } from '../constants/Config';
+import { RESPAWN_CP_COST, SHOP_ITEMS } from '../constants/Config';
 import type { Tile, Unit, WeatherState } from '../types';
 import {
   calculateVisibility,
@@ -191,7 +191,7 @@ export const spawnBlocker = (state: GameState, player: number, deadUnitId: strin
   const dead = state.graveyard.find(u => u.id === deadUnitId);
   if (!dead || dead.owner !== player) return 'No such fallen unit';
   if (dead.turnsUntilRespawn > 0) return 'Not ready to redeploy yet';
-  if ((state.playerGold[player] ?? 0) < UNIT_COSTS[dead.type]) return 'Not enough Euros';
+  if ((state.playerCp[player] ?? 0) < RESPAWN_CP_COST[dead.type]) return 'Not enough CP';
   if ((state.playerRespawns[player] || 0) >= getEffectiveMaxRespawns(state.settings.mutators)) return 'No redeploys left';
   return null;
 };

@@ -19,6 +19,7 @@ import {
   mergeOnlineMapEdits,
   MIN_PLAYERS,
   prepareAction,
+  chooseBotSpectatorEffect,
   type GameAction,
   type GameEvent,
   type GameState,
@@ -46,6 +47,7 @@ import {
   seatMapAccessMsg,
   settingsMsg,
 } from './messages';
+import { SpectatorScheduler } from './SpectatorScheduler';
 import type { TableStore } from './store';
 
 interface Seat {
@@ -177,6 +179,8 @@ export class TableRoom extends Room {
   private holds = new Map<string, Deferred<Client>>();
   private messageAllowed = windowLimiter(1000);
   private pending: { clear(): void } | null = null;
+  /** A bot's pending spectator effect (eliminated seats act outside the turn order). */
+  private readonly spectatorScheduler = new SpectatorScheduler(this.clock);
   private restoreHold: { clear(): void } | null = null;
   /** Server timestamp (ms) when the current human turn expires. Null outside a human turn. */
   private turnDeadline: number | null = null;
@@ -532,6 +536,7 @@ export class TableRoom extends Room {
   override async onDispose() {
     this.pending?.clear();
     this.pending = null;
+    this.spectatorScheduler.cancel();
     this.restoreHold?.clear();
     this.restoreHold = null;
     this.turnTimeout?.clear();
@@ -595,15 +600,17 @@ export class TableRoom extends Room {
     );
     // Increment is uncapped: every action (other than ending the turn) banks its bonus.
     // CP costs bound how many actions a turn can hold, so active play earns time.
-    if (action.type !== 'END_TURN' && this.turnDeadline !== null) {
+    if (action.type !== 'END_TURN' && action.type !== 'SPECTATOR_ATTACK' && this.turnDeadline !== null) {
       this.turnDeadline += this.incrementMs();
     }
     this.seq++;
     // Record fog-honest missed-action batches per human seat for "While You Were Away" Turn Recap.
     const actorSeat =
-      action.type === 'BANK_REWARD'
-        ? (before.bankRewardPending?.playerId ?? before.currentPlayer)
-        : before.currentPlayer;
+      action.type === 'SPECTATOR_ATTACK'
+        ? (before.spectatorTurn ?? before.currentPlayer)
+        : action.type === 'BANK_REWARD'
+          ? (before.bankRewardPending?.playerId ?? before.currentPlayer)
+          : before.currentPlayer;
     const perSeat: (MissedActionBatch | null)[] = this.seats.map((s, i) => {
       if (s.isBot) return null;
       const evs = seatEvents[i];
@@ -653,6 +660,7 @@ export class TableRoom extends Room {
     this.pending = null;
     const game = this.game;
     if (!game || this.status !== 'playing' || game.winner !== null) {
+      this.spectatorScheduler.cancel();
       this.turnTimeout?.clear();
       this.turnTimeout = null;
       this.turnDeadline = null;
@@ -668,6 +676,7 @@ export class TableRoom extends Room {
     this.broadcastViews(seatEvents, reconnectedSeat);
     this.scheduleAutoTurn();
     this.scheduleTurnExpiry();
+    this.scheduleBotSpectator();
   }
 
   /** Connected humans get a hard deadline: on expiry their turn auto-ends. */
@@ -714,6 +723,39 @@ export class TableRoom extends Room {
       delay = Math.max(delay, graceRemaining);
     }
     this.pending = this.clock.setTimeout(() => this.playBotStep(turn), Math.max(0, delay));
+  }
+
+  /**
+   * An eliminated bot still takes its window: one effect, after the usual bot beat. The bot loop
+   * calls this after every action, so the scheduler keys the timer by window and never re-arms an
+   * already-counting one.
+   */
+  private scheduleBotSpectator() {
+    const game = this.game;
+    if (!game || this.status !== 'playing' || game.winner !== null) {
+      this.spectatorScheduler.cancel();
+      return;
+    }
+    const seat = game.spectatorTurn;
+    if (seat === null || seat === undefined) {
+      this.spectatorScheduler.cancel();
+      return;
+    }
+    const s = this.seats[seat];
+    if (!s || !s.isBot) {
+      this.spectatorScheduler.cancel();
+      return;
+    }
+    this.spectatorScheduler.arm(
+      { seat, round: game.totalTurns + 1, usedRound: game.spectatorUsedRound },
+      windowSeat => {
+        const g = this.game;
+        if (!g || this.status !== 'playing' || g.winner !== null || g.spectatorTurn !== windowSeat) return;
+        if (g.spectatorUsedRound === g.totalTurns + 1) return;
+        this.act(windowSeat, { type: 'SPECTATOR_ATTACK', effectId: chooseBotSpectatorEffect(g, windowSeat) });
+      },
+      Math.max(0, between(timings.botThinkMs)),
+    );
   }
 
   /** One action for the seat whose turn it is, chosen by the AI. */

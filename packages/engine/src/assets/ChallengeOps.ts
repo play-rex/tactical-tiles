@@ -69,7 +69,7 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
             fogOfWar: false,
             dynamicWeather: false,
             doomsdayEnabled: false,
-            mutators: { blitzCp: false, scarcity: false, ironman: true }
+            mutators: { classicCp: false, scarcity: false, ironman: true }
         },
         surviveTurns: 8,
         parRounds: 8,
@@ -132,7 +132,7 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
             fogOfWar: true,
             dynamicWeather: false,
             doomsdayEnabled: false,
-            mutators: { blitzCp: false, scarcity: false, ironman: true }
+            mutators: { classicCp: false, scarcity: false, ironman: true }
         },
         requiredHeists: 2,
         turnLimit: 12,
@@ -185,7 +185,7 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
             fogOfWar: false,
             dynamicWeather: false,
             doomsdayEnabled: false,
-            mutators: { blitzCp: false, scarcity: true, ironman: false }
+            mutators: { classicCp: false, scarcity: true, ironman: false }
         },
         turnLimit: 14,
         parRounds: 10,
@@ -228,9 +228,9 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
     {
         id: 'doomsday_meltdown',
         title: 'Doomsday Meltdown',
-        subtitle: 'Collapsing Arena • Blitz CP & Ironman',
+        subtitle: 'Collapsing Arena • Ironman',
         briefing:
-            'Drop straight into Round 30 as magma swallows the outer perimeter. Armed with Blitz CP (30 Max / +15 per turn), push through the shrinking central citadel and eliminate all hostiles.',
+            'Drop straight into Round 30 as magma swallows the outer perimeter. Armed with the standard 30 CP battery (+15 per turn), push through the shrinking central citadel and eliminate all hostiles.',
         difficultyLabel: 'EXTREME',
         gridSize: 16,
         seed: 'CHALDOOM',
@@ -242,7 +242,7 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
             fogOfWar: false,
             dynamicWeather: false,
             doomsdayEnabled: true,
-            mutators: { blitzCp: true, scarcity: false, ironman: true }
+            mutators: { classicCp: false, scarcity: false, ironman: true }
         },
         startingRound: 29,
         parRounds: 6,
@@ -291,7 +291,7 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
             fogOfWar: false,
             dynamicWeather: false,
             doomsdayEnabled: false,
-            mutators: { blitzCp: false, scarcity: false, ironman: true }
+            mutators: { classicCp: false, scarcity: false, ironman: true }
         },
         targetKillType: { owner: 1, minRank: 3 },
         turnLimit: 12,

@@ -69,10 +69,53 @@ export interface WeatherState {
 }
 
 export interface GameMutators {
-  blitzCp: boolean;
+  classicCp: boolean;
   scarcity: boolean;
   ironman: boolean;
 }
+
+// ── Phase 3 match arc ────────────────────────────────────────────
+
+export type ContractId =
+  | 'FIRST_BLOOD'
+  | 'LAND_GRAB'
+  | 'SKIRMISH'
+  | 'BREAKTHROUGH'
+  | 'VAULT_RACE'
+  | 'OVERWATCH_KILL'
+  | 'CROSSFIRE_KILL'
+  | 'DEMOLITION'
+  | 'ACE_HUNT'
+  | 'PURGE'
+  | 'WIPE';
+
+export type ContractTier = 1 | 2 | 3;
+
+/** The round's shared contract. One at a time; first completion only. */
+export interface SharedContract {
+  id: ContractId;
+  tier: ContractTier;
+  /** Round this contract was dealt for. */
+  round: number;
+  /** Seat that completed it, or null while it is live. */
+  claimedBy: number | null;
+  rewardCp: number;
+  rewardGold: number;
+  target: number;
+  /** Last round this card is live (dealt round + duration - 1). */
+  expiresRound?: number;
+}
+
+/** One Final Push token per player: granted once, spent once. */
+export type FinalPushStatus = 'READY' | 'USED';
+
+/** Map-level effects an eliminated player may fire from their window. */
+export type SpectatorEffectId =
+  | 'STATIC_STORM'
+  | 'SUPPLY_DROP'
+  | 'REPAIR_SURGE'
+  | 'BANK_BOOM'
+  | 'WAR_LEVY';
 
 export interface GameSettings {
   playerCount: number; // 2 to 6
@@ -92,6 +135,12 @@ export interface GameSettings {
   mapSeed?: string;
   mapGen?: MapGenConfig;
   mutators?: GameMutators;
+  /** Starting gold per seat. Defaults to GOLD_SETTINGS.INITIAL_GOLD. */
+  startingGold?: number;
+  /** Gold granted at the start of each turn, before building income. */
+  goldIncome?: number;
+  /** Eliminated players may fire one map effect on alternating rounds. Defaults to on. */
+  spectatorAttacks?: boolean;
   challengeId?: string;
 }
 
@@ -171,6 +220,14 @@ export type UnitType = 'SOLDIER' | 'ASSAULTER' | 'SNIPER';
 
 export type UnitRank = 0 | 1 | 2 | 3;
 
+export type PerkId =
+  | 'RELAY'
+  | 'SKIRMISHER'
+  | 'BULWARK'
+  | 'SAPPER'
+  | 'COLD_BORE'
+  | 'OVERWATCH_PLUS';
+
 export interface Unit {
   id: string;
   type: UnitType;
@@ -186,6 +243,8 @@ export interface Unit {
   // Veterancy
   xp?: number;
   rank?: UnitRank;
+  /** The one Veteran perk chosen for this unit, if any. */
+  perk?: PerkId;
   kills?: number;
   damageDealt?: number;
   

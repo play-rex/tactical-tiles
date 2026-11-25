@@ -212,6 +212,12 @@ export const resolveMoveWithOverwatch = (params: {
             let bestOw: Unit | null = null;
             let bestDmg = -1;
             let bestDist = Infinity;
+            // Bulwark: a living adjacent ally on the moving unit's side reduces the shot by 1.
+            const adjacentBulwark = units.some(u => {
+                if (u.id === movingUnit.id || u.owner !== movingUnit.owner || u.perk !== 'BULWARK') return false;
+                const ut = getTileByIdFast(mapData, u.tileId, gridSize);
+                return !!ut && getManhattanDistance(ut, stepTile) === 1;
+            });
 
             for (let j = 0; j < preparedOverwatchers.length; j++) {
                 const { ow, owTile, range, preCoverage } = preparedOverwatchers[j];
@@ -225,13 +231,14 @@ export const resolveMoveWithOverwatch = (params: {
                 if (fogOfWar && !getTeamVis(ow.owner).has(stepTile.id)) continue;
 
                 const outcome = calculateOverwatchOutcome(ow, owTile, stepTile, movingUnit.owner, movingUnit);
+                const dealt = Math.max(1, outcome.damage - (adjacentBulwark ? 1 : 0));
                 if (
                     !bestOw ||
-                    outcome.damage > bestDmg ||
-                    (outcome.damage === bestDmg && (dist < bestDist || (dist === bestDist && ow.id.localeCompare(bestOw.id) < 0)))
+                    dealt > bestDmg ||
+                    (dealt === bestDmg && (dist < bestDist || (dist === bestDist && ow.id.localeCompare(bestOw.id) < 0)))
                 ) {
                     bestOw = ow;
-                    bestDmg = outcome.damage;
+                    bestDmg = dealt;
                     bestDist = dist;
                 }
             }

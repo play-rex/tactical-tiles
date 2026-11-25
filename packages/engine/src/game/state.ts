@@ -7,7 +7,11 @@ import { UNIT_STATS } from '../constants/Config';
 import type {
   BankReward,
   BuildingSubType,
+  ContractId,
   DeadUnit,
+  FinalPushStatus,
+  SharedContract,
+  SpectatorEffectId,
   GameMutators,
   GameSettings,
   LandMine,
@@ -16,6 +20,7 @@ import type {
   MatchSummary,
   MissionConfig,
   PendingDrop,
+  PerkId,
   TerrainType,
   Tile,
   Unit,
@@ -38,7 +43,15 @@ export interface GameState {
   totalTurns: number;
   /** Individual turns (weather changes every 5). */
   turnCounter: number;
+  /** Round the last enemy HQ took damage; drives the AI aggression clock and the backstop. */
+  lastHqDamageRound: number;
   playerCp: Record<number, number>;
+  /** CP borrowed via Overclock, repaid automatically from the next turn's regen. */
+  playerCpDebt?: Record<number, number>;
+  /** CP borrowed this turn. Stays set even if a refund clears the debt, so one borrow per turn. */
+  playerCpBorrowed?: Record<number, number>;
+  /** Momentum CP refunded this turn, capped per player. */
+  playerCpRefunded?: Record<number, number>;
   playerGold: Record<number, number>;
   playerRespawns: Record<number, number>;
   playerStatus: Record<number, PlayerStatus>;
@@ -54,6 +67,24 @@ export interface GameState {
   mines: LandMine[];
   weather: WeatherState;
   gameLog: LogEntry[];
+  /** Phase 3: first direct attack/Overwatch hit has already paid out. */
+  firstContactDone?: boolean;
+  /** The round's shared contract, if the deck had anything this board could support. */
+  contract?: SharedContract | null;
+  /** Contract ids already dealt this match (no repeats). */
+  contractsUsed?: ContractId[];
+  /** Consecutive contracts that expired unclaimed; drives the tier drop and doubled bonus. */
+  contractMisses?: number;
+  /** Per-seat progress toward the live contract. */
+  contractProgress?: Record<number, number>;
+  /** Final Push token per seat. Absent means never granted. */
+  finalPush?: Record<number, FinalPushStatus>;
+  /** Eliminated seat holding this round's spectator-attack window, if any. */
+  spectatorTurn?: number | null;
+  /** Windows opened so far; rotates the window through the eliminated seats. */
+  spectatorWindow?: number;
+  /** Round whose window has already been spent (one effect per window). */
+  spectatorUsedRound?: number | null;
 }
 
 // ── Actions ──────────────────────────────────────────────────────
@@ -75,13 +106,21 @@ export type GameAction =
   /** A supply drop placed straight onto a tile beside one of your units (the AI's shop). */
   | { type: 'BUY_DROP'; itemKey: string; tileId: string; cost: number; goldCost: number }
   | { type: 'USE_ITEM'; unitId: string; itemIndex: number; cost: number }
-  | { type: 'SPAWN'; unitType: UnitType; tileId: string; cost: number; goldCost: number; deadUnitId?: string }
+  | { type: 'SPAWN'; unitType: UnitType; tileId: string; cost: number; deadUnitId?: string }
   /** A supply drop that lands at your chosen drop zone (or near your base) when your turn ends. */
   | { type: 'BUY_ITEM'; itemKey: string; tileId?: string }
   /** Build a Barrier wall, Land Mine, or Bridge from the shop. */
   | { type: 'BUILD'; itemKey: string; tileId: string; tileIds?: string[]; variant?: string }
   /** After a heist: take the vault's gold or its CP. */
-  | { type: 'BANK_REWARD'; choice: 'GOLD' | 'CP' };
+  | { type: 'BANK_REWARD'; choice: 'GOLD' | 'CP' }
+  /** Borrow CP now; the next turn's regen repays it automatically. */
+  | { type: 'OVERCLOCK'; amount: number }
+  /** Take the one-time Veteran perk. Free, and does not end the unit's action. */
+  | { type: 'CHOOSE_PERK'; unitId: string; perkId: PerkId }
+  /** Spend the once-per-match Final Push token: refill CP and clear Overclock debt. */
+  | { type: 'FINAL_PUSH' }
+  /** An eliminated player's window: fire one map effect. */
+  | { type: 'SPECTATOR_ATTACK'; effectId: SpectatorEffectId };
 
 export type GameActionType = GameAction['type'];
 
@@ -281,7 +320,11 @@ export const createEmptyGameState = (settings: GameSettings, gridSize = 20): Gam
   currentPlayer: 0,
   totalTurns: 0,
   turnCounter: 0,
+  lastHqDamageRound: 0,
   playerCp: {},
+  playerCpDebt: {},
+  playerCpBorrowed: {},
+  playerCpRefunded: {},
   playerGold: {},
   playerRespawns: {},
   playerStatus: {},
@@ -296,4 +339,13 @@ export const createEmptyGameState = (settings: GameSettings, gridSize = 20): Gam
   mines: [],
   weather: { playerZones: {}, turnsRemaining: 5 },
   gameLog: [],
+  firstContactDone: false,
+  contract: null,
+  contractsUsed: [],
+  contractMisses: 0,
+  contractProgress: {},
+  finalPush: {},
+  spectatorTurn: null,
+  spectatorWindow: 0,
+  spectatorUsedRound: null,
 });

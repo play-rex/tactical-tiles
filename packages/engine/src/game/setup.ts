@@ -10,6 +10,7 @@ import {
 import type { GameMutators, GameSettings, Tile, Unit, UnitType, WeatherState, WeatherType } from '../types';
 import { getManhattanDistance, getTileByIdFast } from '../grid/Pathfinding';
 import { assignVoronoiZones } from '../grid/ZoneGeneration';
+import { placeEdgeAwareBridges, pruneDeadEndBridges } from '../grid/BridgePlacement';
 import { applyUnitXp, getEffectiveCpRules, getUnitMaxHp } from '../rules/CombatRules';
 import { createSeededRng, generateSectorSeed, normalizeSeed } from '../utils/SeededRandom';
 import { getChallengeById } from '../assets/ChallengeOps';
@@ -17,6 +18,7 @@ import { PRESET_MAPS } from '../assets/Presets';
 import { cloneMatchStats, createEmptyGameState, createLog, createUnit, type GameState, type InventoryItem, type PlayerStatus } from './state';
 import { gameSettingsFor, type MapTilePatch, type TableSettings } from '../protocol';
 import { generateConfiguredMap, isClassicDynamicConfig, placeFairStartingLoot } from './mapPresets';
+import { withOpeningContract } from './Contracts';
 
 export const WEATHER_TYPES: WeatherType[] = ['CLEAR', 'SCORCHED', 'MONSOON', 'FOG', 'TAILWIND', 'SANDSTORM'];
 
@@ -272,6 +274,16 @@ export const generateDynamicMap = (
         Boolean(t && (t.type === 'PLAINS' || t.type === 'SAND'));
 
     // 5. Place cleanly spaced strategic Bridges (minimum 3-tile spacing, walkable approaches on both ends!)
+    const isFootWalkable = (t: Tile | null): boolean =>
+        !!t && t.type !== 'WATER' && t.type !== 'CANYON' && t.type !== 'MOUNTAIN' &&
+        t.type !== 'BUILDING' && t.type !== 'BANK' && t.type !== 'BASE' && t.type !== 'BARRIER';
+    /** An approach tile must lead somewhere other than straight back over the deck — otherwise the
+     *  crossing ends on a one-tile islet with water on three sides, a bridge to nowhere. */
+    const leadsOnward = (t: Tile, fromX: number, fromY: number): boolean =>
+        [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
+            if (t.x + dx === fromX && t.y + dy === fromY) return false;
+            return isFootWalkable(getTile(t.x + dx, t.y + dy));
+        });
     const placedBridges: Tile[] = [];
     const bridgeCandidates: Array<{ tile: Tile; bridgeType: 'BRIDGE' | 'BRIDGE_V' }> = [];
     for (const t of tiles) {
@@ -281,9 +293,9 @@ export const generateDynamicMap = (
         const right = getTile(t.x + 1, t.y);
         const top = getTile(t.x, t.y - 1);
         const bottom = getTile(t.x, t.y + 1);
-        if (isOpenGround(left) && isOpenGround(right)) {
+        if (isOpenGround(left) && isOpenGround(right) && leadsOnward(left, t.x, t.y) && leadsOnward(right, t.x, t.y)) {
             bridgeCandidates.push({ tile: t, bridgeType: 'BRIDGE' });
-        } else if (isOpenGround(top) && isOpenGround(bottom)) {
+        } else if (isOpenGround(top) && isOpenGround(bottom) && leadsOnward(top, t.x, t.y) && leadsOnward(bottom, t.x, t.y)) {
             bridgeCandidates.push({ tile: t, bridgeType: 'BRIDGE_V' });
         }
     }
@@ -305,6 +317,21 @@ export const generateDynamicMap = (
 
     const isNearBridgeApproach = (x: number, y: number): boolean =>
         placedBridges.some(b => Math.abs(b.x - x) + Math.abs(b.y - y) <= 1);
+
+    // Nothing may be built on a landing lane — the shore plus the tile straight beyond it along the
+    // deck axis — or the crossing becomes a wall at the far end.
+    const bridgeLandingIds = new Set<string>();
+    for (const b of placedBridges) {
+        const ax = b.type === 'BRIDGE' ? 1 : 0;
+        const ay = b.type === 'BRIDGE' ? 0 : 1;
+        for (const s of [1, -1] as const) {
+            const shore = getTile(b.x + ax * s, b.y + ay * s);
+            if (!shore || shore.type === 'BRIDGE' || shore.type === 'BRIDGE_V') continue;
+            bridgeLandingIds.add(shore.id);
+            const lane = getTile(shore.x + ax * s, shore.y + ay * s);
+            if (lane) bridgeLandingIds.add(lane.id);
+        }
+    }
 
     // 6. Carve concise tactical supply roads extending outward from primary bridge crossings
     const paintRoadLine = (x0: number, y0: number, x1: number, y1: number) => {
@@ -718,7 +745,7 @@ export const generateDynamicMap = (
     // Place Banks in contested interior sectors (inset >= 2 tiles from map edges so vaults never hide in corners!)
     const idealCenterDist = Math.round(size * 0.24);
     for (let i = 0; i < numPlayers; i++) {
-        const candidates = zoneTiles[i].filter(t => !isNearBridgeApproach(t.x, t.y));
+        const candidates = zoneTiles[i].filter(t => !isNearBridgeApproach(t.x, t.y) && !bridgeLandingIds.has(t.id));
         const base = baseLocations[i];
         const scored = candidates.map(t => {
             const dBase = dist(t, base);
@@ -772,6 +799,7 @@ export const generateDynamicMap = (
             for (const cand of outpostCandidates) {
                 const t = cand.tile;
                 if (dist(t, base) < 4) continue;
+                if (bridgeLandingIds.has(t.id)) continue;
                 if (allAssets.some(a => dist(t, a) < minAssetGap)) continue;
                 t.type = 'BUILDING';
                 t.subType = 'WATCHTOWER';
@@ -795,6 +823,7 @@ export const generateDynamicMap = (
             for (const cand of bunkerCandidates) {
                 const t = cand.tile;
                 if (dist(t, base) < 3) continue;
+                if (bridgeLandingIds.has(t.id)) continue;
                 if (allAssets.some(a => dist(t, a) < minAssetGap)) continue;
                 t.type = 'BUILDING';
                 t.subType = 'BUNKER';
@@ -812,7 +841,7 @@ export const generateDynamicMap = (
         const centerOutpostTarget = numPlayers > 2 ? 2 : 1;
         const allAssets = [...placedBanks, ...placedBuildings];
         const centerCandidates = tiles
-            .filter(t => isOpenGround(t) && !isNearAnyBase(t.x, t.y, 5) && !isNearBridgeApproach(t.x, t.y))
+            .filter(t => isOpenGround(t) && !isNearAnyBase(t.x, t.y, 5) && !isNearBridgeApproach(t.x, t.y) && !bridgeLandingIds.has(t.id))
             .map(t => ({ tile: t, dCenter: dist(t, mapCenter) }))
             .filter(c => c.dCenter <= (numPlayers > 2 ? 7 : 5))
             .sort((a, b) => a.dCenter - b.dCenter);
@@ -859,28 +888,54 @@ export const generateDynamicMap = (
                 }
 
                 if (!reached) {
-                    let cx = origin.x;
-                    let cy = origin.y;
-                    while (cx !== targetBase.x || cy !== targetBase.y) {
-                        const prevX = cx;
-                        if (cx !== targetBase.x) cx += cx < targetBase.x ? 1 : -1;
-                        else if (cy !== targetBase.y) cy += cy < targetBase.y ? 1 : -1;
-                        const movedH = cx !== prevX;
-                        const stepTile = getTile(cx, cy);
-                        if (stepTile && stepTile.id !== targetBase.id && stepTile.type !== 'BASE' && isGroundBlocked(stepTile)) {
-                            stepTile.type =
-                                stepTile.type === 'WATER' || stepTile.type === 'CANYON'
-                                    ? (movedH ? 'BRIDGE' : 'BRIDGE_V')
-                                    : baseGroundAt(stepTile.x, stepTile.y);
-                            stepTile.subType = undefined;
-                            stepTile.owner = undefined;
-                            stepTile.height = 1;
-                        }
-                    }
+                    // A real span-based crossing, not a staircase walk that turns single water tiles into
+                    // decks: the guarantee carves a corridor and bridges shore to shore along it, so no
+                    // deck can end on a one-tile islet with water on three sides.
+                    placeEdgeAwareBridges(tiles, size, {
+                        maxSpan: 8,
+                        minSpacing: 3,
+                        targetBridges: 0,
+                        anchors: [origin, targetBase],
+                        groundTypeAt: baseGroundAt,
+                        allowCarveObstacles: true,
+                        rng,
+                    });
                 }
             }
         }
     }
+
+    // Reopen any crossing a later pass pinned shut: a mountain or building on a shore's only exit.
+    const passableLand = (t: Tile | null): boolean =>
+        !!t && t.type !== 'WATER' && t.type !== 'CANYON' && t.type !== 'MOUNTAIN' &&
+        t.type !== 'BUILDING' && t.type !== 'BANK' && t.type !== 'BASE' && t.type !== 'BARRIER' &&
+        t.type !== 'BRIDGE' && t.type !== 'BRIDGE_V';
+    const openUp = (t: Tile | null) => {
+        if (!t || (t.type !== 'BUILDING' && t.type !== 'MOUNTAIN')) return;
+        t.type = baseGroundAt(t.x, t.y);
+        t.subType = undefined;
+        t.owner = undefined;
+        t.height = 1;
+    };
+    for (const b of tiles) {
+        if (b.type !== 'BRIDGE' && b.type !== 'BRIDGE_V') continue;
+        const ax = b.type === 'BRIDGE' ? 1 : 0;
+        const ay = b.type === 'BRIDGE' ? 0 : 1;
+        for (const s of [1, -1] as const) {
+            const shore = getTile(b.x + ax * s, b.y + ay * s);
+            if (!shore || !passableLand(shore)) continue;
+            openUp(getTile(shore.x + ax * s, shore.y + ay * s));
+            const exits = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+                .map(([dx, dy]) => getTile(shore.x + dx, shore.y + dy))
+                .filter(t => passableLand(t));
+            if (exits.length > 0) continue;
+            for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) openUp(getTile(shore.x + dx, shore.y + dy));
+        }
+    }
+
+    // No bridge to nowhere: a deck whose landing leads back only to water, a stone or a wall is a
+    // stub, so it goes back to being channel.
+    pruneDeadEndBridges(tiles, size);
 
     return { map: tiles, size, baseLocations };
 };
@@ -962,7 +1017,7 @@ const startingPlayers = (
     };
     for (let i = 0; i < settings.playerCount; i++) {
         out.playerCp[i] = overrides.cp?.[i] ?? (i === 0 ? cpRules.p1Round1Cp : cpRules.maxCp);
-        out.playerGold[i] = overrides.gold?.[i] ?? GOLD_SETTINGS.INITIAL_GOLD;
+        out.playerGold[i] = overrides.gold?.[i] ?? settings.startingGold ?? GOLD_SETTINGS.INITIAL_GOLD;
         out.playerRespawns[i] = 0;
         out.playerStatus[i] = 'ACTIVE';
         out.playerInventory[i] = [];
@@ -1018,11 +1073,14 @@ const freshGame = (
     units: Unit[],
     activeSeed: string,
     players: StartingPlayers
-): GameState => ({
+): GameState => withOpeningContract({
     ...createEmptyGameState(settings, gridSize),
     mapData,
     units,
     ...players,
+    playerCpDebt: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
+    playerCpBorrowed: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
+    playerCpRefunded: Object.fromEntries(Array.from({ length: settings.playerCount }, (_, i) => [i, 0])),
     activeSeed,
     matchStats: cloneMatchStats(undefined, settings.playerCount),
 });
@@ -1218,7 +1276,7 @@ const settingsForMission = (
     fogOfWar: mission.settings.fogOfWar ?? false,
     dynamicWeather: mission.settings.dynamicWeather ?? false,
     doomsdayEnabled: mission.settings.doomsdayEnabled ?? false,
-    mutators: mission.settings.mutators ?? { blitzCp: false, scarcity: false, ironman: false },
+    mutators: mission.settings.mutators ?? { classicCp: false, scarcity: false, ironman: false },
     mapSeed: mission.seed,
     challengeId: mission.id,
 });

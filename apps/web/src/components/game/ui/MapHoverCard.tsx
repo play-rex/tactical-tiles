@@ -22,12 +22,50 @@ import {
   isWithinEnemyHqExclusion,
 } from '@tactical/engine/rules/CombatRules';
 import { useViewportContext } from '../../../context/ViewportContext';
+import { UnitMapIcon } from '../../../components/ui/UnitDeckModal';
 import {
   computeUnitAttackPreview,
   getHoveredEnemyBlocker,
   getHoverMoveResolution,
   getPostMoveTargetTiles,
 } from '../../../core/hoverMovePreview';
+
+type CardContent = {
+  tone: string;
+  headerLeft: string;
+  headerRight: string;
+  body: string;
+  tags: React.ReactNode[];
+};
+
+const CHIP_STYLE: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.12)',
+  padding: '1px 5px',
+  borderRadius: '3px',
+  fontSize: '10px',
+  fontWeight: 800,
+  color: '#FDE68A',
+};
+
+/**
+ * Move cost as `<unit icon> N CP` instead of a bare `STEP 2/4 CP`.
+ * The icon comes from UnitMapIcon, which snapshots the same procedural Pixi texture the board
+ * draws — the PNGs under /assets/legacyunits are fallback-only art (see assets/LEGACY_ASSETS.md).
+ */
+const MoveCostChip: React.FC<{ type: 'SOLDIER' | 'ASSAULTER' | 'SNIPER'; cost: number }> = ({ type, cost }) => (
+  <span
+    style={{
+      ...CHIP_STYLE,
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '3px',
+      padding: '1px 5px 1px 2px',
+    }}
+  >
+    <UnitMapIcon type={type} label={UNIT_STATS[type].name} size={16} />
+    <span>{cost} CP</span>
+  </span>
+);
 import { rotateBoardPoint } from '../../../core/boardRotation';
 import { useGameStore, viewerSeat } from '../../../store/useGameStore';
 import { useOnline } from '../../../net/useOnline';
@@ -131,7 +169,7 @@ export const MapHoverCard: React.FC = () => {
 
   const pos = computeScreenPos();
 
-  const cardContent = useMemo(() => {
+  const cardContent = useMemo<CardContent | null>(() => {
     if (mapFeedback) {
       return {
         tone: mapFeedback.tone === 'warn' ? 'amber' : 'blue',
@@ -278,14 +316,14 @@ export const MapHoverCard: React.FC = () => {
         const leftCp = currentCp - moveCost;
         const atkCost = getUnitAttackCost(selectedUnit);
         const canStillFire = selectedUnit.ammo > 0 && leftCp >= atkCost;
-        const tags: string[] = [];
+        const tags: React.ReactNode[] = [];
         const tileWeather = getTileWeather(anchorTile, weather);
         const stepCost = getStepCost(anchorTile, selectedUnit.type, currentPlayer, weather, selectedUnit.rank ?? 0);
         if (anchorTile.zone !== undefined && tileWeather !== 'CLEAR') {
           tags.push(`Z${anchorTile.zone + 1} ${tileWeather}`);
         }
         if (stepCost !== null) {
-          tags.push(`STEP ${stepCost} CP`);
+          tags.push(<MoveCostChip type={selectedUnit.type} cost={stepCost} />);
         }
 
         const defPct = anchorTile.type === 'BUILDING' && anchorTile.subType
@@ -477,13 +515,16 @@ export const MapHoverCard: React.FC = () => {
     if (settings.fogOfWar && !visibleTiles.has(anchorTile.id) && !pendingDrop) return null;
 
     const tags: string[] = [];
+    const chips: React.ReactNode[] = [];
     const tileWeather = getTileWeather(anchorTile, weather);
     if (anchorTile.zone !== undefined && tileWeather !== 'CLEAR') {
       tags.push(`Z${anchorTile.zone + 1} ${tileWeather}`);
     }
     const baseStepCost = TERRAIN_COSTS[anchorTile.type] ?? 1;
     if (anchorTile.type === 'MOUNTAIN') {
-      tags.push('SNIPER ONLY • 3 CP');
+      tags.push('SNIPER ONLY');
+      const sniperStep = getStepCost(anchorTile, 'SNIPER', currentPlayer, weather, 0);
+      if (sniperStep !== null) chips.push(<MoveCostChip type="SNIPER" cost={sniperStep} />);
     } else if (anchorTile.type === 'BUILDING') {
       if (anchorTile.owner === null || anchorTile.owner === undefined) {
         tags.push('BLOCKS PASSAGE • SECURE ADJ');
@@ -495,11 +536,9 @@ export const MapHoverCard: React.FC = () => {
     } else if (baseStepCost < 90) {
       const scoutStep = getStepCost(anchorTile, 'SOLDIER', currentPlayer, weather, 0);
       const heavyStep = getStepCost(anchorTile, 'ASSAULTER', currentPlayer, weather, 0);
-      if (scoutStep !== null && heavyStep !== null) {
-        tags.push(`STEP ${scoutStep}/${heavyStep} CP`);
-      } else {
-        tags.push(`BASE ${baseStepCost} CP`);
-      }
+      if (scoutStep !== null) chips.push(<MoveCostChip type="SOLDIER" cost={scoutStep} />);
+      if (heavyStep !== null) chips.push(<MoveCostChip type="ASSAULTER" cost={heavyStep} />);
+      if (scoutStep === null && heavyStep === null) tags.push(`BASE ${baseStepCost} CP`);
     } else {
       tags.push('IMPASSABLE');
     }
@@ -534,7 +573,7 @@ export const MapHoverCard: React.FC = () => {
       headerLeft: title,
       headerRight: rightTag,
       body: tags.join(' • '),
-      tags: [] as string[],
+      tags: chips,
     };
   }, [
     mapFeedback,
@@ -615,21 +654,15 @@ export const MapHoverCard: React.FC = () => {
             <div style={{ fontWeight: 700, color: '#F1F5F9' }}>{cardContent.body}</div>
             {cardContent.tags.length > 0 && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px' }}>
-                {cardContent.tags.map((tag, i) => (
-                  <span
-                    key={i}
-                    style={{
-                      background: 'rgba(255,255,255,0.12)',
-                      padding: '1px 5px',
-                      borderRadius: '3px',
-                      fontSize: '10px',
-                      fontWeight: 800,
-                      color: '#FDE68A',
-                    }}
-                  >
-                    {tag}
-                  </span>
-                ))}
+                {cardContent.tags.map((tag, i) =>
+                  typeof tag === 'string' ? (
+                    <span key={i} style={CHIP_STYLE}>
+                      {tag}
+                    </span>
+                  ) : (
+                    <React.Fragment key={i}>{tag}</React.Fragment>
+                  ),
+                )}
               </div>
             )}
           </div>

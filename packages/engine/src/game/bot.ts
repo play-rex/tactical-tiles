@@ -10,6 +10,8 @@ export function botAction(state: GameState, difficulty: AIDifficulty = state.set
     units: state.units,
     currentPlayer: p,
     playerCp: state.playerCp[p],
+    playerCpDebt: state.playerCpDebt?.[p] ?? 0,
+    playerCpBorrowed: state.playerCpBorrowed?.[p] ?? 0,
     playerGold: state.playerGold[p],
     playerRespawns: state.playerRespawns[p] || 0,
     playerInventory: state.playerInventory[p],
@@ -21,5 +23,8 @@ export function botAction(state: GameState, difficulty: AIDifficulty = state.set
     gridSize: state.gridSize,
     settings: state.settings,
     totalTurns: state.totalTurns,
+    lastHqDamageRound: state.lastHqDamageRound,
+    contract: state.contract ?? null,
+    finalPush: state.finalPush?.[p],
   }) as GameAction;
 }

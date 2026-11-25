@@ -83,6 +83,25 @@ export const isWalkableShore = (t: Tile | null | undefined): boolean =>
 export const isFootPassable = (t: Tile | null | undefined): boolean =>
   !!t && (isWalkableShore(t) || isBridgeTerrain(t.type));
 
+/**
+ * A shore must lead somewhere other than straight back over the deck. A one-tile islet with water on
+ * its other three sides makes the crossing a bridge to nowhere, so such spans are never placed.
+ * (deckDx/deckDy point from the shore towards the deck and are skipped.)
+ */
+const shoreLeadsOnward = (
+  map: Tile[],
+  size: number,
+  shore: Tile,
+  deckDx: number,
+  deckDy: number,
+): boolean => {
+  for (const [dx, dy] of DIRS_4) {
+    if (dx === deckDx && dy === deckDy) continue;
+    if (isFootPassable(atGrid(map, size, shore.x + dx, shore.y + dy))) return true;
+  }
+  return false;
+};
+
 const atGrid = (map: Tile[], size: number, x: number, y: number): Tile | null =>
   x >= 0 && y >= 0 && x < size && y < size ? map[y * size + x] : null;
 
@@ -176,7 +195,15 @@ const scanBridgeCandidates = (
       const len = endX - x + 1;
       const shoreA = atGrid(map, size, x - 1, y);
       const shoreB = atGrid(map, size, endX + 1, y);
-      if (len <= maxSpan && shoreA && shoreB && isWalkableShore(shoreA) && isWalkableShore(shoreB)) {
+      if (
+        len <= maxSpan &&
+        shoreA &&
+        shoreB &&
+        isWalkableShore(shoreA) &&
+        isWalkableShore(shoreB) &&
+        shoreLeadsOnward(map, size, shoreA, 1, 0) &&
+        shoreLeadsOnward(map, size, shoreB, -1, 0)
+      ) {
         let northFlank = 0;
         let southFlank = 0;
         let bothFlank = 0;
@@ -244,7 +271,15 @@ const scanBridgeCandidates = (
       const len = endY - y + 1;
       const shoreA = atGrid(map, size, x, y - 1);
       const shoreB = atGrid(map, size, x, endY + 1);
-      if (len <= maxSpan && shoreA && shoreB && isWalkableShore(shoreA) && isWalkableShore(shoreB)) {
+      if (
+        len <= maxSpan &&
+        shoreA &&
+        shoreB &&
+        isWalkableShore(shoreA) &&
+        isWalkableShore(shoreB) &&
+        shoreLeadsOnward(map, size, shoreA, 0, 1) &&
+        shoreLeadsOnward(map, size, shoreB, 0, -1)
+      ) {
         let westFlank = 0;
         let eastFlank = 0;
         let bothFlank = 0;
@@ -781,4 +816,202 @@ export const auditBridgeOrientation = (map: Tile[], size: number): BridgeAuditIs
     }
   }
   return issues;
+};
+
+/** A land area this small is a stone — a landing there needs another crossing to be worth it. */
+const MIN_LAND_AREA = 3;
+
+/**
+ * Finds bridge-to-nowhere crossings. A crossing is a contiguous run of one deck type; it is judged by
+ * its two end landings, never by interior deck tiles (which have water on both perpendicular sides by
+ * construction). It is a stub when an end landing is missing, or when that landing is a *dead-end
+ * stone*: a land area under MIN_LAND_AREA tiles with no Base/Bank and no other crossing on it.
+ * Terrain placed after bridges (mountains, banks, buildings) can seal a landing that looked open when
+ * the deck went down, so this is evaluated on the finished map. Evaluation repeats to a fixed point,
+ * because taking out one stub can leave another crossing's stone without a second crossing.
+ */
+const findStubRuns = (map: Tile[], size: number): Tile[][] => {
+  const removed = new Set<string>();
+  const stubRuns: Tile[][] = [];
+  for (let pass = 0; pass < 8; pass++) {
+    // Land areas, counted without decks, so a stone does not look like a continent.
+    const comp = new Int32Array(size * size).fill(-1);
+    const sizes: number[] = [];
+    const hasPlace: boolean[] = [];
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const idx = y * size + x;
+        if (comp[idx] !== -1 || !isWalkableShore(map[idx])) continue;
+        const cid = sizes.length;
+        let n = 0;
+        let place = false;
+        const stack = [idx];
+        comp[idx] = cid;
+        while (stack.length) {
+          const cur = stack.pop()!;
+          n++;
+          const cx = cur % size;
+          const cy = (cur - cx) / size;
+          for (const [dx, dy] of DIRS_4) {
+            const nb = atGrid(map, size, cx + dx, cy + dy);
+            if (!nb) continue;
+            if (nb.type === 'BASE' || nb.type === 'BANK') place = true;
+            if (!isWalkableShore(nb)) continue;
+            const ni = nb.y * size + nb.x;
+            if (comp[ni] !== -1) continue;
+            comp[ni] = cid;
+            stack.push(ni);
+          }
+        }
+        sizes.push(n);
+        hasPlace.push(place);
+      }
+    }
+
+    // Group decks into contiguous runs of one type, then note which land areas each run touches.
+    const runs: Tile[][] = [];
+    const onRun = new Set<string>();
+    for (const deck of map) {
+      if (!isBridgeTerrain(deck.type) || removed.has(deck.id) || onRun.has(deck.id)) continue;
+      const ax = deck.type === 'BRIDGE' ? 1 : 0;
+      const ay = deck.type === 'BRIDGE' ? 0 : 1;
+      let sx = deck.x;
+      let sy = deck.y;
+      for (;;) {
+        const prev = atGrid(map, size, sx - ax, sy - ay);
+        if (!prev || prev.type !== deck.type || removed.has(prev.id)) break;
+        sx -= ax;
+        sy -= ay;
+      }
+      const run: Tile[] = [];
+      let cx = sx;
+      let cy = sy;
+      for (;;) {
+        const t = atGrid(map, size, cx, cy);
+        if (!t || t.type !== deck.type || removed.has(t.id) || onRun.has(t.id)) break;
+        onRun.add(t.id);
+        run.push(t);
+        cx += ax;
+        cy += ay;
+      }
+      if (run.length > 0) runs.push(run);
+    }
+
+    const compRuns: Array<Set<number>> = sizes.map(() => new Set<number>());
+    runs.forEach((run, i) => {
+      const touched = new Set<number>();
+      for (const t of run) {
+        for (const [dx, dy] of DIRS_4) {
+          const nb = atGrid(map, size, t.x + dx, t.y + dy);
+          if (!nb) continue;
+          const c = comp[nb.y * size + nb.x];
+          if (c !== -1) touched.add(c);
+        }
+      }
+      touched.forEach(c => compRuns[c].add(i));
+    });
+
+    const viableComp = (c: number): boolean =>
+      c === -1 || sizes[c] >= MIN_LAND_AREA || hasPlace[c] || compRuns[c].size >= 2;
+
+    let changed = false;
+    for (const run of runs) {
+      const ax = run[0].type === 'BRIDGE' ? 1 : 0;
+      const ay = run[0].type === 'BRIDGE' ? 0 : 1;
+      const first = run[0];
+      const last = run[run.length - 1];
+      const landing = (t: Tile, dir: number): Tile | null => {
+        const nb = atGrid(map, size, t.x + ax * dir, t.y + ay * dir);
+        return nb && !isBridgeTerrain(nb.type) && isWalkableShore(nb) ? nb : null;
+      };
+      const ends = [landing(first, -1), landing(last, 1)];
+      const servesPlace = run.some(t =>
+        DIRS_4.some(([dx, dy]) => {
+          const nb = atGrid(map, size, t.x + dx, t.y + dy);
+          return !!nb && (nb.type === 'BASE' || nb.type === 'BANK');
+        }),
+      );
+      const viable = servesPlace || ends.every(sh => sh !== null && viableComp(comp[sh.y * size + sh.x]));
+      if (viable) continue;
+      for (const t of run) removed.add(t.id);
+      stubRuns.push(run);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  return stubRuns;
+};
+
+/** Every deck tile that belongs to a bridge to nowhere. */
+export const findStubBridges = (map: Tile[], size: number): Tile[] =>
+  findStubRuns(map, size).flat();
+
+/** How many Bases/Banks can be reached on foot from the first one (some maps start with a pocket). */
+const reachableAnchors = (map: Tile[], size: number): number => {
+  const anchors = map.filter(t => t.type === 'BASE' || t.type === 'BANK');
+  if (anchors.length < 2) return anchors.length;
+  const seen = new Set<string>();
+  const stack: Tile[] = [];
+  for (const [dx, dy] of DIRS_4) {
+    const nb = atGrid(map, size, anchors[0].x + dx, anchors[0].y + dy);
+    if (nb && isFootPassable(nb) && !seen.has(nb.id)) {
+      seen.add(nb.id);
+      stack.push(nb);
+    }
+  }
+  while (stack.length) {
+    const c = stack.pop()!;
+    for (const [dx, dy] of DIRS_4) {
+      const nb = atGrid(map, size, c.x + dx, c.y + dy);
+      if (!nb || seen.has(nb.id) || !isFootPassable(nb)) continue;
+      seen.add(nb.id);
+      stack.push(nb);
+    }
+  }
+  return anchors.filter(a =>
+    DIRS_4.some(([dx, dy]) => {
+      const nb = atGrid(map, size, a.x + dx, a.y + dy);
+      return !!nb && seen.has(nb.id);
+    }),
+  ).length;
+};
+
+/**
+ * Turns bridges to nowhere back into channel, one crossing at a time. A crossing that would cost a
+ * Base or Bank its route is put back: a cosmetic clean-up must never disconnect the map.
+ * Returns the decks that were removed.
+ */
+export const pruneDeadEndBridges = (map: Tile[], size: number): Tile[] => {
+  const removed: Tile[] = [];
+  // A map can already ship with an unreachable pocket; only *new* damage counts against a removal.
+  const baselineReach = reachableAnchors(map, size);
+  // Repeat: removing one crossing can leave another one's landing as a dead-end stone, and a
+  // crossing the connectivity guard puts back may be judged again once its neighbours are gone.
+  for (let round = 0; round < 4; round++) {
+    const runs = findStubRuns(map, size);
+    if (runs.length === 0) break;
+    let removedThisRound = 0;
+    for (const run of runs) {
+      const snapshot = run.map(t => t.type);
+      for (const deck of run) {
+        const canyonNeighbour = DIRS_4.some(([dx, dy]) => atGrid(map, size, deck.x + dx, deck.y + dy)?.type === 'CANYON');
+        deck.type = canyonNeighbour ? 'CANYON' : 'WATER';
+        deck.height = 0;
+        deck.subType = undefined;
+        deck.owner = undefined;
+        deck.loot = null;
+      }
+      if (reachableAnchors(map, size) >= baselineReach) {
+        removed.push(...run);
+        removedThisRound++;
+        continue;
+      }
+      run.forEach((t, i) => {
+        t.type = snapshot[i];
+        t.height = 1;
+      });
+    }
+    if (removedThisRound === 0) break;
+  }
+  return removed;
 };

@@ -12,7 +12,7 @@ import {
   CP_SYSTEM,
   GOLD_SETTINGS,
   LAND_MINE_STATS,
-  UNIT_COSTS,
+  RESPAWN_CP_COST,
   SHOP_ITEMS,
   BUILDING_STATS,
   BARRIER_STATS,
@@ -22,8 +22,12 @@ import {
   OVERWATCH_STATS,
   MUTATOR_CONFIG,
 } from '@tactical/engine/constants/Config';
+import { PERKS_BY_CLASS, PERK_LABELS } from '@tactical/engine/constants/Perks';
 import { Tile, Unit, WeatherType, LogEntry, MatchSummary } from '@tactical/engine/types';
 import { getManhattanDistance, getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
+import { getDoomsdayEscalation } from '@tactical/engine/grid/DoomsdayManager';
+import { contractDef } from '@tactical/engine/game/Contracts';
+import { nextSpectatorWindowRound, SPECTATOR_EFFECTS } from '@tactical/engine/game/SpectatorOps';
 import {
   calculateSiegeDamage,
   calculateDemolishDamage,
@@ -339,12 +343,17 @@ const CpSegMeter: React.FC<{ cp: number; maxCp: number }> = ({ cp, maxCp }) => {
 export const LeftPanel: React.FC = React.memo(() => {
   // Online: the players' names, beside their colours
   const online = useGameStore(state => state.mode === 'ONLINE');
+  const mode = useGameStore(state => state.mode);
   const mySeat = useGameStore(state => state.mySeat);
+  const spectatorTurn = useGameStore(state => state.spectatorTurn);
   const onlineSeats = useOnline(state => state.view?.seats);
   const playerNames = useGameStore(state => state.settings.playerNames);
   const currentPlayer = useGameStore(state => state.currentPlayer);
   const playerCount = useGameStore(state => state.settings.playerCount);
   const playerCp = useGameStore(state => state.playerCp);
+  const playerCpDebt = useGameStore(state => state.playerCpDebt);
+  const playerCpBorrowed = useGameStore(state => state.playerCpBorrowed);
+  const executeAiAction = useGameStore(state => state.executeAiAction);
   const playerGold = useGameStore(state => state.playerGold);
   const playerRespawns = useGameStore(state => state.playerRespawns);
   const playerStatus = useGameStore(state => state.playerStatus);
@@ -365,7 +374,7 @@ export const LeftPanel: React.FC = React.memo(() => {
   const cancelPlacement = useGameStore(state => state.cancelPlacement);
 
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const maxCp = settings.mutators?.blitzCp ? MUTATOR_CONFIG.BLITZ_CP.MAX_CP : CP_SYSTEM.MAX_CP;
+  const maxCp = settings.mutators?.classicCp ? MUTATOR_CONFIG.CLASSIC_CP.MAX_CP : CP_SYSTEM.MAX_CP;
   const isMyTurn = !isAiTurn && winner === null;
 
   useEffect(() => {
@@ -405,6 +414,12 @@ export const LeftPanel: React.FC = React.memo(() => {
     return counts;
   }, [units, settings.victoryMode]);
 
+  // Whose eliminated card becomes the attack console: yours online, P1 against the AI, or the
+  // seat holding the window at a shared screen. It stays put when the setup switch is off, so the
+  // console can say so rather than silently disappearing.
+  const consoleSeat =
+    mode === 'ONLINE' ? mySeat : settings.gameMode === 'PVE' ? 0 : spectatorTurn;
+
   const renderPlayerSection = (pid: number) => {
     const isCompactMode = playerCount > 4;
     const isExpanded = !isCompactMode || expandedId === pid;
@@ -417,6 +432,8 @@ export const LeftPanel: React.FC = React.memo(() => {
     const maxRespawns = getEffectiveMaxRespawns(settings.mutators);
     const respawnsLeft = Math.max(0, maxRespawns - respawnsUsed);
     const inventory = playerInventory[pid] || [];
+    const pendingPromotions = units.filter(u => u.owner === pid && (u.rank ?? 0) >= 1 && !u.perk).length;
+    const borrowableCp = Math.max(0, Math.min(CP_SYSTEM.OVERCLOCK_MAX, maxCp - (playerCp[pid] ?? 0)));
 
     let statsLabel = '';
     let statsValue = '';
@@ -430,6 +447,7 @@ export const LeftPanel: React.FC = React.memo(() => {
     }
 
     if (isEliminated) {
+      if (pid === consoleSeat && winner === null) return <SpectatorConsole key={pid} seat={pid} />;
       return (
         <GeoCard key={pid} style={{ opacity: 0.55, flexShrink: 0 }}>
           <div style={{ padding: '7px 11px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -503,11 +521,30 @@ export const LeftPanel: React.FC = React.memo(() => {
               <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--op-ink-muted)' }}>CP</span>
               <span style={{ fontSize: '13px', fontWeight: 900, color: 'var(--acc-blue-ink)' }}>
                 {playerCp[pid]}/{maxCp}
+                {(playerCpDebt?.[pid] ?? 0) > 0 ? ` · DEBT ${playerCpDebt?.[pid]}` : ''}
               </span>
             </GeoWell>
           </div>
 
           {isCurrent && <CpSegMeter cp={playerCp[pid] ?? 0} maxCp={maxCp} />}
+
+          {pendingPromotions > 0 && (
+            <GeoChip variant="amber" style={{ display: 'block', padding: '4px 8px', fontSize: '10px', fontWeight: 900 }}>
+              ★ {pendingPromotions} PROMOTION{pendingPromotions > 1 ? 'S' : ''} READY — SELECT THE UNIT
+            </GeoChip>
+          )}
+
+          {/* Overclock: borrow for a play now, repay from next turn's regen. */}
+          {isCurrent && isMyTurn && (!online || pid === mySeat) && borrowableCp > 0 && (playerCpBorrowed?.[pid] ?? 0) === 0 && (playerCpDebt?.[pid] ?? 0) === 0 && (
+            <GeoButton
+              variant="softBlue"
+              fullWidth
+              onClick={() => executeAiAction({ type: 'OVERCLOCK', amount: borrowableCp })}
+              coreStyle={{ padding: '4px 8px', fontSize: '10px', fontWeight: 900 }}
+            >
+              OVERCLOCK +{borrowableCp} CP · REPAY NEXT TURN
+            </GeoButton>
+          )}
 
           {/* Expanded Section: Inventory & Respawn Queue */}
           {isExpanded && (
@@ -550,8 +587,8 @@ export const LeftPanel: React.FC = React.memo(() => {
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '110px', overflowY: 'auto' }} className="opgeo-scroll">
                     {casualties.map(unit => {
-                      const cost = UNIT_COSTS[unit.type];
-                      const canAfford = playerGold[pid] >= cost;
+                      const cost = RESPAWN_CP_COST[unit.type];
+                      const canAfford = (playerCp[pid] ?? 0) >= cost;
                       const isReady = unit.turnsUntilRespawn === 0;
                       const isSelected = selectedGraveyardUnitId === unit.id;
                       const hasRespawns = respawnsLeft > 0;
@@ -570,7 +607,7 @@ export const LeftPanel: React.FC = React.memo(() => {
                             coreStyle={{ padding: '4px 8px', justifyContent: 'space-between' }}
                           >
                             <span>{UNIT_STATS[unit.type].name.toUpperCase()}</span>
-                            <span>€{cost}</span>
+                            <span>{cost} CP</span>
                           </GeoButton>
                         );
                       }
@@ -590,7 +627,7 @@ export const LeftPanel: React.FC = React.memo(() => {
                         >
                           <span style={{ color: pTheme.ink }}>{UNIT_STATS[unit.type].name.toUpperCase()}</span>
                           <span style={{ color: 'var(--op-ink-muted)' }}>
-                            {isReady ? `€${cost}` : `${unit.turnsUntilRespawn}t`}
+                            {isReady ? `${cost} CP` : `${unit.turnsUntilRespawn}t`}
                           </span>
                         </GeoWell>
                       );
@@ -720,18 +757,42 @@ const TurnStatusBar: React.FC = React.memo(() => {
   const weather = useGameStore(state => state.weather);
   const currentPlayer = useGameStore(state => state.currentPlayer);
   const dynamicWeather = useGameStore(state => state.settings.dynamicWeather);
+  const settings = useGameStore(state => state.settings);
   const mutators = useGameStore(state => state.settings.mutators);
   const activeSeed = useGameStore(state => state.activeSeed);
   const activeMission = useGameStore(state => state.activeMission);
   const matchStats = useGameStore(state => state.matchStats);
   const units = useGameStore(state => state.units);
+  const contract = useGameStore(state => state.contract);
+  const contractProgress = useGameStore(state => state.contractProgress);
+  const contractMisses = useGameStore(state => state.contractMisses);
+  const finalPush = useGameStore(state => state.finalPush);
+  const winner = useGameStore(state => state.winner);
+  const mySeat = useGameStore(state => state.mySeat);
+  const mode = useGameStore(state => state.mode);
+  const isAiTurn = useGameStore(state => state.isAiTurn);
+  const executeAiAction = useGameStore(state => state.executeAiAction);
 
   const zoneWeather = weather.playerZones[currentPlayer] || 'CLEAR';
   const activeMutatorTags = [
-    mutators?.blitzCp ? 'BLITZ CP' : null,
+    mutators?.classicCp ? 'CLASSIC CP' : null,
     mutators?.scarcity ? 'SCARCITY' : null,
     mutators?.ironman ? 'IRONMAN' : null,
   ].filter(Boolean) as string[];
+  const doomsdayActive = settings.victoryMode === 'DEATHMATCH' && Boolean(settings.doomsdayEnabled);
+  const doomsday = getDoomsdayEscalation(totalTurns, doomsdayActive);
+  const doomsdayTag = !doomsdayActive
+    ? null
+    : doomsday.stage === 'SKIRMISH'
+      ? `DOOMSDAY IN ${doomsday.roundsUntilNextStage ?? 0}R`
+      : `${doomsday.label.toUpperCase()} • +${doomsday.regenBonus} CP REGEN`;
+
+  const contractInfo = contract ? contractDef(contract.id) : undefined;
+  const myContractProgress = contract
+    ? Math.min(contract.target, contractProgress?.[currentPlayer] ?? 0)
+    : 0;
+  const pushReady = finalPush?.[currentPlayer] === 'READY' && winner === null;
+  const canPush = pushReady && !isAiTurn && (mode !== 'ONLINE' || currentPlayer === mySeat);
 
   let missionLine: string | null = null;
   if (activeMission) {
@@ -772,7 +833,7 @@ const TurnStatusBar: React.FC = React.memo(() => {
           </span>
         </div>
 
-        {(missionLine || activeMutatorTags.length > 0) && (
+        {(missionLine || activeMutatorTags.length > 0 || doomsdayTag) && (
           <div style={{ borderTop: '1px solid var(--op-line)', paddingTop: '5px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
             {missionLine && (
               <div style={{ fontSize: '12px', color: 'var(--acc-amber-ink)', fontWeight: 800 }}>
@@ -788,12 +849,153 @@ const TurnStatusBar: React.FC = React.memo(() => {
                 ))}
               </div>
             )}
+            {doomsdayTag && (
+              <div
+                style={{
+                  fontSize: '12px',
+                  fontWeight: 900,
+                  color: doomsday.stage === 'SKIRMISH' ? 'var(--op-ink-muted)' : 'var(--acc-red-ink)',
+                }}
+                title="Doomsday escalation: Collapse adds +2 CP regen; Meltdown adds +4 CP regen total."
+              >
+                ☠ {doomsdayTag}
+              </div>
+            )}
+          </div>
+        )}
+
+        {(contract || pushReady) && (
+          <div style={{ borderTop: '1px solid var(--op-line)', paddingTop: '5px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {contract && contractInfo && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
+                  <span
+                    style={{
+                      fontSize: '12px',
+                      fontWeight: 900,
+                      color: contract.claimedBy !== null ? 'var(--acc-mint-ink)' : 'var(--acc-amber-ink)',
+                    }}
+                    title={contractInfo.requirement}
+                  >
+                    ◆ {contractInfo.name.toUpperCase()}
+                  </span>
+                  <span style={{ fontSize: '11px', fontWeight: 800, color: 'var(--op-ink-muted)' }}>
+                    {contract.claimedBy !== null ? `CLAIMED P${contract.claimedBy + 1}` : `${myContractProgress}/${contract.target}`}
+                    {contract.expiresRound !== undefined
+                      ? ` · ${Math.max(0, contract.expiresRound - totalTurns)}R`
+                      : ''}
+                  </span>
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--op-ink-muted)', fontWeight: 700 }}>
+                  {contractInfo.requirement} · +{contract.rewardCp} CP{contract.rewardGold ? ` · +€${contract.rewardGold}` : ''}
+                  {contractMisses ? ' · UNDERDOG ×2' : ''}
+                </div>
+              </div>
+            )}
+            {pushReady && (
+              <GeoButton
+                variant="mint"
+                fullWidth
+                disabled={!canPush}
+                onClick={() => executeAiAction({ type: 'FINAL_PUSH' })}
+                coreStyle={{ padding: '4px 8px', fontSize: '10px', fontWeight: 900 }}
+              >
+                FINAL PUSH · REFILL CP
+              </GeoButton>
+            )}
           </div>
         )}
       </div>
     </GeoCard>
   );
 });
+
+/**
+ * The eliminated player's console: it replaces their dead "OUT" roster card and lists every
+ * attack with its description and its exact state — window open, already used, stood down, off in
+ * the setup, or the round the next window lands on. It lives in the player HUD, not over it.
+ */
+const SpectatorConsole: React.FC<{ seat: number }> = ({ seat }) => {
+  const spectatorTurn = useGameStore(state => state.spectatorTurn);
+  const spectatorUsedRound = useGameStore(state => state.spectatorUsedRound);
+  const totalTurns = useGameStore(state => state.totalTurns);
+  const winner = useGameStore(state => state.winner);
+  const settings = useGameStore(state => state.settings);
+  const executeAiAction = useGameStore(state => state.executeAiAction);
+  const [stoodDownRound, setStoodDownRound] = useState<number | null>(null);
+
+  const round = totalTurns + 1;
+  const nextRound = nextSpectatorWindowRound(round);
+  const used = spectatorUsedRound === round;
+  const stoodDown = stoodDownRound === round;
+  const open = winner === null && settings.spectatorAttacks !== false && spectatorTurn === seat;
+  const canAct = open && !used && !stoodDown;
+  const status =
+    settings.spectatorAttacks === false
+      ? 'OFF — eliminated-player attacks are disabled in this match setup.'
+      : used
+        ? `USED — one effect per window. Next window: round ${nextRound}.`
+        : stoodDown
+          ? `STOOD DOWN — window passed. Next window: round ${nextRound}.`
+          : open
+            ? `WINDOW OPEN — pick one effect for round ${round}.`
+            : `STANDBY — next window opens on round ${nextRound}.`;
+
+  return (
+    <GeoCard style={{ flexShrink: 0, border: canAct ? '2px solid var(--acc-amber)' : undefined }}>
+      <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '6px' }}>
+          <span style={{ fontWeight: 900, fontSize: '13px', color: 'var(--acc-amber-ink)' }}>
+            ☠ SPECTATOR CONSOLE
+          </span>
+          <span style={{ fontWeight: 800, fontSize: '10px', color: 'var(--op-ink-muted)' }}>
+            P{seat + 1} • ELIM • R{round}
+          </span>
+        </div>
+        <GeoWell coreStyle={{ padding: '5px 8px' }}>
+          <div
+            style={{
+              fontSize: '10px',
+              fontWeight: 900,
+              lineHeight: 1.3,
+              color: canAct ? 'var(--acc-amber-ink)' : 'var(--op-ink-muted)',
+            }}
+          >
+            {status}
+          </div>
+        </GeoWell>
+        {SPECTATOR_EFFECTS.map(effect => (
+          <GeoButton
+            key={effect.id}
+            disabled={!canAct}
+            fullWidth
+            onClick={() => executeAiAction({ type: 'SPECTATOR_ATTACK', effectId: effect.id })}
+            coreStyle={{ padding: '5px 8px', display: 'block', textAlign: 'left', whiteSpace: 'normal' }}
+          >
+            <span style={{ display: 'block', fontSize: '11px', fontWeight: 900 }}>
+              {effect.name.toUpperCase()}
+            </span>
+            <span style={{ display: 'block', fontSize: '10px', fontWeight: 600, opacity: 0.78, lineHeight: 1.25 }}>
+              {effect.blurb}
+            </span>
+          </GeoButton>
+        ))}
+        {canAct && (
+          <GeoButton
+            fullWidth
+            onClick={() => setStoodDownRound(round)}
+            coreStyle={{ padding: '4px 8px', fontSize: '10px', fontWeight: 900 }}
+          >
+            STAND DOWN THIS WINDOW
+          </GeoButton>
+        )}
+        <div style={{ fontSize: '9px', lineHeight: 1.3, color: 'var(--op-ink-muted)', fontWeight: 700 }}>
+          Map effects only — no kills, no building damage, no bounty.
+        </div>
+      </div>
+    </GeoCard>
+  );
+};
 
 /** Shown over everything (it renders fixed), so it's mounted once at the app level. */
 export const BankRewardModal: React.FC = () => {
@@ -1085,6 +1287,7 @@ export const RightPanel: React.FC = () => {
   const onlineSeats = useOnline(state => state.view?.seats);
   const unitOwnerLabel = (owner: number) => playerDisplayName(owner, localNames, mode === 'ONLINE' ? onlineSeats?.[owner]?.name : undefined);
   const reloadUnit = useGameStore(state => state.reloadUnit);
+  const executeAiAction = useGameStore(state => state.executeAiAction);
   const enterOverwatch = useGameStore(state => state.enterOverwatch);
   const cancelPlacement = useGameStore(state => state.cancelPlacement);
   const confirmConstruct = useGameStore(state => state.confirmConstruct);
@@ -1219,6 +1422,7 @@ export const RightPanel: React.FC = () => {
                     rank >= 3 && selectedUnit.type === 'SOLDIER' ? `+${VETERANCY_CONFIG.ACE_SCOUT_DMG_BONUS} DMG & ${atkCost} CP Shot` : null,
                     rank >= 3 && selectedUnit.type === 'ASSAULTER' ? `+${VETERANCY_CONFIG.ACE_BREACHER_DMG_BONUS} DMG & Siege Armor Pierce` : null,
                     rank >= 3 && selectedUnit.type === 'SNIPER' ? '1 CP Mountain/Dunes Move' : null,
+                    selectedUnit.perk ? `★ ${PERK_LABELS[selectedUnit.perk]}` : '★ PROMOTION READY',
                   ].filter(Boolean).join(' • ');
 
               return (
@@ -1275,6 +1479,26 @@ export const RightPanel: React.FC = () => {
                     <GeoChip variant="softAmber" style={{ display: 'block', padding: '5px 8px', lineHeight: 1.35 }}>
                       {rankPerkSummary}
                     </GeoChip>
+                  )}
+
+                  {selectedUnit.owner === currentPlayer && isMyTurn && (selectedUnit.rank ?? 0) >= 1 && !selectedUnit.perk && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                      <GeoChip variant="amber" style={{ display: 'block', padding: '6px 8px', fontWeight: 900 }}>
+                        ★ FIELD PROMOTION — CHOOSE ONE
+                      </GeoChip>
+                      {PERKS_BY_CLASS[selectedUnit.type].map(perk => (
+                        <GeoButton
+                          key={perk.id}
+                          variant="softAmber"
+                          fullWidth
+                          onClick={() => executeAiAction({ type: 'CHOOSE_PERK', unitId: selectedUnit.id, perkId: perk.id })}
+                          coreStyle={{ padding: '7px 10px', flexDirection: 'column', alignItems: 'flex-start', gap: '2px' }}
+                        >
+                          <span style={{ fontWeight: 900, fontSize: '12px' }}>{perk.name.toUpperCase()}</span>
+                          <span style={{ fontSize: '11px', fontWeight: 600 }}>{perk.blurb}</span>
+                        </GeoButton>
+                      ))}
+                    </div>
                   )}
 
                   {/* 2x2 Stat Wells */}

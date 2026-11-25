@@ -11,6 +11,7 @@ import {
   isChannelTerrain,
   isFootPassable,
   placeEdgeAwareBridges,
+  pruneDeadEndBridges,
 } from '../grid/BridgePlacement';
 import { carveArchipelago } from './islandArchipelago';
 import { channelWidthStepper, planRiverChannel } from './riverChannel';
@@ -740,13 +741,18 @@ export const generateConfiguredMap = (
   // ── 1. Place HQ slots symmetrically (exact 180° mirror pairs for 2P & 4P)
   const rawSlots = devBaseSlots(size, players);
   const flip2P = players === 2 && rng() < 0.5;
-  const slots = flip2P
+  const baseSlots = flip2P
     ? [
         { x: size - 3, y: 2 },
         { x: 2, y: size - 3 },
       ]
     : rawSlots;
-  const baseLocations = slots.map((s, owner) => ({ x: s.x, y: s.y, owner }));
+  // Ring positions are fixed, so the same seat index would sit on the same map feature (river mouth,
+  // corner bank, or the edge plaza the pinch rules push a seat to) in every match and carry a fixed
+  // advantage. Positions therefore stay canonical and seats are shuffled onto them at the end (3c).
+  // 2P/4P keep their mirrored pair order, which the competitive symmetry depends on.
+  let slots = baseSlots;
+  let baseLocations = slots.map((s, owner) => ({ x: s.x, y: s.y, owner }));
 
   const inBasePlaza = (x: number, y: number, radius = 2): boolean =>
     slots.some(s => Math.abs(s.x - x) <= radius && Math.abs(s.y - y) <= radius);
@@ -795,9 +801,14 @@ export const generateConfiguredMap = (
     sandMask[y * size + x] ? 'SAND' : 'PLAINS';
 
   // ── 3. Waterways & Geography (RIVERS / CANYON / ISLANDS / NONE)
+  // Corner seating (2P/4P) keeps channels out of the HQ aprons: the seam sits in a corner where it
+  // reads as a shoreline. Ring seating (3P/5P/6P) carves straight through instead — punching a 5×5
+  // hole in a mid-board river leaves two stubs that visibly stop in the middle of the map. The seat
+  // is moved off the water afterwards (step 3b) so the channel stays continuous.
+  const protectHqApron = players === 2 || players === 4;
   const paintChannel = (x: number, y: number, channelType: 'WATER' | 'CANYON') => {
     const t = at(x, y);
-    if (!t || inBasePlaza(t.x, t.y, 2)) return;
+    if (!t || (protectHqApron && inBasePlaza(t.x, t.y, 2))) return;
     t.type = channelType;
     t.height = 0;
     if (mirrored) {
@@ -943,8 +954,99 @@ export const generateConfiguredMap = (
     });
   }
 
+  // ── 3b. Keep ring seats on dry ground without cutting the river
+  // A channel now runs under the original slot, so slide that seat to the nearest 5×5 plaza with no
+  // water or canyon in it. Only the ring layouts move; corner seats never had a river through them.
+  if (!protectHqApron && hasWaterway && knobs.waterStyle !== 'ISLANDS') {
+    const plazaDry = (x: number, y: number): boolean => {
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const t = at(x + dx, y + dy);
+          if (!t || t.type === 'WATER' || t.type === 'CANYON') return false;
+        }
+      }
+      return true;
+    };
+    // First try rotating the whole ring. If some rotation has every plaza dry, the seats keep their
+    // exact spacing and only ownership shifts — far better than bending the ring seat by seat.
+    let bestSlots = slots;
+    let bestWet = slots.filter(s => !plazaDry(s.x, s.y)).length;
+    for (let k = 1; k < slots.length && bestWet > 0; k++) {
+      const cand = [...slots.slice(k), ...slots.slice(0, k)];
+      const wet = cand.filter(s => !plazaDry(s.x, s.y)).length;
+      if (wet < bestWet) { bestWet = wet; bestSlots = cand; }
+    }
+    if (bestSlots !== slots) slots = bestSlots;
+    // Owners are slot indices while positions are still moving; 3c rotates them onto the finished
+    // positions once, so the terrain rules never see a seat-relative ordering.
+    const syncBase = () => {
+      baseLocations = slots.map((s, i) => ({ x: s.x, y: s.y, owner: i }));
+    };
+    syncBase();
+
+    // Then walk the seats in order, checking every seat's *current* position — including the ones not
+    // processed yet. A plain first-fit pass can drop a relocated seat beside a later seat that then
+    // keeps its wet-adjacent ring spot, which is how you get two HQs one tile apart.
+    const moved = slots.map((s, i) => ({ ...s }));
+    const minGap = 10;
+    const gapAt = (x: number, y: number, self: number) => {
+      let g = 99;
+      for (let j = 0; j < moved.length; j++) {
+        if (j !== self) g = Math.min(g, dist(moved[j], { x, y }));
+      }
+      return g;
+    };
+    for (let i = 0; i < moved.length; i++) {
+      const s = moved[i];
+      if (plazaDry(s.x, s.y) && gapAt(s.x, s.y, i) >= minGap) continue;
+      let best: { x: number; y: number } | null = null;
+      let bestScore = -Infinity;
+      for (let r = 1; r <= 8; r++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            const x = s.x + dx;
+            const y = s.y + dy;
+            if (x < 2 || y < 2 || x > size - 3 || y > size - 3) continue;
+            if (!plazaDry(x, y)) continue;
+            // Widest gap first, smallest displacement second: river avoidance must not quietly
+            // recreate the corridor seating that was just removed.
+            const score = Math.min(gapAt(x, y, i), 20) * 100 - r;
+            if (score > bestScore) { bestScore = score; best = { x, y }; }
+          }
+        }
+        if (best && bestScore >= minGap * 100 - r) break;
+      }
+      if (best) moved[i] = best;
+    }
+    if (moved.some((s, i) => s.x !== slots[i].x || s.y !== slots[i].y)) {
+      slots = moved;
+      syncBase();
+    }
+  }
+
+  // ── 3c. Hand the finished positions to seats
+  // Terrain placement is index-ordered (the plaza/pinch rules treat slot 0 before slot n-1, and the
+  // relocated edge bases win 80-100% of their matches), so the seat that owns each position must be
+  // decided only after the map is finished — and from its own seed stream. Deriving the rotation
+  // from the map seed tied "who gets the strong base" to the terrain itself: 3P seat 2 won ~50% over
+  // 200 maps. A separate `_seats` stream makes the assignment independent of how the map was carved.
+  if (players >= 3 && !mirrored) {
+    // Read the rotation straight off the seed's trailing base-36 digits. Every hashed stream tried
+    // here (the map RNG, a suffixed RNG, FNV+xorshift) came out correlated with the layout or biased
+    // for short seeds — and because the ring only has a few distinct shapes, any correlation pins a
+    // seat to the strong base. Base-36 digits are uniform in a random seed, and 36^k is divisible by
+    // 3 and 6, so this is exactly uniform for the 3/5/6-seat ring (5 leaves a 1/1296 residue).
+    const tail = seed.replace(/[^0-9a-zA-Z]/g, '').slice(-6).toLowerCase();
+    const rot = ((parseInt(tail, 36) || 0) % baseLocations.length + baseLocations.length) % baseLocations.length;
+    baseLocations = baseLocations.map((b, i) => ({ ...b, owner: (i + rot) % baseLocations.length }));
+  }
+
   // ── 4. Clear HQ aprons & stamp HQs early so bridge placement & mountains respect them
-  slots.forEach((slot, owner) => {
+  // Owners come from `baseLocations`, not the slot index: ring seating may pick positions for terrain
+  // while seat order rotates per seed, and start units are spawned from `baseLocations.owner`.
+  baseLocations.forEach((slot, idx) => {
+    const owner = slot.owner ?? idx;
     for (let dy = -2; dy <= 2; dy++) {
       for (let dx = -2; dx <= 2; dx++) {
         const t = at(slot.x + dx, slot.y + dy);
@@ -991,6 +1093,25 @@ export const generateConfiguredMap = (
     }
     return false;
   };
+
+  /** Walk-off tiles of every crossing: each shore plus the tile straight beyond it along the deck
+   *  axis. A building or peak on one of these turns the bridge into a dead end. */
+  const bridgeLandings = (): { shore: Tile; lane: Tile | null }[] => {
+    const out: { shore: Tile; lane: Tile | null }[] = [];
+    for (const b of map) {
+      if (b.type !== 'BRIDGE' && b.type !== 'BRIDGE_V') continue;
+      const ax = b.type === 'BRIDGE' ? 1 : 0;
+      const ay = b.type === 'BRIDGE' ? 0 : 1;
+      for (const s of [1, -1] as const) {
+        const shore = at(b.x + ax * s, b.y + ay * s);
+        if (!shore || shore.type === 'BRIDGE' || shore.type === 'BRIDGE_V' || !isFootPassable(shore)) continue;
+        out.push({ shore, lane: at(shore.x + ax * s, shore.y + ay * s) });
+      }
+    }
+    return out;
+  };
+  const landingTileIds = (): Set<string> =>
+    new Set(bridgeLandings().flatMap(l => (l.lane ? [l.shore.id, l.lane.id] : [l.shore.id])));
 
   // ── 6. Tactical Road Stubs extending outward from primary bridges
   if (knobs.roads && placedSpans.length > 0) {
@@ -1220,7 +1341,10 @@ export const generateConfiguredMap = (
     bankList.push(t);
   };
 
-  const bankCount = knobs.banks;
+  // `banks` is a board total, but every seat needs a vault: with the raw knob, 3P/6P at
+  // `banks: 2` gave the first two sectors one each and later seats none (heists fell to
+  // 0.19/match at 6P). Keep the knob as a floor and scale the total to the seat count.
+  const bankCount = knobs.banks === 0 ? 0 : Math.max(knobs.banks, players);
   const bankEligible = (t: Tile | null): t is Tile =>
     !!t &&
     (t.type === 'PLAINS' || t.type === 'SAND' || t.type === 'FOREST') &&
@@ -1304,10 +1428,12 @@ export const generateConfiguredMap = (
   const buildingTarget = Math.round((totalTiles * knobs.buildingPct) / 100);
   if (buildingTarget > 0) {
     const placedBuildings: Tile[] = [];
+    const bridgeLanding = landingTileIds();
     const bldEligible = (t: Tile | null): t is Tile =>
       isOpenLand(t) &&
       !inBasePlaza(t.x, t.y, 2) &&
       !isNearBridge(t.x, t.y, 1) &&
+      !bridgeLanding.has(t.id) &&
       isReachableAdjacent(t) &&
       bankList.every(b => dist(t, b) >= 2) &&
       placedBuildings.every(b => dist(t, b) >= 2);
@@ -1371,6 +1497,39 @@ export const generateConfiguredMap = (
       }
     }
   }
+
+  // A crossing a squad cannot walk off is not a crossing: reopen every landing lane, and if a shore
+  // has no exit but the deck itself, clear the building or peak pinning it shut.
+  const clearToGround = (x: Tile) => {
+    if (x.type !== 'BUILDING' && x.type !== 'MOUNTAIN') return false;
+    x.type = baseGroundAt(x.x, x.y);
+    x.subType = undefined;
+    x.owner = undefined;
+    x.height = 1;
+    return true;
+  };
+  for (const { shore, lane } of bridgeLandings()) {
+    for (const t of lane ? [shore, lane] : [shore]) {
+      clearToGround(t);
+      if (mirrored) clearToGround(mirrorOf(t));
+    }
+    if (!isFootPassable(shore) || shore.type === 'BRIDGE' || shore.type === 'BRIDGE_V') continue;
+    const exits = DIRS_4
+      .map(([dx, dy]) => at(shore.x + dx, shore.y + dy))
+      .filter(t => t && isFootPassable(t) && t.type !== 'BRIDGE' && t.type !== 'BRIDGE_V');
+    if (exits.length > 0) continue;
+    for (const [dx, dy] of DIRS_4) {
+      const nb = at(shore.x + dx, shore.y + dy);
+      if (!nb || clearToGround(nb)) {
+        if (nb && mirrored) clearToGround(mirrorOf(nb));
+      }
+    }
+  }
+
+  // No bridge to nowhere: a deck whose landing is a dead-end stone (no way off it, nothing on it)
+  // goes back to being channel. The twin is judged on its own landings rather than copied, because
+  // island maps are noise-based and the mirrored deck is a different crossing that may be needed.
+  pruneDeadEndBridges(map, size);
 
   // ── 13. Fair starting loot (1 equal-distance crate per player) + optional extra loose loot
   placeFairStartingLoot(map, size, baseLocations, rng, mirrored);

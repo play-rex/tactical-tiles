@@ -122,6 +122,9 @@ interface Row {
   dmgByType: Record<string, number>;
   hqLow: number;
   cpSpent: number;
+  cpLeft: number;
+  emptyCpTurns: number;
+  richCpTurns: number;
 }
 
 const playOne = (
@@ -143,6 +146,7 @@ const playOne = (
     winner: null, rounds: 0, actions: 0, payoff: 0, kills: 0, hqHits: 0, heists: 0,
     promos: 0, turns: 0, deadTurns: 0, firstBlood: null, firstHq: null, stalled: false,
     leaderAt10: null, winnerBehindAt10: null, deadByType: {}, dmgByType: {}, hqLow: 50, cpSpent: 0,
+    cpLeft: 0, emptyCpTurns: 0, richCpTurns: 0,
   };
   let turnPayoff = 0;
   let turnActions = 0;
@@ -157,6 +161,12 @@ const playOne = (
     const prep = prepareAction(g, seat, proposed);
     const action: GameAction = prep.ok ? prep.action : { type: 'END_TURN' };
     if ('cost' in action) r.cpSpent += (action as { cost: number }).cost;
+    if (action.type === 'END_TURN') {
+      const left = g.playerCp[g.currentPlayer] ?? 0;
+      r.cpLeft += left;
+      if (left <= 0) r.emptyCpTurns++;
+      if (left >= 10) r.richCpTurns++;
+    }
     const res = applyAction(g, action, { autoBankReward: true });
     if (res.rejected) {
       const end = applyAction(g, { type: 'END_TURN' }, { autoBankReward: true });
@@ -235,6 +245,11 @@ const summarize = (name: string, rows: Row[]) => {
     `${name.padEnd(34)} n=${n} P0=${p0} P1=${p1} D=${draws} | med=${med} avg=${avg.toFixed(1)} ` +
     `min=${rounds[0] ?? '-'} max=${rounds[rounds.length - 1] ?? '-'} | stall=${rows.filter(r => r.stalled).length} | ` +
     `turns=${turns} dead=${(100 * dead / turns).toFixed(1)}% | payoff/turn=${(payoff / turns).toFixed(2)} | ` +
+    `actions/turn=${(rows.reduce((s, r) => s + r.actions, 0) / turns).toFixed(1)} | ` +
+    `CPleft/turn=${(rows.reduce((s, r) => s + r.cpLeft, 0) / turns).toFixed(1)} | ` +
+    `turns@0CP=${Math.round(100 * rows.reduce((s, r) => s + r.emptyCpTurns, 0) / turns)}% ` +
+    `turns@10+CP=${Math.round(100 * rows.reduce((s, r) => s + r.richCpTurns, 0) / turns)}% | ` +
+    `R30+=${Math.round(100 * rows.filter(r => r.rounds >= 30).length / n)}% | ` +
     `comeback@10=${known ? Math.round(100 * behind / known) : '-'}%`,
   );
   const fb = done.map(r => r.firstBlood).filter((v): v is number => v !== null).sort((a, b) => a - b);
@@ -244,6 +259,7 @@ const summarize = (name: string, rows: Row[]) => {
     `  ↳ first blood round med=${medOf(fb)} | first HQ damage round med=${medOf(fh)} | ` +
     `kills/match=${(rows.reduce((s, r) => s + r.kills, 0) / n).toFixed(1)} ` +
     `heists/match=${(rows.reduce((s, r) => s + r.heists, 0) / n).toFixed(2)} ` +
+    `HQshots/match=${(rows.reduce((s, r) => s + r.hqHits, 0) / n).toFixed(1)} ` +
     `promotions/match=${(rows.reduce((s, r) => s + r.promos, 0) / n).toFixed(2)} ` +
     `CP/turn=${(rows.reduce((s, r) => s + r.cpSpent, 0) / turns).toFixed(1)}`,
   );

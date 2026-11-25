@@ -90,7 +90,7 @@ export const AssetExporter = () => {
             <p style={{fontSize:'10px', marginTop:'10px', color:'#888'}}>
                 After downloading:<br/>
                 1. Move terrain images to <b>public/assets/terrain/</b><br/>
-                2. Move unit images to <b>public/assets/units/</b>
+                2. Move unit images to <b>public/assets/legacyunits/</b> (fallback only — the game draws units procedurally; see <b>public/assets/LEGACY_ASSETS.md</b>)
             </p>
         </div>
     );

@@ -126,19 +126,80 @@ const makeNoise = (seedText: string) => {
   };
 };
 
-/** Where each seat's HQ sits, in a fixed order (corners first, then the far edges). */
+/**
+ * Seats on an inscribed circle, rotated so the closest pair of seats is as far apart as possible
+ * (Manhattan); ties go to the rotation whose Voronoi zones are most equal in area. Deterministic —
+ * no RNG — and cached, because it runs once per generated board.
+ */
+const ringSlotCache = new Map<string, { x: number; y: number }[]>();
+const ringBaseSlots = (size: number, count: number): { x: number; y: number }[] => {
+  const key = `${size}:${count}`;
+  const cached = ringSlotCache.get(key);
+  if (cached) return cached;
+
+  const c = (size - 1) / 2;
+  const radius = Math.max(4, Math.floor((size - 1) / 2) - 3);
+  const cl = (v: number) => Math.max(2, Math.min(size - 3, Math.round(v)));
+  let best: { points: { x: number; y: number }[]; minD: number; areaSpread: number; sumD: number } | null = null;
+  for (let step = 0; step < 120; step++) {
+    const phase = (step / 120) * (2 * Math.PI);
+    const points = Array.from({ length: count }, (_, i) => {
+      const a = phase - Math.PI / 2 + (2 * Math.PI * i) / count;
+      return { x: cl(c + radius * Math.cos(a)), y: cl(c + radius * Math.sin(a)) };
+    });
+    let minD = Infinity;
+    let sumD = 0;
+    for (let i = 0; i < points.length; i++) {
+      for (let j = i + 1; j < points.length; j++) {
+        const d = Math.abs(points[i].x - points[j].x) + Math.abs(points[i].y - points[j].y);
+        minD = Math.min(minD, d);
+        sumD += d;
+      }
+    }
+    // Empty-board Voronoi area per seat: what zone size the seats get before terrain.
+    const area = new Array(count).fill(0);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        let owner = 0;
+        let bestD = Infinity;
+        for (let i = 0; i < count; i++) {
+          const d = Math.abs(x - points[i].x) + Math.abs(y - points[i].y);
+          if (d < bestD) { bestD = d; owner = i; }
+        }
+        area[owner]++;
+      }
+    }
+    const areaSpread = (Math.max(...area) - Math.min(...area)) / Math.min(...area);
+    const better =
+      !best ||
+      minD > best.minD ||
+      (minD === best.minD && (areaSpread < best.areaSpread || (areaSpread === best.areaSpread && sumD > best.sumD)));
+    if (better) best = { points, minD, areaSpread, sumD };
+  }
+  ringSlotCache.set(key, best!.points);
+  return best!.points;
+};
+
+/**
+ * Where each seat's HQ sits, in a fixed order.
+ *
+ * 2P and 4P keep the historic corner square: it is already seat-fair, and the presets, river
+ * diagonals and pacing targets are tuned around it. 3P, 5P and 6P use a ring instead: the old
+ * layout left 3P unbalanced (one seat squeezed between the other two) and put the 5th/6th seat
+ * on an *edge midpoint* — a corridor between two corner bases, which won 0–1 of 72 FFA matches.
+ */
 export const devBaseSlots = (size: number, playerCount: number): { x: number; y: number }[] => {
+  const n = clampInt(playerCount, 2, 6);
   const far = size - 3;
-  const mid = Math.floor(size / 2);
-  const slots = [
-    { x: 2, y: 2 },
-    { x: far, y: far },
-    { x: far, y: 2 },
-    { x: 2, y: far },
-    { x: mid, y: 2 },
-    { x: mid, y: far },
-  ];
-  return slots.slice(0, clampInt(playerCount, 2, 6));
+  if (n === 2 || n === 4) {
+    return [
+      { x: 2, y: 2 },
+      { x: far, y: far },
+      { x: far, y: 2 },
+      { x: 2, y: far },
+    ].slice(0, n);
+  }
+  return ringBaseSlots(size, n);
 };
 
 const LOOT_TYPES: SupplyLootType[] = ['AMMO', 'MEDKIT', 'FIRST_AID'];

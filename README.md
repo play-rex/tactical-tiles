@@ -8,7 +8,10 @@ turns, fog of war is optional, and the Doomsday protocol floods the map with lav
 Play on one screen (hot-seat or against the AI) or **online**: one player creates a table, shares
 its four-letter code or link, and fills any empty seats with bots.
 
-See [GAME_REVIEW.md](GAME_REVIEW.md) for the design notes and roadmap.
+See [docs/GAME_REVIEW.md](docs/GAME_REVIEW.md) for the design notes and roadmap,
+[docs/GAMEPLAY_EXPERIENCE_SIM.md](docs/GAMEPLAY_EXPERIENCE_SIM.md) for the playtest simulation and
+its findings (`cd packages/engine && bun sim-playtest.ts`), and [docs/DIRECTOR_PLAN.md](docs/DIRECTOR_PLAN.md)
+for the plan to keep every turn feeling new.
 
 ## Layout
 

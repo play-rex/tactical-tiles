@@ -52,7 +52,8 @@
 ### Milestone 3: Curated "Tactical Ops" Challenges & Setup Mutators
 - **Mission Engine Extension (`missionConfig`):** Support custom victory/loss triggers (`turnLimit`, `surviveTurns`, `requiredHeists`, pre-placed squads, starting round for Doomsday Blitz).
 - **5 Asymmetric Challenge Operations (`CHALLENGES` tab on `GameSetup`):** *Iron Bridge Holdout*, *Vault Zero Fog Heist*, *Red Dunes Duel*, *Doomsday Meltdown*, and *Ace Hunt* with tracked `S/A/B` medals.
-- **Setup Mutators:** Optional `Blitz CP` (`+15` regen / `30` max), `Scarcity` (`50%` ammo / `+50%` Bank Gold), and `Ironman` (`0` graveyard respawns).
+- **Setup Mutators:** Optional `Classic CP` (`+10` regen / `20` max), `Scarcity` (`50%` ammo / `+50%` Bank Gold), and `Ironman` (`0` graveyard respawns).
+- **Gold Economy Presets:** `Lean` (€150 start / +€15 per turn), `Standard` (€200 / +€20, default), and `Fast Start` (€300 / +€15).
 
 ---
 

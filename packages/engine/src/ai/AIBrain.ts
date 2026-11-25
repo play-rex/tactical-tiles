@@ -1,5 +1,5 @@
-import { Tile, Unit, GameSettings, WeatherState, AIDifficulty, VictoryMode, SupplyLootType, LandMine } from '../types';
-import { UNIT_STATS, TERRAIN_DEFENSE, UNIT_COSTS, CP_SYSTEM, SHOP_ITEMS, DOOMSDAY_SETTINGS, TERRAIN_COSTS, BANK_STATS, BASE_STATS, OVERWATCH_STATS } from '../constants/Config';
+import { Tile, Unit, GameSettings, WeatherState, AIDifficulty, VictoryMode, SupplyLootType, LandMine, PerkId, SharedContract, FinalPushStatus } from '../types';
+import { UNIT_STATS, TERRAIN_DEFENSE, RESPAWN_CP_COST, CP_SYSTEM, SHOP_ITEMS, DOOMSDAY_SETTINGS, TERRAIN_COSTS, BANK_STATS, BASE_STATS, OVERWATCH_STATS, AGGRESSION_AFTER_ROUNDS, AGGRESSION_START_ROUND } from '../constants/Config';
 import {
     getValidMovesWithParents,
     reconstructMovePathFromParents,
@@ -11,10 +11,10 @@ import {
     calculateVisibility,
     getNeighbors
 } from '../grid/Pathfinding';
-import { getSpawnTiles } from '../game/options';
+import { getSpawnTiles, INTERACT_COST } from '../game/options';
 import { findBestTarget } from './TargetingLogic';
 import { getRingIndex } from '../grid/DoomsdayManager';
-import { calculateSiegeDamage, canConstructOnTile, canHoldDrop, canUnitAttackFromTile, canUnitEnterOverwatch, getEffectiveMaxRespawns, getUnitAttackCost, getUnitMaxHp, getUnitRange } from '../rules/CombatRules';
+import { calculateSiegeDamage, canConstructOnTile, canHoldDrop, canUnitAttackFromTile, canUnitEnterOverwatch, getEffectiveCpRules, getEffectiveMaxRespawns, getUnitAttackCost, getUnitBaseDamage, getUnitMaxHp, getUnitRange } from '../rules/CombatRules';
 import { getOverwatchCoverageTiles, resolveMoveWithOverwatch } from '../rules/OverwatchRules';
 
 // AI Action Types
@@ -31,13 +31,19 @@ export type AIAction =
   | { type: 'BUY_DROP'; itemKey: string; tileId: string; cost: number; goldCost: number }
   | { type: 'BUILD'; itemKey: string; tileId: string; cost: number }
   | { type: 'USE_ITEM'; unitId: string; itemIndex: number; cost: number }
-  | { type: 'SPAWN'; unitType: any; tileId: string; cost: number; goldCost: number; deadUnitId?: string };
+  | { type: 'SPAWN'; unitType: any; tileId: string; cost: number; deadUnitId?: string }
+  /** Borrow CP for a kill the bot is a few points short of. */
+  | { type: 'OVERCLOCK'; amount: number }
+  | { type: 'CHOOSE_PERK'; unitId: string; perkId: PerkId }
+  | { type: 'FINAL_PUSH' };
 
 interface GameStateProxy {
   mapData: Tile[];
   units: Unit[];
   currentPlayer: number;
   playerCp: number;
+  playerCpDebt?: number;
+  playerCpBorrowed?: number;
   playerGold: number;
   playerRespawns?: number;
   playerInventory: SupplyLootType[];
@@ -49,6 +55,11 @@ interface GameStateProxy {
   gridSize: number;
   settings: GameSettings;
   totalTurns: number;
+  lastHqDamageRound?: number;
+  /** The round's shared contract, so the bot races for it instead of handing it to the human. */
+  contract?: SharedContract | null;
+  /** The bot's Final Push token, if the endgame has granted one. */
+  finalPush?: FinalPushStatus;
 }
 
 const BFS_DIRS = [[0, -1], [0, 1], [-1, 0], [1, 0]] as const;
@@ -437,7 +448,7 @@ const findEmptyAdjacent = (center: Tile, map: Tile[], gridSize: number): Tile | 
 // --- 3. REINFORCEMENTS (Spawning) ---
 
 const checkSpawn = (gameState: GameStateProxy): AIAction | null => {
-    const { playerGold, playerRespawns = 0, graveyard, currentPlayer, difficulty, settings } = gameState;
+    const { playerCp = 0, playerRespawns = 0, graveyard, currentPlayer, difficulty, settings } = gameState;
 
     if (playerRespawns >= getEffectiveMaxRespawns(settings.mutators)) return null;
 
@@ -445,19 +456,22 @@ const checkSpawn = (gameState: GameStateProxy): AIAction | null => {
     if (spawnTiles.length === 0) return null;
     const spawnTileId = spawnTiles[0];
 
+    // Redeploys are paid in CP, so a body is only a candidate when the battery can cover it.
+    // This runs before any other spending in the action loop, which is the reservation: the
+    // turn's CP goes to a ready body first, and a spawn the seat can't pay for is never proposed.
     const affordable = graveyard.filter(
-        u => u.owner === currentPlayer && u.turnsUntilRespawn === 0 && playerGold >= UNIT_COSTS[u.type]
+        u => u.owner === currentPlayer && u.turnsUntilRespawn === 0 && playerCp >= RESPAWN_CP_COST[u.type]
     );
     if (affordable.length === 0) return null;
 
     let choice: any = affordable[0];
     if (difficulty === 'HARD') {
-        affordable.sort((a, b) => UNIT_COSTS[b.type] - UNIT_COSTS[a.type]);
+        affordable.sort((a, b) => RESPAWN_CP_COST[b.type] - RESPAWN_CP_COST[a.type]);
         choice = affordable[0];
     } else if (difficulty === 'MEDIUM') {
         choice = affordable[Math.floor(Math.random() * affordable.length)];
     } else {
-        affordable.sort((a, b) => UNIT_COSTS[a.type] - UNIT_COSTS[b.type]);
+        affordable.sort((a, b) => RESPAWN_CP_COST[a.type] - RESPAWN_CP_COST[b.type]);
         choice = affordable[0];
     }
 
@@ -465,13 +479,67 @@ const checkSpawn = (gameState: GameStateProxy): AIAction | null => {
         type: 'SPAWN',
         unitType: choice.type,
         tileId: spawnTileId,
-        cost: 0,
-        goldCost: UNIT_COSTS[choice.type],
+        cost: RESPAWN_CP_COST[choice.type],
         deadUnitId: choice.id
     };
 };
 
 // --- MAIN AI LOOP ---
+
+/**
+ * Borrows CP only to finish a kill it is at most 3 CP short of. Deliberately narrow: the bot
+ * never borrows just to bank CP, and one borrow per turn is enforced by the debt itself.
+ */
+/** The safe default pick for each class; the bot does not try to read the board for this. */
+const AI_PERK_CHOICE: Record<Unit['type'], PerkId> = {
+  SOLDIER: 'RELAY',
+  ASSAULTER: 'BULWARK',
+  SNIPER: 'COLD_BORE',
+};
+
+const checkOverclock = (gameState: GameStateProxy): AIAction | null => {
+  const { playerCp, playerCpDebt = 0, playerCpBorrowed = 0, units, currentPlayer, mapData, weather, gridSize } = gameState;
+  if (playerCpBorrowed > 0 || playerCpDebt > 0) return null;
+  const enemies = units.filter(u => u.owner !== currentPlayer);
+  const borrow = (cost: number): number => {
+    const short = cost - playerCp;
+    return short >= 1 && short <= 3 ? short : 0;
+  };
+  for (const unit of units) {
+    if (unit.owner !== currentPlayer || unit.completed || unit.isRooted) continue;
+    const tile = getTileByIdFast(mapData, unit.tileId, gridSize);
+    if (!tile) continue;
+    const atkShort = borrow(getUnitAttackCost(unit));
+    const range = getUnitRange(unit, mapData, weather, tile);
+
+    // A kill that is already in range: the cleanest reason to borrow.
+    if (atkShort > 0 && unit.ammo > 0) {
+      for (const enemy of enemies) {
+        const et = getTileByIdFast(mapData, enemy.tileId, gridSize);
+        if (!et || getManhattanDistance(tile, et) > range) continue;
+        if (!hasLineOfSight(tile, et, mapData, unit.type, weather, gridSize)) continue;
+        if (enemy.hp <= getUnitBaseDamage(unit)) return { type: 'OVERCLOCK', amount: atkShort };
+      }
+    }
+
+    // A building it can flip this turn.
+    const secureShort = borrow(INTERACT_COST);
+    if (secureShort > 0 && getNeighbors(tile, mapData, gridSize).some(t => t.type === 'BUILDING' && t.owner !== currentPlayer)) {
+      return { type: 'OVERCLOCK', amount: secureShort };
+    }
+
+    // A vault one shot from opening.
+    if (atkShort > 0 && unit.ammo > 0 && unit.type !== 'SNIPER') {
+      for (const t of mapData) {
+        if (t.type !== 'BANK' || (t.hp ?? 0) <= 0 || (t.hackProgress ?? 0) >= 100) continue;
+        if (getManhattanDistance(tile, t) > range) continue;
+        if (!hasLineOfSight(tile, t, mapData, unit.type, weather, gridSize)) continue;
+        if ((t.hp ?? 0) <= calculateSiegeDamage(unit, tile, 'BANK')) return { type: 'OVERCLOCK', amount: atkShort };
+      }
+    }
+  }
+  return null;
+};
 
 export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
   const { mapData, units, currentPlayer, playerCp, playerGold, playerRespawns, graveyard, difficulty, weather, victoryMode, gridSize, settings, totalTurns } = gameState;
@@ -485,10 +553,19 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
   for (const u of units) aliveBySeat.set(u.owner, (aliveBySeat.get(u.owner) ?? 0) + 1);
   const usedRespawns = typeof playerRespawns === 'number' ? playerRespawns : 0;
   const iCanReinforce =
-    (graveyard || []).some(g => g.owner === currentPlayer && (g.turnsUntilRespawn ?? 0) <= 0 && playerGold >= UNIT_COSTS[g.type]) &&
+    (graveyard || []).some(g => g.owner === currentPlayer && (g.turnsUntilRespawn ?? 0) <= 0 && playerCp >= RESPAWN_CP_COST[g.type]) &&
     usedRespawns < getEffectiveMaxRespawns(settings.mutators) &&
     getSpawnTiles(gameState, currentPlayer).length > 0;
   const lastStand = aliveBySeat.size > 0 && !iCanReinforce && [...aliveBySeat.values()].every(n => n <= 1);
+
+  // ── AGGRESSION CLOCK ──
+  // Two bots that both hold Overwatch never close, and the rules never force them to: the
+  // standoff cells froze at 17–75% before this existed. Once no HQ has been hit for
+  // AGGRESSION_AFTER_ROUNDS (and the match is old enough that it is not just a normal opening),
+  // positional play is over — no Overwatch, and every unit values closing on the objective.
+  const roundsWithoutHqDamage = totalTurns - (gameState.lastHqDamageRound ?? 0);
+  const pressure = totalTurns >= AGGRESSION_START_ROUND && roundsWithoutHqDamage >= AGGRESSION_AFTER_ROUNDS;
+  const hunts = lastStand || pressure;
 
   // FOG OF WAR LOGIC: Filter visible enemies
   let enemyUnits = units.filter(u => u.owner !== currentPlayer);
@@ -499,6 +576,17 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
   }
 
   // 0. Use Inventory (Free action)
+  const pendingPerk = units.find(u => u.owner === currentPlayer && (u.rank ?? 0) >= 1 && !u.perk);
+  if (pendingPerk) return { type: 'CHOOSE_PERK', unitId: pendingPerk.id, perkId: AI_PERK_CHOICE[pendingPerk.type] };
+
+  // Spend the once-per-match battery refill as soon as it is granted and there is room for it.
+  if (gameState.finalPush === 'READY' && playerCp < getEffectiveCpRules(settings.mutators).maxCp) {
+    return { type: 'FINAL_PUSH' };
+  }
+
+  const overclockAction = checkOverclock(gameState);
+  if (overclockAction) return overclockAction;
+
   const inventoryAction = checkInventory(gameState, myUnits);
   if (inventoryAction) return inventoryAction;
 
@@ -515,6 +603,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
 
   let bestAction: AIAction = { type: 'END_TURN' };
   let bestScore = 0; // Only take actions strictly better than passing (0)
+  const liveContract = gameState.contract && gameState.contract.claimedBy === null ? gameState.contract.id : null;
 
   // Locate nearest live Enemy Base in Conquer Mode
   const enemyBases = victoryMode === 'CONQUER'
@@ -601,12 +690,12 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
     // C. Secure Buildings (Avoid flipping building back and forth under active close threat)
     // Banks are breached by siege now (see E2 below), not by interaction.
     // Skipped in last stand: income is worthless with nothing left to buy.
-    if (playerCp >= 4 && !lastStand) {
+    if (playerCp >= 4 && !hunts) {
         const nearbyThreat = hasTileWithinRange(uTile, enemyTiles, 3);
 
         const b = adj.find(t => t.type === 'BUILDING' && t.owner !== currentPlayer);
         if (b && (difficulty !== 'EASY' || Math.random() < 0.4)) {
-            const secureScore = nearbyThreat ? 18 : b.owner == null ? 55 : 42;
+            const secureScore = (nearbyThreat ? 18 : b.owner == null ? 55 : 42) + (liveContract === 'LAND_GRAB' ? 30 : 0);
             if (secureScore > bestScore) {
                 bestScore = secureScore;
                 bestAction = { type: 'SECURE', unitId: unit.id, tileId: b.id, cost: 4 };
@@ -622,8 +711,16 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
     // D. Attack Unit
     if (playerCp >= attackCost && unit.ammo > 0 && canAttackFromHere) {
         const result = findBestTarget(unit, enemyUnits, mapData, difficulty, weather, gridSize, enemyUnits);
-        if (result && result.score > bestScore) {
-            bestScore = result.score;
+        // Contract weighting: a kill that finishes the round's card is worth more than a body.
+        const contractAttackBonus = !result || !liveContract ? 0
+            : liveContract === 'ACE_HUNT' ? ((result.unit.rank ?? 0) >= 2 ? 45 : 0)
+            : liveContract === 'FIRST_BLOOD' || liveContract === 'BREAKTHROUGH' || liveContract === 'PURGE' || liveContract === 'WIPE' ? 25
+            : liveContract === 'OVERWATCH_KILL' ? 20
+            : liveContract === 'CROSSFIRE_KILL' ? 15
+            : liveContract === 'SKIRMISH' ? 12
+            : 0;
+        if (result && result.score + contractAttackBonus > bestScore) {
+            bestScore = result.score + contractAttackBonus;
             bestAction = { type: 'ATTACK', attackerId: unit.id, targetUnitId: result.unit.id, cost: attackCost };
         }
     }
@@ -656,6 +753,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         if (vault) {
             const vaultDmg = calculateSiegeDamage(unit, uTile, 'BANK');
             let vaultScore = difficulty === 'EASY' ? 45 : 100;
+            if (liveContract === 'VAULT_RACE') vaultScore += 40;
             if ((vault.hp || BANK_STATS.HP) <= vaultDmg) vaultScore = difficulty === 'EASY' ? 85 : 9999;
             if (vaultScore > bestScore) {
                 bestScore = vaultScore;
@@ -673,6 +771,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
             if (hasLOS) {
                 let demolishScore = 20;
                 if (unit.type === 'ASSAULTER') demolishScore += 20;
+                if (liveContract === 'DEMOLITION') demolishScore += 40;
 
                 if (demolishScore > bestScore) {
                     bestScore = demolishScore;
@@ -729,7 +828,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
             // objective (enemy HQ, or the last enemy unit when there is no base to hunt).
             // Marching closer dominates comfort (~65 for a sniper nest); standing on a tile
             // that can actually fire dominates everything, so snipers stop pacing and settle.
-            if (lastStand) {
+            if (hunts) {
                 const hunt = targetBase ?? (enemyTiles.length > 0
                     ? enemyTiles.reduce((best, cur) =>
                         getManhattanDistance(uTile, cur) < getManhattanDistance(uTile, best) ? cur : best
@@ -740,10 +839,13 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
                         canUnitAttackFromTile(unit, t) &&
                         getManhattanDistance(t, hunt) <= getUnitRange(unit, mapData, weather, t) &&
                         hasLineOfSight(t, hunt, mapData, unit.type, weather, gridSize);
+                    // Last stand is all-or-nothing; the aggression clock only tilts the choice.
+                    const strikeBonus = lastStand ? 500 : 260;
+                    const stepBonus = lastStand ? 200 : 40;
                     if (canStrikeFrom(destTile)) {
-                        moveValue += 500;
+                        moveValue += strikeBonus;
                     } else {
-                        moveValue += (getManhattanDistance(uTile, hunt) - getManhattanDistance(destTile, hunt)) * 200;
+                        moveValue += (getManhattanDistance(uTile, hunt) - getManhattanDistance(destTile, hunt)) * stepBonus;
                     }
                 }
             }
@@ -795,7 +897,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
     }
 
     // --- OVERWATCH STANCE (Medium & Hard AI tactical zoning; banned in last stand) ---
-    if (!lastStand && difficulty !== 'EASY' && canUnitEnterOverwatch(unit, uTile, playerCp)) {
+    if (!hunts && difficulty !== 'EASY' && canUnitEnterOverwatch(unit, uTile, playerCp)) {
         const uZoneWeather = uTile.zone !== undefined ? weather.playerZones[uTile.zone] || 'CLEAR' : 'CLEAR';
         if (uZoneWeather !== 'FOG' && uZoneWeather !== 'SANDSTORM') {
             const minEnemyDist = getMinManhattanDistance(uTile, enemyTiles);

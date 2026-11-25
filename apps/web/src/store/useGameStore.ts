@@ -6,7 +6,7 @@
  * them to the server and show the views it sends back (see applyServerView).
  */
 import { create } from 'zustand';
-import { BANK_STATS, BARRIER_STATS, BASE_STATS, CP_SYSTEM, DEFAULT_GRID_SIZE, OVERWATCH_STATS, SHOP_ITEMS, UNIT_COSTS } from '@tactical/engine/constants/Config';
+import { BANK_STATS, BARRIER_STATS, BASE_STATS, CP_SYSTEM, DEFAULT_GRID_SIZE, OVERWATCH_STATS, RESPAWN_CP_COST, SHOP_ITEMS } from '@tactical/engine/constants/Config';
 import type { GameSettings, SavedMap, TerrainType, Tile, Unit, UnitRank, UnitType, WeatherState } from '@tactical/engine/types';
 import { getStepCost, getTileByIdFast } from '@tactical/engine/grid/Pathfinding';
 import { canConstructOnTile, canUnitEnterOverwatch, getUnitAttackCost, getUnitMaxHp, isWithinEnemyHqExclusion } from '@tactical/engine/rules/CombatRules';
@@ -40,6 +40,7 @@ import {
   type MissedActionBatch,
   type TableView,
 } from '@tactical/engine';
+import { chooseBotSpectatorEffect } from '@tactical/engine/game/SpectatorOps';
 import { useEffectStore } from './useEffectStore';
 import { fxTimeline } from '../core/graphics/fxTimeline';
 import { DEV_EVENT_MAP, devStructureBatch, type DevEventContext, type DevEventKind } from '../core/dev/devEventMatrix';
@@ -255,6 +256,61 @@ const aiPlays = (s: Pick<GameState, 'winner' | 'currentPlayer' | 'settings'>) =>
   s.winner === null && s.settings.gameMode === 'PVE' && (botMatchActive || s.currentPlayer === 1);
 
 /**
+ * Eliminated AI seats take their window too (PvE and full bot simulations), so a simulated match
+ * does not leave half the table silently skipping its attacks. The action loop calls this after
+ * every action: the timer is keyed by window, and an already-armed window is left alone, otherwise
+ * each bot action would push the attack back forever and it would never fire.
+ */
+let spectatorTimer: ReturnType<typeof setTimeout> | null = null;
+let spectatorTimerKey = '';
+
+const cancelBotSpectator = () => {
+  if (spectatorTimer !== null) clearTimeout(spectatorTimer);
+  spectatorTimer = null;
+  spectatorTimerKey = '';
+};
+
+const scheduleBotSpectator = () => {
+  const state = useGameStore.getState();
+  const seat = state.spectatorTurn;
+  const round = state.totalTurns + 1;
+  const botSeat =
+    state.settings.gameMode === 'PVE' &&
+    (botMatchActive || (seat !== null && seat !== undefined && seat !== 0));
+  if (
+    state.mode !== 'LOCAL' ||
+    state.currentScreen !== 'GAME' ||
+    state.winner !== null ||
+    seat === null ||
+    seat === undefined ||
+    state.playerStatus[seat] !== 'ELIMINATED' ||
+    state.spectatorUsedRound === round ||
+    !botSeat
+  ) {
+    cancelBotSpectator();
+    return;
+  }
+
+  const key = `${round}:${seat}`;
+  if (spectatorTimer !== null && spectatorTimerKey === key) return; // same window, already counting
+  cancelBotSpectator();
+  spectatorTimerKey = key;
+  spectatorTimer = setTimeout(() => {
+    spectatorTimer = null;
+    spectatorTimerKey = '';
+    const now = useGameStore.getState();
+    if (
+      now.mode !== 'LOCAL' ||
+      now.currentScreen !== 'GAME' ||
+      now.winner !== null ||
+      now.spectatorTurn !== seat ||
+      now.spectatorUsedRound === now.totalTurns + 1
+    ) return;
+    now.executeAiAction({ type: 'SPECTATOR_ATTACK', effectId: chooseBotSpectatorEffect(now, seat) });
+  }, 900);
+};
+
+/**
  * Whose eyes the map is drawn through (under fog, what they can see): your seat online,
  * seat 0 against the AI, and whoever's turn it is at a shared screen.
  */
@@ -386,7 +442,7 @@ const reuseSettings = (prev: GameSettings, next: GameSettings): GameSettings =>
   prev.unitCounts.SOLDIER === next.unitCounts.SOLDIER &&
   prev.unitCounts.ASSAULTER === next.unitCounts.ASSAULTER &&
   prev.unitCounts.SNIPER === next.unitCounts.SNIPER &&
-  Boolean(prev.mutators?.blitzCp) === Boolean(next.mutators?.blitzCp) &&
+  Boolean(prev.mutators?.classicCp) === Boolean(next.mutators?.classicCp) &&
   Boolean(prev.mutators?.scarcity) === Boolean(next.mutators?.scarcity) &&
   Boolean(prev.mutators?.ironman) === Boolean(next.mutators?.ironman) &&
   (prev.playerNames ?? []).join('\u0000') === (next.playerNames ?? []).join('\u0000')
@@ -441,6 +497,9 @@ const pickGameState = (s: GameState): GameState => ({
   totalTurns: s.totalTurns,
   turnCounter: s.turnCounter,
   playerCp: s.playerCp,
+  playerCpDebt: s.playerCpDebt,
+  playerCpBorrowed: s.playerCpBorrowed,
+  playerCpRefunded: s.playerCpRefunded,
   playerGold: s.playerGold,
   playerRespawns: s.playerRespawns,
   playerStatus: s.playerStatus,
@@ -454,7 +513,11 @@ const pickGameState = (s: GameState): GameState => ({
   pendingDrops: s.pendingDrops,
   mines: s.mines,
   weather: s.weather,
+  lastHqDamageRound: s.lastHqDamageRound,
   gameLog: s.gameLog,
+  spectatorTurn: s.spectatorTurn,
+  spectatorWindow: s.spectatorWindow,
+  spectatorUsedRound: s.spectatorUsedRound,
 });
 
 const optionsSelectionFor = (game: GameState, unit: Unit, visibleTiles: Set<string>) => {
@@ -1401,7 +1464,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (selectedGraveyardUnitId && validSpawnTiles.includes(clickedTileId)) {
         const deadUnit = graveyard.find(u => u.id === selectedGraveyardUnitId);
         if (deadUnit) {
-          get().executeAiAction({ type: 'SPAWN', unitType: deadUnit.type, tileId: clickedTileId, cost: 0, goldCost: UNIT_COSTS[deadUnit.type], deadUnitId: deadUnit.id });
+          get().executeAiAction({ type: 'SPAWN', unitType: deadUnit.type, tileId: clickedTileId, cost: RESPAWN_CP_COST[deadUnit.type], deadUnitId: deadUnit.id });
           return;
         }
       }
@@ -1731,6 +1794,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         ...(aiNext || action.type === 'END_TURN' ? { mapFeedback: null } : {}),
       });
       if (aiNext) get().runAiLoop();
+      scheduleBotSpectator();
 
       // The match ends like a broadcast: the winning cut lands, then the cutscene plays, and only
       // then the scoreboard. `finalePending` holds the results across the cue delay, when neither a

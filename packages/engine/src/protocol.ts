@@ -59,7 +59,7 @@ export interface MapSuggestion {
  * how well bots play.
  */
 export type TableSettings = Required<
-  Pick<GameSettings, 'unitCounts' | 'dynamicWeather' | 'fogOfWar' | 'doomsdayEnabled' | 'victoryMode' | 'aiDifficulty' | 'mutators' | 'mapSeed'>
+  Pick<GameSettings, 'unitCounts' | 'dynamicWeather' | 'fogOfWar' | 'doomsdayEnabled' | 'victoryMode' | 'aiDifficulty' | 'mutators' | 'startingGold' | 'goldIncome' | 'spectatorAttacks' | 'mapSeed'>
 > & {
   /** Seconds a turn starts with. 0 = no timer. Host picks 0 (off) | 30 | 45 | 60 | 90. */
   turnBaseS: number;
@@ -83,7 +83,10 @@ export const DEFAULT_TABLE_SETTINGS: TableSettings = {
   doomsdayEnabled: false,
   victoryMode: 'CONQUER',
   aiDifficulty: 'MEDIUM',
-  mutators: { blitzCp: false, scarcity: false, ironman: false },
+  mutators: { classicCp: false, scarcity: false, ironman: false },
+  startingGold: 200,
+  goldIncome: 20,
+  spectatorAttacks: true,
   mapSeed: '',
   turnBaseS: 30,
   turnIncrementS: 15,

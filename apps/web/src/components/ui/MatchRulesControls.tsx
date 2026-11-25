@@ -1,6 +1,7 @@
 import React from 'react';
 import { TURN_BASE_OPTIONS, TURN_INCREMENT_OPTIONS, UNIT_LIMITS, type TableSettings } from '@tactical/engine';
 import type { AIDifficulty, GameMutators, UnitType } from '@tactical/engine/types';
+import { GOLD_SETTINGS } from '@tactical/engine/constants/Config';
 import { GeoButton, GeoCard, GeoToggle, GeoWell } from './GeoPrimitives';
 import { UnitGuideModal, UnitMapIcon } from './UnitDeckModal';
 
@@ -17,8 +18,14 @@ const UNIT_META: Array<{ type: UnitType; label: string; role: string }> = [
   { type: 'SNIPER', label: 'SNIPER', role: 'High-ground precision cannon (8 CP)' },
 ];
 
+export const GOLD_PRESETS = [
+  { key: 'lean', label: 'LEAN', startingGold: 150, goldIncome: 15 },
+  { key: 'standard', label: 'STANDARD', startingGold: 200, goldIncome: 20 },
+  { key: 'frontload', label: 'FAST START', startingGold: 300, goldIncome: 15 },
+] as const;
+
 const MUTATORS: Array<{ key: keyof GameMutators; label: string; setupLabel: string }> = [
-  { key: 'blitzCp', label: 'Blitz CP (30 Max / +15 CP/turn)', setupLabel: 'Blitz CP (30 Max / +15 CP/turn)' },
+  { key: 'classicCp', label: 'Classic CP (20 Max / +10 CP/turn)', setupLabel: 'Classic CP (20 Max / +10 CP/turn)' },
   { key: 'scarcity', label: 'Scarcity (50% Ammo / +50% Bank)', setupLabel: 'Scarcity (50% Ammo / +50% Bank)' },
   { key: 'ironman', label: 'Ironman (0 Respawns)', setupLabel: 'Ironman (0 Graveyard Respawns)' },
 ];
@@ -171,6 +178,20 @@ export const EnvironmentToggles: React.FC<{
   </div>
 );
 
+export const SpectatorAttacksControl: React.FC<{
+  value: boolean;
+  disabled?: boolean;
+  onChange: (next: boolean) => void;
+}> = ({ value, disabled = false, onChange }) => (
+  <GeoToggle
+    label="Eliminated Player Attacks (one map effect every 2 rounds)"
+    value={value}
+    disabled={disabled}
+    onChange={onChange}
+    variant="amber"
+  />
+);
+
 export const DifficultyButtons: React.FC<{
   value: AIDifficulty;
   disabled?: boolean;
@@ -266,6 +287,37 @@ export const SquadGuideButton: React.FC = () => {
   );
 };
 
+export const GoldEconomyControl: React.FC<{
+  startingGold: number;
+  goldIncome: number;
+  disabled?: boolean;
+  onChange: (startingGold: number, goldIncome: number) => void;
+}> = ({ startingGold, goldIncome, disabled = false, onChange }) => (
+  <>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+      {GOLD_PRESETS.map(preset => {
+        const active = startingGold === preset.startingGold && goldIncome === preset.goldIncome;
+        return (
+          <GeoButton
+            key={preset.key}
+            fullWidth
+            disabled={disabled}
+            variant={active ? 'amber' : 'default'}
+            onClick={() => onChange(preset.startingGold, preset.goldIncome)}
+            coreStyle={{ padding: '6px 4px', lineHeight: 1.25 }}
+          >
+            <span style={{ display: 'block', fontSize: '11px', fontWeight: 900 }}>{preset.label}</span>
+            <span style={{ display: 'block', fontSize: '12px', fontWeight: 900 }}>€{preset.startingGold} / +{preset.goldIncome}</span>
+          </GeoButton>
+        );
+      })}
+    </div>
+    <div style={{ fontSize: '12px', color: 'var(--op-ink-muted)', lineHeight: 1.4 }}>
+      Starting gold / income per turn. Buildings still pay +€{GOLD_SETTINGS.BUILDING_INCOME} each turn.
+    </div>
+  </>
+);
+
 export const MutatorToggles: React.FC<{
   mutators?: GameMutators;
   disabled?: boolean;
@@ -273,7 +325,7 @@ export const MutatorToggles: React.FC<{
   onChange: (next: GameMutators) => void;
 }> = ({ mutators, disabled = false, detailedLabels = false, onChange }) => {
   const current: GameMutators = {
-    blitzCp: Boolean(mutators?.blitzCp),
+    classicCp: Boolean(mutators?.classicCp),
     scarcity: Boolean(mutators?.scarcity),
     ironman: Boolean(mutators?.ironman),
   };
