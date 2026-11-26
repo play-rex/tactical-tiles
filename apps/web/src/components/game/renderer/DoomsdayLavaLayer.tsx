@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Container, useTick } from '@pixi/react';
+import { Container, useApp, useTick } from '@pixi/react';
 import * as PIXI from 'pixi.js';
 import type { DoomsdayZone } from '@tactical/engine/types';
 import { getDoomsdayNextRadius, getDoomsdayRadius } from '@tactical/engine/grid/DoomsdayManager';
@@ -97,28 +97,37 @@ void main() {
   ) * 0.26;
 
   float crust = fbm(flow + vec2(uTime * 0.014, -uTime * 0.010));
-  float seams = fbm(p * 0.50 + vec2(crust * 0.82, uTime * 0.010));
-  float seam = smoothstep(0.48, 0.70, seams) * smoothstep(0.10, 0.62, crust);
-  float ember = seam * (0.52 + uHeat * 0.20);
-  float emberField = smoothstep(0.20, 0.78, crust);
+  float emberField = smoothstep(0.22, 0.80, crust);
+  float heatBoost = 0.85 + uHeat * 0.25;
 
-  // Thin isolines through the slow crust noise read as molten fissures rather than a flat wash.
-  float fissure = 1.0 - smoothstep(0.0, 0.045, abs(seams - 0.58));
-  float fissureGlow = 1.0 - smoothstep(0.0, 0.10, abs(seams - 0.58));
+  // Molten channels, two scales. A main vein gives the field structure at map zoom; the finer
+  // network keeps cracks crack-width when the camera is zoomed in, instead of wide orange slabs.
+  float mainSeam = fbm(p * 0.55 + vec2(crust * 0.40, uTime * 0.008));
+  float mainGap = abs(mainSeam - 0.550);
+  float veinGlow = 1.0 - smoothstep(0.0, 0.080, mainGap);
+  float vein = 1.0 - smoothstep(0.0, 0.045, mainGap);
+
+  float fineSeam = fbm(p * 1.60 + vec2(-crust * 0.25, uTime * 0.012));
+  float fineGap = abs(fineSeam - 0.520);
+  float fineFissure = 1.0 - smoothstep(0.0, 0.045, fineGap);
+  float fissureCore = 1.0 - smoothstep(0.0, 0.016, fineGap);
+  // Not every crack is equally hot; cool stretches fade into the crust.
+  float crackHeat = 0.55 + 0.45 * smoothstep(0.15, 0.70, crust);
 
   // Sparse hot pinpricks: enough to suggest molten rock under the crust, not a light show.
-  float glint = smoothstep(0.93, 0.99, fbm(p * 2.7 + vec2(uTime * 0.020, -uTime * 0.016)));
+  float glint = smoothstep(0.95, 1.0, fbm(p * 2.7 + vec2(uTime * 0.020, -uTime * 0.016)));
 
-  vec3 charred = vec3(0.052, 0.030, 0.025);
-  vec3 ash     = vec3(0.145, 0.086, 0.064);
-  vec3 warm    = vec3(0.420, 0.090, 0.020);
-  vec3 hot     = vec3(0.720, 0.220, 0.040);
+  vec3 charred = vec3(0.060, 0.037, 0.030);
+  vec3 ash     = vec3(0.180, 0.105, 0.075);
+  vec3 warm    = vec3(0.460, 0.110, 0.025);
+  vec3 hot     = vec3(0.780, 0.250, 0.050);
+  vec3 molten  = vec3(1.000, 0.440, 0.090);
 
-  vec3 col = mix(charred, ash, 0.36 + crust * 0.38);
-  col = mix(col, warm, emberField * 0.38 + ember);
-  col = mix(col, hot, seam * smoothstep(0.48, 0.90, crust) * 0.38 + glint * 0.26);
-  col = mix(col, warm, fissureGlow * 0.22);
-  col = mix(col, hot, fissure * 0.52);
+  vec3 col = mix(charred, ash, 0.30 + crust * 0.42);
+  col = mix(col, warm, emberField * 0.22);
+  col = mix(col, hot, (veinGlow * 0.18 + fineFissure * crackHeat * 0.12) * heatBoost);
+  col = mix(col, molten, vein * 0.42 + fineFissure * crackHeat * 0.44 + glint * 0.18);
+  col = mix(col, vec3(1.000, 0.620, 0.260), fissureCore * crackHeat * 0.45);
 
   // A thin cooled lip, not a white-hot ring. It keeps the circle readable at map zoom.
   float rim = exp(-pow((edgeDist - uRadius) / 0.10, 2.0));
@@ -130,10 +139,13 @@ void main() {
   float bandPulse = 0.5 + 0.5 * sin(uTime * 0.9 - d * 1.3);
   col = mix(col, vec3(0.54, 0.21, 0.055), band * (0.07 + 0.035 * bandPulse) * uWarning);
 
-  float alpha = lavaMask * (0.52 + crust * 0.06 + seam * 0.22 + fissure * 0.20 + glint * 0.12);
-  alpha = max(alpha, rim * 0.44);
+  // Low crust alpha keeps the terrain readable; the fissures carry the material read.
+  float alpha = lavaMask * (0.34 + crust * 0.05 + emberField * 0.050
+               + veinGlow * 0.12 * heatBoost + vein * 0.24
+               + fineFissure * crackHeat * 0.22 + fissureCore * crackHeat * 0.16 + glint * 0.08);
+  alpha = max(alpha, rim * 0.42);
   alpha = max(alpha, band * (0.045 + 0.025 * bandPulse) * uWarning);
-  alpha = clamp(alpha, 0.0, 0.78);
+  alpha = clamp(alpha, 0.0, 0.74);
 
   gl_FragColor = vec4(col * alpha, alpha);
 }
@@ -147,11 +159,14 @@ interface DoomsdayLavaLayerProps {
 }
 
 const DoomsdayLavaLayerInner: React.FC<DoomsdayLavaLayerProps> = ({ zone, gridSize, totalTurns, animate }) => {
+  const app = useApp();
   const rootRef = useRef<PIXI.Container>(null);
   const shaderRef = useRef<PIXI.Shader | null>(null);
   const timeRef = useRef(0);
 
   const boardSize = gridSize * TILE_SIZE;
+  // Before the first close there is only a warning band (or nothing), so ECO stays fully parked.
+  const ambientActive = totalTurns >= zone.startTurn - 1;
 
   useEffect(() => {
     const root = rootRef.current;
@@ -220,11 +235,44 @@ const DoomsdayLavaLayerInner: React.FC<DoomsdayLavaLayerProps> = ({ zone, gridSi
     current.uniforms.uGrid = gridSize;
     current.uniforms.uWarning = nextRadius < radius - 0.01 ? 1 : 0;
     current.uniforms.uHeat = heat;
-    if (!animate) {
-      timeRef.current = 0;
-      current.uniforms.uTime = 0;
-    }
+    if (animate) current.uniforms.uTime = timeRef.current;
   }, [zone, totalTurns, gridSize, animate]);
+
+  // ECO keeps the battle ticker parked so the rest of the map stays static. The lava field still
+  // gets a slow ambient update: one uniform write plus a stage draw at ~10 fps, without waking
+  // any other FX layer. LIVE hands this back to the normal ticker for a smooth 24/60 fps clock.
+  useEffect(() => {
+    if (animate || !ambientActive) return;
+    const renderer = app?.renderer as unknown as PIXI.Renderer | undefined;
+    const stage = app?.stage;
+    if (!renderer || (renderer as any).destroyed || !stage) return;
+
+    const frameMs = 100;
+    let raf = 0;
+    let last = performance.now();
+    let pendingMs = 0;
+
+    const step = () => {
+      raf = requestAnimationFrame(step);
+      const now = performance.now();
+      const elapsed = Math.min(250, now - last);
+      last = now;
+      pendingMs += elapsed;
+      if (pendingMs < frameMs) return;
+      pendingMs = 0;
+
+      timeRef.current += elapsed / 1000;
+      const shader = shaderRef.current;
+      if (!shader) return;
+      shader.uniforms.uTime = timeRef.current;
+
+      // A hover/drag wake already starts the ticker and renders; only draw here while it is parked.
+      if (!app.ticker.started && !(renderer as any).destroyed) renderer.render(stage);
+    };
+
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [animate, ambientActive, app]);
 
   useTick(delta => {
     if (!animate) return;
