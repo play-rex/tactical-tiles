@@ -1,6 +1,7 @@
 import { Tile, Unit, GameSettings, WeatherState, AIDifficulty, VictoryMode, SupplyLootType, LandMine, PerkId, SharedContract, FinalPushStatus, ActiveAirDrop, SmokeZone } from '../types';
+import type { DoomsdayZone } from '../types';
 import { smokeBlocksLine } from '../tactical/geometry';
-import { UNIT_STATS, TERRAIN_DEFENSE, RESPAWN_CP_COST, CP_SYSTEM, SHOP_ITEMS, DOOMSDAY_SETTINGS, TERRAIN_COSTS, BANK_STATS, BASE_STATS, OVERWATCH_STATS, AGGRESSION_AFTER_ROUNDS, AGGRESSION_START_ROUND } from '../constants/Config';
+import { UNIT_STATS, TERRAIN_DEFENSE, RESPAWN_CP_COST, CP_SYSTEM, SHOP_ITEMS, DOOMSDAY_SETTINGS, getDoomsdayStartTurn, TERRAIN_COSTS, BANK_STATS, BASE_STATS, OVERWATCH_STATS, AGGRESSION_AFTER_ROUNDS, AGGRESSION_START_ROUND } from '../constants/Config';
 import {
     getValidMovesWithParents,
     reconstructMovePathFromParents,
@@ -14,7 +15,7 @@ import {
 } from '../grid/Pathfinding';
 import { getSpawnTiles, INTERACT_COST } from '../game/options';
 import { findBestTarget } from './TargetingLogic';
-import { getRingIndex } from '../grid/DoomsdayManager';
+import { getDoomsdayNextRadius, getDoomsdayRadius, getRingIndex } from '../grid/DoomsdayManager';
 import { calculateSiegeDamage, canConstructOnTile, canHoldDrop, canUnitAttackFromTile, canUnitEnterOverwatch, getEffectiveCpRules, getEffectiveMaxRespawns, getUnitAttackCost, getUnitBaseDamage, getUnitMaxHp, getUnitRange } from '../rules/CombatRules';
 import { getOverwatchCoverageTiles, resolveMoveWithOverwatch } from '../rules/OverwatchRules';
 
@@ -55,6 +56,8 @@ interface GameStateProxy {
   victoryMode?: VictoryMode;
   gridSize: number;
   settings: GameSettings;
+  /** The match's closing circle, when Deathmatch + Doomsday is active. */
+  doomsdayZone?: DoomsdayZone;
   totalTurns: number;
   lastHqDamageRound?: number;
   /** The round's shared contract, so the bot races for it instead of handing it to the human. */
@@ -175,6 +178,8 @@ const evaluatePosition = (
     enemyDistField: Int32Array | null,
     baseDistField: Int32Array | null,
     doomsdayEnabled: boolean,
+    doomsdayStartTurn: number,
+    doomsdayZone: DoomsdayZone | undefined,
     totalTurns: number,
     gridSize: number,
     fogEnabled: boolean,
@@ -185,16 +190,33 @@ const evaluatePosition = (
 
   // A. DOOMSDAY SURVIVAL (Priority #1)
   if (doomsdayEnabled) {
-      const ring = getRingIndex(tile.x, tile.y, gridSize);
-      const lavaTurn = DOOMSDAY_SETTINGS.START_TURN + (ring * DOOMSDAY_SETTINGS.SHRINK_INTERVAL);
-      const turnsUntilDoom = lavaTurn - totalTurns;
-
-      if (turnsUntilDoom <= 1) {
-          score -= 5000;
-      } else if (turnsUntilDoom <= 5) {
-          score -= 500;
+      if (doomsdayZone) {
+          const dist = Math.hypot(
+              tile.x + 0.5 - doomsdayZone.center.x,
+              tile.y + 0.5 - doomsdayZone.center.y,
+          );
+          const radius = getDoomsdayRadius(doomsdayZone, totalTurns);
+          const nextRadius = getDoomsdayNextRadius(doomsdayZone, totalTurns);
+          if (dist > radius) {
+              score -= 5000;
+          } else if (dist > nextRadius) {
+              score -= 500;
+          } else {
+              // Central floor is safer and pulls the squad toward the final fight.
+              score += Math.max(0, radius - dist) * 2;
+          }
       } else {
-          score += ring * 2;
+          const ring = getRingIndex(tile.x, tile.y, gridSize);
+          const lavaTurn = doomsdayStartTurn + (ring * DOOMSDAY_SETTINGS.SHRINK_INTERVAL);
+          const turnsUntilDoom = lavaTurn - totalTurns;
+
+          if (turnsUntilDoom <= 1) {
+              score -= 5000;
+          } else if (turnsUntilDoom <= 5) {
+              score -= 500;
+          } else {
+              score += ring * 2;
+          }
       }
   }
 
@@ -560,7 +582,8 @@ const checkOverclock = (gameState: GameStateProxy): AIAction | null => {
 };
 
 export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
-  const { mapData, units, currentPlayer, playerCp, playerGold, playerRespawns, graveyard, difficulty, weather, victoryMode, gridSize, settings, totalTurns, smokeZones } = gameState;
+  const { mapData, units, currentPlayer, playerCp, playerGold, playerRespawns, graveyard, difficulty, weather, victoryMode, gridSize, settings, doomsdayZone, totalTurns, smokeZones } = gameState;
+  const doomsdayStartTurn = getDoomsdayStartTurn(settings, gridSize);
   const myUnits = units.filter(u => u.owner === currentPlayer && !u.completed && !u.isRooted);
 
   // --- LAST-STAND ENDGAME: every remaining side fields ≤1 unit and I cannot
@@ -821,7 +844,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
         const currentScore = evaluatePosition(
             uTile, unit, enemyTiles, activeBanks, enemyBases, difficulty, victoryMode,
             targetBase, enemyDistField, baseDistField,
-            settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar, supplyDistField
+            settings.doomsdayEnabled, doomsdayStartTurn, doomsdayZone, totalTurns, gridSize, settings.fogOfWar, supplyDistField
         );
 
         const { validMoves: moveMap, parents: moveParents } = getValidMovesWithParents(
@@ -849,7 +872,7 @@ export const getBestAIAction = (gameState: GameStateProxy): AIAction => {
             const destScore = evaluatePosition(
                 destTile, unit, enemyTiles, activeBanks, enemyBases, difficulty, victoryMode,
                 targetBase, enemyDistField, baseDistField,
-                settings.doomsdayEnabled, totalTurns, gridSize, settings.fogOfWar, supplyDistField
+                settings.doomsdayEnabled, doomsdayStartTurn, doomsdayZone, totalTurns, gridSize, settings.fogOfWar, supplyDistField
             );
 
             // Net positional gain minus tiny CP friction; avoids stepping back onto worse tiles

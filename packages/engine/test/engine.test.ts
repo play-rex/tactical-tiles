@@ -18,7 +18,7 @@ import {
   type GameAction,
   type GameState,
 } from '../src/index';
-import { BANK_STATS, BASE_STATS, COMBAT_BONUSES, CP_SYSTEM, GOLD_SETTINGS, LAND_MINE_STATS, MOMENTUM_REFUNDS, RESPAWN_CP_COST, SHOP_ITEMS } from '../src/constants/Config';
+import { BANK_STATS, BASE_STATS, COMBAT_BONUSES, CP_SYSTEM, GOLD_SETTINGS, LAND_MINE_STATS, MOMENTUM_REFUNDS, RESPAWN_CP_COST, SHOP_ITEMS, getDoomsdayStartTurn } from '../src/constants/Config';
 import { getDoomsdayEscalation } from '../src/grid/DoomsdayManager';
 import { getUnitAttackCost, isWithinEnemyHqExclusion } from '../src/rules/CombatRules';
 import { initBankVaults } from '../src/game/setup';
@@ -365,8 +365,10 @@ test('Doomsday escalation raises CP regen at Collapse and Meltdown', () => {
   assert.equal(getDoomsdayEscalation(40, true).regenBonus, 4);
   assert.equal(getDoomsdayEscalation(40, false).regenBonus, 0);
 
+  // Keep this arm on the legacy Round-30 clock so it tests the escalation maths, not the pacing table.
   const base = createGeneratedGame(settings({
     mapSeed: 'DOOMSTAGE', fogOfWar: false, playerCount: 2, victoryMode: 'DEATHMATCH', doomsdayEnabled: true,
+    doomsdayStartTurn: 30,
   }));
   const stateAt = (totalTurns: number): GameState => ({
     ...base,
@@ -385,6 +387,16 @@ test('Doomsday escalation raises CP regen at Collapse and Meltdown', () => {
 
   const meltdown = applyAction(stateAt(39), { type: 'END_TURN' }).state;
   assert.equal(meltdown.playerCp[0], 5 + CP_SYSTEM.REGEN_AMOUNT + 4);
+});
+
+test('Doomsday start round scales by map size and honours an explicit override', () => {
+  assert.equal(getDoomsdayStartTurn({ playerCount: 2 }, 20), 8);
+  assert.equal(getDoomsdayStartTurn({ playerCount: 4 }, 20), 8);
+  assert.equal(getDoomsdayStartTurn({ playerCount: 4 }, 25), 10);
+  assert.equal(getDoomsdayStartTurn({ playerCount: 6 }, 30), 10);
+  assert.equal(getDoomsdayStartTurn({ playerCount: 2 }), 8);
+  assert.equal(getDoomsdayStartTurn({ playerCount: 4 }), 10);
+  assert.equal(getDoomsdayStartTurn({ playerCount: 2, doomsdayStartTurn: 30 }, 20), 30);
 });
 
 test('getAttackBlocker returns accurate tactical reasons when a shot is unavailable', () => {

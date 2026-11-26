@@ -7,6 +7,7 @@
  * the armies have not met. A contract nobody can finish is a dead HUD element, and a dead HUD
  * element teaches players to stop reading the HUD.
  */
+import { getDoomsdayStartTurn } from '../constants/Config';
 import { getDoomsdayEscalation } from '../grid/DoomsdayManager';
 import { createSeededRng } from '../utils/SeededRandom';
 import type { ContractId, ContractTier, SharedContract, Unit } from '../types';
@@ -224,7 +225,12 @@ export const dealContract = (
   opts: { preferLowerTier?: boolean; rng?: () => number } = {},
 ): ContractDef | null => {
   const doomsdayActive = state.settings.victoryMode === 'DEATHMATCH' && Boolean(state.settings.doomsdayEnabled);
-  const stage = getDoomsdayEscalation(round, doomsdayActive).stage;
+  const stage = getDoomsdayEscalation(
+    round,
+    doomsdayActive,
+    state.doomsdayZone?.startTurn ?? getDoomsdayStartTurn(state.settings, state.gridSize),
+    state.doomsdayZone?.endTurn,
+  ).stage;
   const eligible = CONTRACTS.filter(
     c => c.opens <= round && !used.includes(c.id) && (!c.board || c.board(state)),
   );

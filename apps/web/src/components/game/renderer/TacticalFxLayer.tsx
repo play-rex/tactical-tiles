@@ -447,68 +447,125 @@ const TacticalFxItem: React.FC<TacticalFxItemProps> = React.memo(({ data, mapRot
           g.lineStyle(0);
         } else {
           const impactAt = 420;
-          // Phase A (0..420ms): Converging dual orbital laser beams + tightening reticle
-          if (elapsed < impactAt + 90) {
+          const releaseAt = 300;
+          const passStart = 160;
+          const passEnd = 520;
+          // Keep the jet on its full edge-to-edge cruise through the ambient tail. Capping this at
+          // passEnd + 720ms made it clear the frame while the kill-cam push was still settling.
+          const flightEnd = totalDur;
+
+          // Strike axis: the jet crosses the whole theater on a diagonal, dipping its nose over
+          // the target so the designator pod and the bomb bay both line up.
+          const dirX = anchor.x > boardPx * 0.5 ? -0.92 : 0.92;
+          const dirY = anchor.y > boardPx * 0.5 ? -0.4 : 0.4;
+          const line = fullMapFlightLine(
+            anchor.x,
+            anchor.y - TILE_SIZE * 0.32,
+            dirX,
+            dirY,
+            boardPx,
+            TILE_SIZE * 4.4,
+          );
+          const sPos = sampleFlightS(line, elapsed, passStart, passEnd, -TILE_SIZE * 0.55, TILE_SIZE * 0.5, flightEnd);
+          const groundX = line.refX + line.ux * sPos;
+          const groundY = line.refY + line.uy * sPos;
+          const climb = elapsed > passEnd ? clamp01((elapsed - passEnd) / Math.max(1, totalDur - passEnd)) : 0;
+          const jetAlt = 34 + climb * 22;
+          const jetX = groundX + up.x * jetAlt;
+          const jetY = groundY + up.y * jetAlt;
+          const jetAlpha = clamp01(1 - Math.max(0, tTotal - 0.92) / 0.08);
+
+          // 1. Target painting: rotating diamond reticle + tightening rings on the ground.
+          if (elapsed < impactAt + 80) {
             const lockT = clamp01(elapsed / impactAt);
-            const beamA = elapsed < impactAt ? 0.92 : Math.max(0, 1 - (elapsed - impactAt) / 90);
-            const skyX = anchor.x + up.x * 580;
-            const skyY = anchor.y + up.y * 580;
-            const spread = (1 - easeOutCubic(lockT)) * 46;
-            const sideX = -up.y * spread;
-            const sideY = up.x * spread;
-
-            // Converging twin satellite laser rails
-            g.lineStyle(3.2, 0xF43F5E, 0.55 * beamA);
-            g.moveTo(skyX + sideX, skyY + sideY);
-            g.lineTo(anchor.x, anchor.y);
-            g.moveTo(skyX - sideX, skyY - sideY);
-            g.lineTo(anchor.x, anchor.y);
-
-            // Core vertical designator beam
-            g.lineStyle(14, 0xF43F5E, 0.26 * beamA);
-            g.moveTo(skyX, skyY);
-            g.lineTo(anchor.x, anchor.y);
-            g.lineStyle(3.5, 0xFFF1F2, 0.96 * beamA);
-            g.moveTo(skyX, skyY);
-            g.lineTo(anchor.x, anchor.y);
-
-            // Tightening orbital ground lock rings
-            g.lineStyle(2.4, 0xF43F5E, beamA);
-            g.drawCircle(anchor.x, anchor.y, 34 * (1 - lockT * 0.62));
-            g.lineStyle(1.6, 0xFDA4AF, beamA * 0.85);
-            g.drawCircle(anchor.x, anchor.y, 52 * (1 - lockT * 0.52));
-            g.lineStyle(0);
-          }
-
-          // Phase B (140..420ms): Hypersonic JDAM missile plunging straight down screen-up axis
-          if (elapsed >= 140 && elapsed < impactAt) {
-            const diveT = clamp01((elapsed - 140) / (impactAt - 140));
-            const accel = diveT * diveT;
-            const alt = (1 - accel) * 420;
-            const mx = anchor.x + up.x * alt;
-            const my = anchor.y + up.y * alt;
-            const sp = ensureSprite(actorSpriteRef, 'TACTICAL_JDAM_MISSILE');
-            if (sp) {
-              sp.visible = true;
-              sp.position.set(mx, my);
-              sp.rotation = uprightRad;
-              sp.scale.set(0.68);
-              sp.alpha = 1;
+            const lockA = elapsed < impactAt ? 0.92 : Math.max(0, 1 - (elapsed - impactAt) / 80);
+            const r = 46 - easeOutCubic(lockT) * 24;
+            g.lineStyle(2.2, 0xF43F5E, lockA);
+            g.moveTo(anchor.x, anchor.y - r);
+            g.lineTo(anchor.x + r, anchor.y);
+            g.lineTo(anchor.x, anchor.y + r);
+            g.lineTo(anchor.x - r, anchor.y);
+            g.closePath();
+            g.lineStyle(1.4, 0xFDA4AF, lockA * 0.8);
+            g.drawCircle(anchor.x, anchor.y, r * 0.62);
+            const spin = elapsed * 0.004;
+            for (let i = 0; i < 4; i++) {
+              const a = spin + (Math.PI / 2) * i;
+              g.moveTo(anchor.x + Math.cos(a) * (r + 4), anchor.y + Math.sin(a) * (r + 4));
+              g.lineTo(anchor.x + Math.cos(a) * (r + 12), anchor.y + Math.sin(a) * (r + 12));
             }
-            // Double Mach vapor shock cones around diving kinetic dart
-            g.lineStyle(2.4, 0xFDA4AF, 0.84);
-            g.drawCircle(mx, my, 12 + diveT * 14);
-            g.lineStyle(1.4, 0xFFFFFF, 0.72);
-            g.drawCircle(mx + up.x * 24, my + up.y * 24, 8 + diveT * 9);
             g.lineStyle(0);
           }
 
-          // Phase C (420..combatDur): Blinding orbital plasma pillar + triple shockwave + crater
+          // 2. Laser designator cone from the jet's sensor pod to the painted tile.
+          if (elapsed < impactAt + 60 && jetAlpha > 0.05) {
+            const noseX = jetX + line.ux * 46;
+            const noseY = jetY + line.uy * 46;
+            const pulse = 0.72 + 0.28 * Math.sin(elapsed * 0.028);
+            const beamA = clamp01(1 - Math.max(0, elapsed - impactAt) / 60) * pulse;
+            g.lineStyle(1.2, 0xF43F5E, 0.2 * beamA);
+            g.moveTo(noseX, noseY);
+            g.lineTo(anchor.x - TILE_SIZE * 0.42, anchor.y - TILE_SIZE * 0.2);
+            g.lineTo(anchor.x + TILE_SIZE * 0.42, anchor.y - TILE_SIZE * 0.2);
+            g.lineTo(anchor.x + TILE_SIZE * 0.42, anchor.y + TILE_SIZE * 0.2);
+            g.lineTo(anchor.x - TILE_SIZE * 0.42, anchor.y + TILE_SIZE * 0.2);
+            g.closePath();
+            g.lineStyle(3.4, 0xF43F5E, 0.4 * beamA);
+            g.moveTo(noseX, noseY);
+            g.lineTo(anchor.x, anchor.y);
+            g.lineStyle(1.2, 0xFFF1F2, 0.92 * beamA);
+            g.moveTo(noseX, noseY);
+            g.lineTo(anchor.x, anchor.y);
+            g.lineStyle(0);
+            g.beginFill(0xFDA4AF, 0.85 * beamA);
+            g.drawCircle(noseX, noseY, 2.2);
+            g.endFill();
+          }
+
+          // 3. Cold-launched JDAM leaving the live bomb bay, curving forward into the painted tile.
+          if (elapsed >= releaseAt && elapsed < impactAt) {
+            const bombT = clamp01((elapsed - releaseAt) / Math.max(1, impactAt - releaseAt));
+            const sRel = sampleFlightS(line, releaseAt, passStart, passEnd, -TILE_SIZE * 0.55, TILE_SIZE * 0.5, flightEnd);
+            const rx = line.refX + line.ux * sRel + up.x * 34;
+            const ry = line.refY + line.uy * sRel + up.y * 34;
+            const ctrlX = (rx + anchor.x) * 0.5 + line.ux * TILE_SIZE * 0.9 + up.x * TILE_SIZE * 1.1;
+            const ctrlY = (ry + anchor.y) * 0.5 + line.uy * TILE_SIZE * 0.9 + up.y * TILE_SIZE * 1.1;
+            const inv = 1 - bombT;
+            const bx = inv * inv * rx + 2 * inv * bombT * ctrlX + bombT * bombT * anchor.x;
+            const by = inv * inv * ry + 2 * inv * bombT * ctrlY + bombT * bombT * anchor.y;
+            const tanX = 2 * inv * (ctrlX - rx) + 2 * bombT * (anchor.x - ctrlX);
+            const tanY = 2 * inv * (ctrlY - ry) + 2 * bombT * (anchor.y - ctrlY);
+
+            const tailT = Math.max(0, bombT - 0.28);
+            const invT = 1 - tailT;
+            const tx = invT * invT * rx + 2 * invT * tailT * ctrlX + tailT * tailT * anchor.x;
+            const ty = invT * invT * ry + 2 * invT * tailT * ctrlY + tailT * tailT * anchor.y;
+            g.lineStyle(3.2, 0xFDA4AF, 0.32);
+            g.moveTo(tx, ty);
+            g.lineTo(bx, by);
+            g.lineStyle(1.2, 0xFFF1F2, 0.8);
+            g.moveTo(tx, ty);
+            g.lineTo(bx, by);
+            g.lineStyle(0);
+
+            const bomb = ensurePooledSprite(warheadSpritesRef, 0, 'TACTICAL_JDAM_MISSILE', false);
+            if (bomb) {
+              bomb.visible = true;
+              bomb.position.set(bx, by);
+              bomb.rotation = Math.atan2(tanY, tanX) - Math.PI / 2;
+              bomb.scale.set(0.56);
+              bomb.alpha = 1;
+            }
+
+            g.lineStyle(1.2, 0xFFFFFF, 0.35 * (1 - bombT));
+            g.drawCircle(bx, by, 7 + bombT * 8);
+            g.lineStyle(0);
+          }
+
+          // 4. Impact: white-hot flash, debris spokes, twin shock rings, rising smoke column.
           if (elapsed >= impactAt) {
             const postT = clamp01((elapsed - impactAt) / (combatDur - impactAt));
             const flash = Math.pow(1 - postT, 2.0);
-            const skyX = anchor.x + up.x * 460;
-            const skyY = anchor.y + up.y * 460;
 
             const crater = ensurePooledSprite(decalSpritesRef, 0, 'TACTICAL_CRATER_DECAL', true);
             if (crater) {
@@ -518,23 +575,60 @@ const TacticalFxItem: React.FC<TacticalFxItemProps> = React.memo(({ data, mapRot
               crater.alpha = postT < 0.55 ? 0.94 : 0.94 * (1 - (postT - 0.55) / 0.45);
             }
 
-            if (postT < 0.48) {
-              const colA = 1 - postT / 0.48;
-              g.lineStyle(32 * colA, 0xF43F5E, 0.36 * colA);
-              g.moveTo(skyX, skyY);
-              g.lineTo(anchor.x, anchor.y);
-              g.lineStyle(12 * colA, 0xFFFFFF, 0.95 * colA);
-              g.moveTo(skyX, skyY);
-              g.lineTo(anchor.x, anchor.y);
-              g.beginFill(0xFFF1F2, 0.72 * colA);
-              g.drawCircle(anchor.x, anchor.y, 18 + colA * 26);
+            if (postT < 0.3) {
+              const flashA = 1 - postT / 0.3;
+              g.beginFill(0xFFF1F2, 0.85 * flashA);
+              g.drawCircle(anchor.x, anchor.y, 16 + (1 - flashA) * 34);
               g.endFill();
+              for (let i = 0; i < 10; i++) {
+                const a = (Math.PI * 2 * i) / 10 + 0.2;
+                const inner = 16 + (1 - flashA) * 22;
+                const outer = inner + 20 + (1 - flashA) * 40;
+                g.lineStyle(2.4 * flashA, i % 2 ? 0xF43F5E : 0xFFF1F2, 0.8 * flashA);
+                g.moveTo(anchor.x + Math.cos(a) * inner, anchor.y + Math.sin(a) * inner);
+                g.lineTo(anchor.x + Math.cos(a) * outer, anchor.y + Math.sin(a) * outer);
+              }
+              g.lineStyle(0);
             }
+
             g.lineStyle(4.5 * flash, 0xFDA4AF, flash);
             g.drawCircle(anchor.x, anchor.y, 18 + easeOutCubic(postT) * 92);
             g.lineStyle(2.4 * flash, 0xF43F5E, flash * 0.85);
             g.drawCircle(anchor.x, anchor.y, 12 + easeOutCubic(postT) * 62);
             g.lineStyle(0);
+
+            // Rising smoke column replaces the old orbital pillar: this was an aircraft drop.
+            for (let i = 0; i < 4; i++) {
+              const rise = 12 + postT * (34 + i * 16);
+              const sa = Math.max(0, (1 - postT) * (0.28 - i * 0.045));
+              if (sa <= 0) continue;
+              g.beginFill(i === 0 ? 0xFDA4AF : 0x64748B, sa);
+              g.drawCircle(
+                anchor.x + up.x * rise - up.y * (4 + i * 3),
+                anchor.y + up.y * rise + up.x * (4 + i * 3),
+                10 + i * 7 + postT * 12,
+              );
+              g.endFill();
+            }
+          }
+
+          // 5. Full-map stealth jet: rose-white contrails, offset shadow and an accelerating climb-out.
+          drawWingtipContrails(g, jetX, jetY, line.ux, line.uy, 46, 105 + climb * 60, jetAlpha, 0xFDA4AF);
+          const shadow = ensureSprite(shadowSpriteRef, 'TACTICAL_PRECISION_JET_SHADOW');
+          if (shadow) {
+            shadow.visible = true;
+            shadow.position.set(jetX - up.x * jetAlt + 22, jetY - up.y * jetAlt + 22);
+            shadow.rotation = line.rot;
+            shadow.scale.set(0.72 + climb * 0.05);
+            shadow.alpha = 0.4 * jetAlpha;
+          }
+          const jet = ensureSprite(actorSpriteRef, 'TACTICAL_PRECISION_JET');
+          if (jet) {
+            jet.visible = true;
+            jet.position.set(jetX, jetY);
+            jet.rotation = line.rot;
+            jet.scale.set(0.74 + climb * 0.05);
+            jet.alpha = jetAlpha;
           }
         }
         break;
@@ -948,24 +1042,111 @@ const TacticalFxItem: React.FC<TacticalFxItemProps> = React.memo(({ data, mapRot
           break;
         }
 
+        if (tiles.length === 0) break;
+        // Loiter geometry: the gunship circles the lane midpoint, banking so the side battery
+        // (+Y on the airframe) always faces inward. Impacts walk with the existing 85ms cadence.
+        const centers = tiles.map(tileCenter);
+        const first = centers[0];
+        const last = centers[centers.length - 1];
+        const laneMidX = (first.x + last.x) / 2;
+        const laneMidY = (first.y + last.y) / 2;
+        const laneSpan = Math.max(TILE_SIZE, Math.hypot(last.x - first.x, last.y - first.y));
+        const orbitR = Math.min(TILE_SIZE * 4.4, Math.max(TILE_SIZE * 2.6, laneSpan * 0.36));
+        const enterMs = 260;
+        const orbitTurns = 0.92;
+        const orbitMs = Math.max(1, combatDur - enterMs);
+        const a0 = Math.atan2(first.y - laneMidY, first.x - laneMidX);
+        const endA = a0 + orbitTurns * Math.PI * 2;
+        const inCombat = elapsed <= combatDur;
+        const orbitA = inCombat
+          ? a0 + (Math.max(0, elapsed - enterMs) / orbitMs) * orbitTurns * Math.PI * 2
+          : endA;
+        const orbitStartX = laneMidX + Math.cos(a0) * orbitR;
+        const orbitStartY = laneMidY + Math.sin(a0) * orbitR;
+        const tangentX = -Math.sin(a0);
+        const tangentY = Math.cos(a0);
+        const entryX = orbitStartX - tangentX * boardPx * 0.95;
+        const entryY = orbitStartY - tangentY * boardPx * 0.95;
+        const enterEase = easeOutCubic(clamp01(elapsed / enterMs));
+
+        let gunX = orbitStartX;
+        let gunY = orbitStartY;
+        if (elapsed < enterMs) {
+          gunX = entryX + (orbitStartX - entryX) * enterEase;
+          gunY = entryY + (orbitStartY - entryY) * enterEase;
+        } else if (inCombat) {
+          gunX = laneMidX + Math.cos(orbitA) * orbitR;
+          gunY = laneMidY + Math.sin(orbitA) * orbitR;
+        } else {
+          // Peel out along the final tangent while drifting wide, so it clears the board cleanly.
+          const exitT = elapsed - combatDur;
+          const exitRad = Math.min(exitT * 0.2, 220);
+          const exitDist = exitT * 0.5;
+          gunX = laneMidX + Math.cos(endA) * (orbitR + exitRad) - Math.sin(endA) * exitDist;
+          gunY = laneMidY + Math.sin(endA) * (orbitR + exitRad) + Math.cos(endA) * exitDist;
+        }
+
+        const heading = (elapsed < enterMs ? a0 : orbitA) + Math.PI / 2;
+        const gunshipAlt = 62 + (elapsed > combatDur ? Math.min(28, (elapsed - combatDur) * 0.04) : 0);
+        const screenX = gunX + up.x * gunshipAlt;
+        const screenY = gunY + up.y * gunshipAlt;
+        const orbitAlpha = elapsed > combatDur ? clamp01(1 - Math.max(0, elapsed - combatDur - 1100) / 1000) : 1;
+        const scale = 0.78;
+        const cosH = Math.cos(heading);
+        const sinH = Math.sin(heading);
+        const gunPortX = screenX + (-44 * sinH) * scale;
+        const gunPortY = screenY + (44 * cosH) * scale;
+
+        // Faint orbit trace so the circling reads as a deliberate gun pattern, not a stray sprite.
+        if (elapsed >= enterMs && orbitAlpha > 0.02) {
+          const trailStart = Math.max(a0, Math.min(orbitA, endA) - 0.9);
+          g.lineStyle(2, 0xFCD34D, 0.12 * orbitAlpha);
+          g.arc(laneMidX + up.x * gunshipAlt, laneMidY + up.y * gunshipAlt, orbitR, trailStart, Math.min(orbitA, endA));
+          g.lineStyle(0);
+        }
+
         for (let i = 0; i < tiles.length; i++) {
           const step = Math.floor(i / w);
           const impactAt = 200 + step * 85 + (i % 2 === 1 ? 32 : 0);
-          const shellStart = impactAt - 170;
-          const pt = tileCenter(tiles[i]);
+          const fireStart = impactAt - 130;
+          const pt = centers[i];
 
-          if (elapsed >= shellStart && elapsed < impactAt) {
-            const st = clamp01((elapsed - shellStart) / 170);
-            const alt = (1 - st * st) * 240;
-            const sx = pt.x + up.x * alt - up.y * (1 - st) * 28;
-            const sy = pt.y + up.y * alt + up.x * (1 - st) * 28;
-            g.lineStyle(5, 0xF97316, 0.74);
-            g.moveTo(sx + up.x * 30, sy + up.y * 30);
-            g.lineTo(sx, sy);
-            g.lineStyle(2.2, 0xFEF08A, 0.98);
-            g.moveTo(sx + up.x * 18, sy + up.y * 18);
-            g.lineTo(sx, sy);
+          if (elapsed >= fireStart && elapsed < impactAt) {
+            // Tracer walks from the side cannon to the target; the last third is a bright bolt.
+            const st = clamp01((elapsed - fireStart) / (impactAt - fireStart));
+            const headX = gunPortX + (pt.x - gunPortX) * st;
+            const headY = gunPortY + (pt.y - gunPortY) * st;
+            const tailT = Math.max(0, st - 0.34);
+            const tailX = gunPortX + (pt.x - gunPortX) * tailT;
+            const tailY = gunPortY + (pt.y - gunPortY) * tailT;
+            g.lineStyle(5, 0xF97316, 0.2 * (1 - st * 0.4));
+            g.moveTo(tailX, tailY);
+            g.lineTo(headX, headY);
+            g.lineStyle(2.2, 0xFEF08A, 0.95);
+            g.moveTo(tailX, tailY);
+            g.lineTo(headX, headY);
             g.lineStyle(0);
+            g.beginFill(0xFFFBEB, 0.95);
+            g.drawCircle(headX, headY, 2.6);
+            g.endFill();
+
+            // Muzzle flash + ejected brass at the gun port
+            if (st < 0.4) {
+              const mf = 1 - st / 0.4;
+              g.beginFill(0xFEF08A, 0.9 * mf);
+              g.drawCircle(gunPortX, gunPortY, 3 + mf * 4);
+              g.endFill();
+              for (let sIdx = 0; sIdx < 3; sIdx++) {
+                const a = heading + Math.PI + (sIdx - 1) * 0.4;
+                g.lineStyle(1.6, 0xFDBA74, 0.8 * mf);
+                g.moveTo(gunPortX, gunPortY);
+                g.lineTo(gunPortX + Math.cos(a) * (6 + mf * 10), gunPortY + Math.sin(a) * (6 + mf * 10));
+              }
+              g.lineStyle(0);
+              g.beginFill(0xFDBA74, 0.8 * mf);
+              g.drawCircle(gunPortX - cosH * 7 + 3, gunPortY - sinH * 7 + 3, 1.5);
+              g.endFill();
+            }
           } else if (elapsed >= impactAt) {
             const bt = clamp01((elapsed - impactAt) / 580);
             const crater = ensurePooledSprite(decalSpritesRef, i, 'TACTICAL_CRATER_DECAL', true);
@@ -985,6 +1166,67 @@ const TacticalFxItem: React.FC<TacticalFxItemProps> = React.memo(({ data, mapRot
               g.lineStyle(0);
             }
           }
+        }
+
+        // Suppressive bursts after the last plotted impact keep the gun run alive while the
+        // gunship finishes its orbit; these are visual only, all damage is already resolved.
+        const lastStep = Math.floor((tiles.length - 1) / w);
+        const lastImpactAt = 200 + lastStep * 85 + ((tiles.length - 1) % 2 === 1 ? 32 : 0);
+        if (elapsed > lastImpactAt + 60 && elapsed < combatDur) {
+          const burstT = elapsed - lastImpactAt - 60;
+          const burst = Math.floor(burstT / 150);
+          const st = clamp01((burstT % 150) / 80);
+          const target = centers[(burst * 3 + 2) % centers.length];
+          const headX = gunPortX + (target.x - gunPortX) * st;
+          const headY = gunPortY + (target.y - gunPortY) * st;
+          const tailT = Math.max(0, st - 0.3);
+          g.lineStyle(3.4, 0xF97316, 0.18);
+          g.moveTo(gunPortX + (target.x - gunPortX) * tailT, gunPortY + (target.y - gunPortY) * tailT);
+          g.lineTo(headX, headY);
+          g.lineStyle(1.6, 0xFEF08A, 0.78);
+          g.moveTo(gunPortX + (target.x - gunPortX) * tailT, gunPortY + (target.y - gunPortY) * tailT);
+          g.lineTo(headX, headY);
+          g.lineStyle(0);
+          if (st < 0.35) {
+            const mf = 1 - st / 0.35;
+            g.beginFill(0xFEF08A, 0.75 * mf);
+            g.drawCircle(gunPortX, gunPortY, 2.4 + mf * 3.4);
+            g.endFill();
+          }
+        }
+
+        // Four curving engine contrails, each offset from its nacelle, plus the ground shadow.
+        if (orbitAlpha > 0.02) {
+          for (const ly of [-86, -44, 44, 86]) {
+            const lx = -28;
+            const ox = screenX + (lx * cosH - ly * sinH) * scale;
+            const oy = screenY + (lx * sinH + ly * cosH) * scale;
+            const trailLen = 70 + 30 * Math.sin(elapsed * 0.01 + ly);
+            g.lineStyle(2.8, 0xFDE68A, 0.18 * orbitAlpha);
+            g.moveTo(ox, oy);
+            g.lineTo(ox - cosH * trailLen, oy - sinH * trailLen);
+            g.lineStyle(1.1, 0xFFFFFF, 0.32 * orbitAlpha);
+            g.moveTo(ox, oy);
+            g.lineTo(ox - cosH * 38, oy - sinH * 38);
+          }
+          g.lineStyle(0);
+        }
+
+        const shadow = ensureSprite(shadowSpriteRef, 'TACTICAL_GUNSHIP_SHADOW');
+        if (shadow) {
+          shadow.visible = true;
+          shadow.position.set(screenX - up.x * 50 + 24, screenY - up.y * 50 + 24);
+          shadow.rotation = heading;
+          shadow.scale.set(scale);
+          shadow.alpha = 0.42 * orbitAlpha;
+        }
+        const gunship = ensureSprite(actorSpriteRef, 'TACTICAL_GUNSHIP');
+        if (gunship) {
+          gunship.visible = true;
+          gunship.position.set(screenX, screenY);
+          gunship.rotation = heading;
+          gunship.scale.set(scale);
+          gunship.alpha = orbitAlpha;
         }
         break;
       }

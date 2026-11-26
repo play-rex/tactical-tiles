@@ -144,7 +144,7 @@ export const HowToPlay: React.FC = () => {
                   <GeoWell coreStyle={{ padding: '14px' }}>
                     <h4 style={{ color: 'var(--acc-red-ink)', margin: '0 0 6px 0', fontSize: '14px' }}>☠️ DEATHMATCH (DOOMSDAY)</h4>
                     <p style={{ margin: 0, color: 'var(--op-ink)', fontSize: '13px', lineHeight: 1.55 }}>
-                      <strong>Objective:</strong> Eliminate <strong>ALL</strong> enemy units. If Doomsday is enabled, at Turn 30 map edges turn to <strong>LAVA</strong> shrinking inward every 5 turns. Collapse adds <strong>+2 CP regen</strong>; when the third ring begins, <strong>Meltdown</strong> raises it to <strong>+4 CP regen</strong>.
+                      <strong>Objective:</strong> Eliminate <strong>ALL</strong> enemy units. If Doomsday is enabled, a <strong>safe circle</strong> closes around a random, balanced point on the map — the first lava appears around Turn 8 on small boards and Turn 10 on large ones, then closes in seven stages. Anything outside the circle becomes <strong>LAVA</strong>; Collapse adds <strong>+2 CP regen</strong>, and <strong>Meltdown</strong> raises it to <strong>+4 CP regen</strong>.
                     </p>
                   </GeoWell>
                 </div>

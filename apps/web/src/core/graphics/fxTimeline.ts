@@ -1186,8 +1186,17 @@ export class FxTimeline {
           : undefined;
     const spanX = Math.abs(focus.x - marker.x);
     const spanY = Math.abs(focus.y - marker.y);
-    const frameW = Math.max(TILE_SIZE * 4.6, Math.min(TILE_SIZE * 9.6, spanX + TILE_SIZE * 3.4));
-    const frameH = Math.max(TILE_SIZE * 4.2, Math.min(TILE_SIZE * 8.6, spanY + TILE_SIZE * 3.0));
+    // Precision Strike now has a full jet flyby, so its camera needs a strike-corridor frame wide
+    // enough to keep the aircraft in shot through the push-in and its banked exit. A tight 4.6×4.2
+    // crop left the jet outside the frame by the time the camera settled.
+    const frameW =
+      e.itemKey === 'PRECISION_STRIKE'
+        ? TILE_SIZE * 8.8
+        : Math.max(TILE_SIZE * 4.6, Math.min(TILE_SIZE * 9.6, spanX + TILE_SIZE * 3.4));
+    const frameH =
+      e.itemKey === 'PRECISION_STRIKE'
+        ? TILE_SIZE * 6.4
+        : Math.max(TILE_SIZE * 4.2, Math.min(TILE_SIZE * 8.6, spanY + TILE_SIZE * 3.0));
     const weapon: WeaponVisual | undefined =
       e.itemKey === 'PRECISION_STRIKE'
         ? 'TACTICAL_STRIKE'
@@ -3090,9 +3099,13 @@ export class FxTimeline {
                 ? 3400
                 : e.itemKey === 'NAPALM_LINE' && e.phase !== 'BURN'
                   ? 2800
-                  : e.itemKey === 'RECON_DRONE'
-                    ? 1800
-                    : 0;
+                  : e.itemKey === 'ARTILLERY_BARRAGE' && e.phase !== 'MARK'
+                    ? 2400
+                    : e.itemKey === 'PRECISION_STRIKE' && e.phase !== 'MARK'
+                      ? 2800
+                      : e.itemKey === 'RECON_DRONE'
+                        ? 1800
+                        : 0;
 
           this.schedule(
             baseDelay,

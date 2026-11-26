@@ -22,6 +22,7 @@ import {
   VETERANCY_CONFIG,
   OVERWATCH_STATS,
   MUTATOR_CONFIG,
+  getDoomsdayStartTurn,
 } from '@tactical/engine/constants/Config';
 import { PERKS_BY_CLASS, PERK_LABELS } from '@tactical/engine/constants/Perks';
 import { TACTICAL_ITEMS } from '@tactical/engine';
@@ -730,6 +731,8 @@ const TurnStatusBar: React.FC = React.memo(() => {
   const mutators = useGameStore(state => state.settings.mutators);
   const activeSeed = useGameStore(state => state.activeSeed);
   const activeMission = useGameStore(state => state.activeMission);
+  const gridSize = useGameStore(state => state.gridSize);
+  const doomsdayZone = useGameStore(state => state.doomsdayZone);
   const matchStats = useGameStore(state => state.matchStats);
   const units = useGameStore(state => state.units);
   const contract = useGameStore(state => state.contract);
@@ -750,7 +753,12 @@ const TurnStatusBar: React.FC = React.memo(() => {
     mutators?.ironman ? 'IRONMAN' : null,
   ].filter(Boolean) as string[];
   const doomsdayActive = settings.victoryMode === 'DEATHMATCH' && Boolean(settings.doomsdayEnabled);
-  const doomsday = getDoomsdayEscalation(totalTurns, doomsdayActive);
+  const doomsday = getDoomsdayEscalation(
+    totalTurns,
+    doomsdayActive,
+    doomsdayZone?.startTurn ?? getDoomsdayStartTurn(settings, gridSize),
+    doomsdayZone?.endTurn,
+  );
   const doomsdayTag = !doomsdayActive
     ? null
     : doomsday.stage === 'SKIRMISH'

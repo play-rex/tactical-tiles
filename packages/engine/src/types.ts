@@ -185,6 +185,10 @@ export interface GameSettings {
   dynamicWeather: boolean;
   fogOfWar: boolean;
   doomsdayEnabled: boolean;
+  /** Optional first-lava round override; defaults to the map-size pacing table. */
+  doomsdayStartTurn?: number;
+  /** Optional fixed circle center for scripted missions; otherwise the balanced selector picks it. */
+  doomsdayCenter?: { x: number; y: number };
   gameMode: GameMode; 
   victoryMode?: VictoryMode;
   aiDifficulty: AIDifficulty;
@@ -200,6 +204,20 @@ export interface GameSettings {
   /** Periodic 3-round Field / 6-round Tactical theater air drops. Defaults to on (off in Challenge Ops). */
   airDropsEnabled?: boolean;
   challengeId?: string;
+}
+
+/** A PUBG-style closing circle for Deathmatch + Doomsday. */
+export interface DoomsdayZone {
+  /** Circle centre in tile coordinates (fractional centres are allowed). */
+  center: { x: number; y: number };
+  /** First completed round in which the circle starts closing. */
+  startTurn: number;
+  /** Round by which the final circle has been reached. */
+  endTurn: number;
+  startRadius: number;
+  endRadius: number;
+  shrinkInterval: number;
+  stageCount: number;
 }
 
 export interface MissionUnitPlacement {

@@ -397,7 +397,7 @@ const AirDropFlightItem: React.FC<{ data: AirDropAnim; mapRotation: BoardRotatio
     useEffect(() => {
       return () => {
         for (const ref of [planeSpriteRef, shadowSpriteRef]) {
-          if (ref.current) {
+          if (ref.current && !ref.current.destroyed) {
             ref.current.parent?.removeChild(ref.current);
             ref.current.destroy();
             ref.current = null;

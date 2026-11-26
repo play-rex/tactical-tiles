@@ -1,5 +1,5 @@
 import { MissionConfig, TerrainType, Tile } from '../types';
-import { BARRIER_STATS, BASE_STATS } from '../constants/Config';
+import { BARRIER_STATS, BASE_STATS, DOOMSDAY_SETTINGS } from '../constants/Config';
 import { updateDoomsdayState } from '../grid/DoomsdayManager';
 
 const createChallengeGrid = (size: number, defaultTerrain: TerrainType = 'PLAINS'): Tile[] => {
@@ -242,6 +242,9 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
             fogOfWar: false,
             dynamicWeather: false,
             doomsdayEnabled: true,
+            // This challenge deliberately drops in at Round 30; do not use the standard pacing table.
+            doomsdayStartTurn: DOOMSDAY_SETTINGS.START_TURN,
+            doomsdayCenter: { x: 7.5, y: 7.5 },
             mutators: { classicCp: false, scarcity: false, ironman: true }
         },
         startingRound: 29,
@@ -258,7 +261,7 @@ export const CHALLENGE_OPERATIONS: MissionConfig[] = [
             }
             paint(g, size, 4, 4, { type: 'MOUNTAIN' });
             paint(g, size, 11, 11, { type: 'MOUNTAIN' });
-            return updateDoomsdayState(g, 29, size);
+            return updateDoomsdayState(g, 29, size, DOOMSDAY_SETTINGS.START_TURN);
         },
         placements: [
             { type: 'ASSAULTER', x: 3, y: 7, owner: 0, rank: 1 },

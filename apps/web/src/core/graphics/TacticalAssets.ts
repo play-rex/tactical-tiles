@@ -426,6 +426,310 @@ export function createHeavyBomberTexture(isShadow = false): PIXI.Texture {
   });
 }
 
+/**
+ * 3b. Precision Strike Stealth Designator Jet (`@2x` 208x208, pointing +X).
+ * A needle-nosed interceptor with rose-rimmed faceting, twin canted tails and a glowing crimson
+ * sensor pod under the nose — deliberately sharper and darker than the broad Napalm strike jet.
+ */
+export function createPrecisionJetTexture(isShadow = false): PIXI.Texture {
+  return bakeCanvasTexture(208, 208, (ctx, s) => {
+    const c = s / 2;
+    ctx.save();
+    ctx.translate(c, c);
+
+    const drawAirframe = () => {
+      ctx.beginPath();
+      ctx.moveTo(92, 0);
+      ctx.lineTo(46, -6);
+      ctx.lineTo(18, -13);
+      ctx.lineTo(-10, -58);
+      ctx.lineTo(-32, -62);
+      ctx.lineTo(-44, -14);
+      ctx.lineTo(-62, -10);
+      ctx.lineTo(-82, -22);
+      ctx.lineTo(-88, -8);
+      ctx.lineTo(-72, 0);
+      ctx.lineTo(-88, 8);
+      ctx.lineTo(-82, 22);
+      ctx.lineTo(-62, 10);
+      ctx.lineTo(-44, 14);
+      ctx.lineTo(-32, 62);
+      ctx.lineTo(-10, 58);
+      ctx.lineTo(18, 13);
+      ctx.lineTo(46, 6);
+      ctx.closePath();
+    };
+
+    if (isShadow) {
+      ctx.fillStyle = 'rgba(2, 6, 23, 0.46)';
+      drawAirframe();
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    // Twin rose-white afterburner plumes (cooler and tighter than the Napalm jet's orange torches)
+    for (const ey of [-8, 8]) {
+      const plume = ctx.createLinearGradient(-70, ey, -102, ey);
+      plume.addColorStop(0, 'rgba(255, 241, 242, 0.98)');
+      plume.addColorStop(0.32, 'rgba(244, 63, 94, 0.82)');
+      plume.addColorStop(1, 'rgba(244, 63, 94, 0)');
+      ctx.fillStyle = plume;
+      ctx.beginPath();
+      ctx.moveTo(-68, ey - 4.5);
+      ctx.lineTo(-100, ey);
+      ctx.lineTo(-68, ey + 4.5);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Graphite faceted airframe with a sharp rose rim
+    const bodyGrad = ctx.createLinearGradient(0, -62, 0, 62);
+    bodyGrad.addColorStop(0, '#475569');
+    bodyGrad.addColorStop(0.45, '#1E293B');
+    bodyGrad.addColorStop(0.62, '#0F172A');
+    bodyGrad.addColorStop(1, '#334155');
+    ctx.fillStyle = bodyGrad;
+    ctx.strokeStyle = '#FDA4AF';
+    ctx.lineWidth = 1.9;
+    drawAirframe();
+    ctx.fill();
+    ctx.stroke();
+
+    // Facet panel seams along the delta wing
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.38)';
+    ctx.lineWidth = 1.2;
+    for (const side of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(12, side * 12);
+      ctx.lineTo(-20, side * 46);
+      ctx.lineTo(-30, side * 60);
+      ctx.moveTo(-26, side * 18);
+      ctx.lineTo(-48, side * 12);
+      ctx.stroke();
+    }
+
+    // Raised dorsal spine
+    ctx.fillStyle = '#64748B';
+    ctx.beginPath();
+    ctx.moveTo(84, 0);
+    ctx.lineTo(24, -5);
+    ctx.lineTo(-64, -4);
+    ctx.lineTo(-64, 4);
+    ctx.lineTo(24, 5);
+    ctx.closePath();
+    ctx.fill();
+
+    // Tinted canopy
+    const canopy = ctx.createLinearGradient(36, -5, 62, 5);
+    canopy.addColorStop(0, '#0F172A');
+    canopy.addColorStop(0.5, '#38BDF8');
+    canopy.addColorStop(1, '#E0F2FE');
+    ctx.fillStyle = canopy;
+    ctx.beginPath();
+    ctx.ellipse(47, 0, 13, 4.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Under-nose designator pod: crimson lens in a steel ring
+    ctx.fillStyle = '#0F172A';
+    ctx.beginPath();
+    ctx.arc(64, 0, 7.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#FDA4AF';
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    const lens = ctx.createRadialGradient(64, 0, 0.6, 64, 0, 5.4);
+    lens.addColorStop(0, '#FFF1F2');
+    lens.addColorStop(0.45, '#F43F5E');
+    lens.addColorStop(1, '#7F1D1D');
+    ctx.fillStyle = lens;
+    ctx.beginPath();
+    ctx.arc(64, 0, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Crimson identification bands on the wings
+    ctx.fillStyle = '#F43F5E';
+    ctx.fillRect(-24, -54, 7, 11);
+    ctx.fillRect(-24, 43, 7, 11);
+    ctx.fillStyle = '#FFF1F2';
+    ctx.fillRect(-16, -56, 3, 15);
+    ctx.fillRect(-16, 41, 3, 15);
+
+    // Wingtip strobes
+    ctx.fillStyle = '#FFF1F2';
+    ctx.beginPath();
+    ctx.arc(-32, -62, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#F43F5E';
+    ctx.beginPath();
+    ctx.arc(-32, 62, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  });
+}
+
+/**
+ * 3c. Artillery Barrage Gunship (`@2x` 256x256, pointing +X, cannon battery on the +Y side).
+ * Four turboprops, a long gunship fuselage and a side-mounted cannon cluster. In the barrage orbit
+ * the guns face the orbit centre, so every tracer visibly leaves the aircraft.
+ */
+export function createGunshipTexture(isShadow = false): PIXI.Texture {
+  return bakeCanvasTexture(256, 256, (ctx, s) => {
+    const c = s / 2;
+    ctx.save();
+    ctx.translate(c, c);
+
+    const drawAirframe = () => {
+      // Long gunship fuselage
+      ctx.beginPath();
+      ctx.moveTo(104, 0);
+      ctx.quadraticCurveTo(96, -18, 64, -20);
+      ctx.lineTo(-76, -17);
+      ctx.lineTo(-108, -9);
+      ctx.lineTo(-108, 9);
+      ctx.lineTo(-76, 17);
+      ctx.lineTo(64, 20);
+      ctx.quadraticCurveTo(96, 18, 104, 0);
+      ctx.closePath();
+
+      // Straight high-aspect wings
+      ctx.moveTo(34, -16);
+      ctx.lineTo(16, -116);
+      ctx.lineTo(-16, -112);
+      ctx.lineTo(-24, -16);
+      ctx.closePath();
+      ctx.moveTo(34, 16);
+      ctx.lineTo(16, 116);
+      ctx.lineTo(-16, 112);
+      ctx.lineTo(-24, 16);
+      ctx.closePath();
+
+      // Broad tailplane
+      ctx.moveTo(-72, -9);
+      ctx.lineTo(-94, -50);
+      ctx.lineTo(-112, -46);
+      ctx.lineTo(-98, -8);
+      ctx.closePath();
+      ctx.moveTo(-72, 9);
+      ctx.lineTo(-94, 50);
+      ctx.lineTo(-112, 46);
+      ctx.lineTo(-98, 8);
+      ctx.closePath();
+    };
+
+    if (isShadow) {
+      ctx.fillStyle = 'rgba(2, 6, 23, 0.44)';
+      drawAirframe();
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    // Olive-drab gunship airframe with a warm duty rim
+    const bodyGrad = ctx.createLinearGradient(0, -116, 0, 116);
+    bodyGrad.addColorStop(0, '#3F4A3A');
+    bodyGrad.addColorStop(0.5, '#4A5544');
+    bodyGrad.addColorStop(1, '#333C31');
+    ctx.fillStyle = bodyGrad;
+    ctx.strokeStyle = '#FCD34D';
+    ctx.lineWidth = 2.1;
+    drawAirframe();
+    ctx.fill();
+    ctx.stroke();
+
+    // Four turboprop nacelles, exhaust streaks and spinning prop discs
+    for (const py of [-86, -44, 44, 86]) {
+      const exhaust = ctx.createLinearGradient(-6, py, -48, py);
+      exhaust.addColorStop(0, 'rgba(148, 163, 184, 0.5)');
+      exhaust.addColorStop(1, 'rgba(148, 163, 184, 0)');
+      ctx.fillStyle = exhaust;
+      ctx.fillRect(-46, py - 4, 40, 8);
+
+      ctx.fillStyle = '#1F2937';
+      ctx.strokeStyle = '#D1D5DB';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(-10, py - 7, 42, 14, 5);
+      ctx.fill();
+      ctx.stroke();
+
+      // Prop blur disc
+      ctx.strokeStyle = 'rgba(241, 245, 249, 0.82)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(36, py - 18);
+      ctx.lineTo(36, py + 18);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(252, 211, 77, 0.5)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(39, py - 14);
+      ctx.lineTo(39, py + 14);
+      ctx.stroke();
+    }
+
+    // Side-firing cannon battery (+Y faces the orbit centre): 105mm, 40mm and 25mm barrels
+    ctx.strokeStyle = '#111827';
+    ctx.lineWidth = 2;
+    ctx.fillStyle = '#0B1120';
+    for (const [bx, len, wide] of [[-4, 26, 5], [8, 21, 4], [19, 16, 3]] as const) {
+      ctx.beginPath();
+      ctx.roundRect(bx, 20, wide, len, 1.6);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(bx + wide / 2, 20 + len, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Recoil dampers and amber fire-control housing
+    ctx.fillStyle = '#92400E';
+    ctx.fillRect(-8, 18, 34, 8);
+    ctx.fillStyle = '#F59E0B';
+    ctx.fillRect(-2, 19.5, 20, 3);
+    ctx.fillStyle = '#FCD34D';
+    ctx.beginPath();
+    ctx.arc(-12, 30, 5.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Dorsal spine, cockpit visor and utility hatches
+    ctx.fillStyle = '#5B6654';
+    ctx.fillRect(-66, -7, 126, 14);
+    ctx.fillStyle = '#0F172A';
+    ctx.beginPath();
+    ctx.arc(88, 0, 10, -Math.PI * 0.5, Math.PI * 0.5);
+    ctx.fill();
+    ctx.fillStyle = '#F59E0B';
+    ctx.beginPath();
+    ctx.moveTo(78, 0);
+    ctx.lineTo(64, -11);
+    ctx.lineTo(58, -6);
+    ctx.lineTo(68, 0);
+    ctx.lineTo(58, 6);
+    ctx.lineTo(64, 11);
+    ctx.closePath();
+    ctx.fill();
+
+    // Gun-run stripes and navigation lights
+    ctx.fillStyle = '#F59E0B';
+    ctx.fillRect(-10, -104, 11, 15);
+    ctx.fillRect(-10, 89, 11, 15);
+    ctx.fillStyle = '#DC2626';
+    ctx.fillRect(4, -100, 5, 12);
+    ctx.fillRect(4, 88, 5, 12);
+    ctx.fillStyle = '#EF4444';
+    ctx.beginPath();
+    ctx.arc(0, -112, 3.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#22C55E';
+    ctx.beginPath();
+    ctx.arc(0, 112, 3.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  });
+}
+
 /** 4. Precision Strike Hypersonic JDAM Kinetic Dart (`@2x` 96x96, pointing +Y down). */
 export function createJdamMissileTexture(): PIXI.Texture {
   return bakeCanvasTexture(96, 96, (ctx, s) => {
@@ -919,6 +1223,10 @@ export function buildAllTacticalTextures(): Record<string, PIXI.Texture> {
     TACTICAL_STRIKE_JET_SHADOW: createStrikeJetTexture(true),
     TACTICAL_HEAVY_BOMBER: createHeavyBomberTexture(false),
     TACTICAL_HEAVY_BOMBER_SHADOW: createHeavyBomberTexture(true),
+    TACTICAL_PRECISION_JET: createPrecisionJetTexture(false),
+    TACTICAL_PRECISION_JET_SHADOW: createPrecisionJetTexture(true),
+    TACTICAL_GUNSHIP: createGunshipTexture(false),
+    TACTICAL_GUNSHIP_SHADOW: createGunshipTexture(true),
     TACTICAL_CARGO_PLANE: createCargoPlaneTexture(false),
     TACTICAL_CARGO_PLANE_SHADOW: createCargoPlaneTexture(true),
     TACTICAL_HEAVY_LIFTER: createHeavyLifterTexture(false),

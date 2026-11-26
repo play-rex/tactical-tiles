@@ -110,13 +110,15 @@ export const MapHoverCard: React.FC = () => {
   const validSiegeTile = useGameStore(s => s.validSiegeTile);
   const validDemolishTile = useGameStore(s => s.validDemolishTile);
   const placementMode = useGameStore(s => s.placementMode);
-  const pendingDrops = useGameStore(s => s.pendingDrops);
+  // These engine arrays are optional until the first round tick; default them so hovering a tile
+  // on the opening turn cannot throw on `.find` and tear down the board.
+  const pendingDrops = useGameStore(s => s.pendingDrops) ?? [];
   const airDrops = useGameStore(s => s.airDrops) ?? [];
   const mines = useGameStore(s => s.mines);
-  const smokeZones = useGameStore(s => s.smokeZones);
-  const burningLines = useGameStore(s => s.burningLines);
-  const pendingTacticals = useGameStore(s => s.pendingTacticals);
-  const sensors = useGameStore(s => s.sensors);
+  const smokeZones = useGameStore(s => s.smokeZones) ?? [];
+  const burningLines = useGameStore(s => s.burningLines) ?? [];
+  const pendingTacticals = useGameStore(s => s.pendingTacticals) ?? [];
+  const sensors = useGameStore(s => s.sensors) ?? [];
   const trapRevealRound = useGameStore(s => s.trapRevealRound);
   const totalTurns = useGameStore(s => s.totalTurns);
   const tacticalRound = useGameStore(s => s.tacticalRound);

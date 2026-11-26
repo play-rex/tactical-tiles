@@ -52,6 +52,39 @@ export const DOOMSDAY_SETTINGS = {
   DAMAGE: 999
 };
 
+/**
+ * Standard Deathmatch + Doomsday circle pacing.
+ *
+ * The safe zone is a circle, not an edge-in square, so the correct pacing is by map size:
+ * small boards should resolve by around 20 completed rounds, big boards by around 25-30.
+ * The circle must be the source of pressure, not a late cleanup: first lava lands on round
+ * 8 / 10, then seven stages close the safe area at round 20 / 28. That gives players the
+ * opening skirmish, then a long, escalating squeeze toward the final centre.
+ *
+ * Challenges and custom modes can override the opening with `settings.doomsdayStartTurn`.
+ */
+export const DOOMSDAY_ZONE_TIMING = {
+  SMALL_MAX_GRID: 20,
+  SMALL: { START: 8, STAGES: 7, INTERVAL: 2, END_RADIUS: 2.5 },
+  BIG: { START: 10, STAGES: 7, INTERVAL: 3, END_RADIUS: 3.25 },
+} as const;
+
+/** Resolves the first lava round for a game, honouring an explicit per-mode override. */
+export const getDoomsdayStartTurn = (
+  settings: { playerCount: number; doomsdayStartTurn?: number },
+  gridSize?: number,
+): number => {
+  if (settings.doomsdayStartTurn !== undefined) return settings.doomsdayStartTurn;
+  if (gridSize !== undefined) {
+    return gridSize <= DOOMSDAY_ZONE_TIMING.SMALL_MAX_GRID
+      ? DOOMSDAY_ZONE_TIMING.SMALL.START
+      : DOOMSDAY_ZONE_TIMING.BIG.START;
+  }
+  return Math.max(2, Math.min(6, Math.round(settings.playerCount))) >= 4
+    ? DOOMSDAY_ZONE_TIMING.BIG.START
+    : DOOMSDAY_ZONE_TIMING.SMALL.START;
+};
+
 /** Doomsday-only escalation, tied to the ring clock rather than fixed match rounds. */
 export const DOOMSDAY_ESCALATION = {
   COLLAPSE_REGEN_BONUS: 2,

@@ -23,6 +23,15 @@ import { getPrefersReducedMotion } from '../../../core/graphics/fxTimeline';
 
 const BADGE_ANCHOR = { x: 0.5, y: 1 };
 
+// Engine tactical arrays are optional on a freshly created GameState and only get populated by
+// the first round tick. Stable empty fallbacks keep the board renderable on turn 1 instead of
+// throwing on `.map` and unmounting the whole viewport until END TURN.
+const NO_PENDING_TACTICALS: PendingTactical[] = [];
+const NO_BURNING_LINES: BurningLine[] = [];
+const NO_REVEALED_MINES: LandMine[] = [];
+const NO_SMOKE_ZONES: SmokeZone[] = [];
+const NO_SENSORS: TacticalSensor[] = [];
+
 const TELEGRAPH_TEXT_STYLE = new PIXI.TextStyle({
   fill: '#FFF1F2',
   fontSize: 9,
@@ -167,10 +176,10 @@ function tileBounds(tiles: Tile[]): { minX: number; minY: number; maxX: number; 
 
 export interface TacticalGroundLayerProps {
   tileById: Map<string, Tile>;
-  pendingTacticals: PendingTactical[];
-  burningLines: BurningLine[];
-  overclockCharges: Record<number, number>;
-  revealedEnemyMines: LandMine[];
+  pendingTacticals?: PendingTactical[];
+  burningLines?: BurningLine[];
+  overclockCharges?: Record<number, number>;
+  revealedEnemyMines?: LandMine[];
   units: Unit[];
   viewer: number;
   fogOfWar: boolean;
@@ -189,10 +198,10 @@ export interface TacticalGroundLayerProps {
  */
 export const TacticalGroundLayer: React.FC<TacticalGroundLayerProps> = React.memo(({
   tileById,
-  pendingTacticals,
-  burningLines,
+  pendingTacticals = NO_PENDING_TACTICALS,
+  burningLines = NO_BURNING_LINES,
   overclockCharges,
-  revealedEnemyMines,
+  revealedEnemyMines = NO_REVEALED_MINES,
   units,
   viewer,
   fogOfWar,
@@ -578,8 +587,8 @@ export const TacticalGroundLayer: React.FC<TacticalGroundLayerProps> = React.mem
 
 export interface TacticalAirLayerProps {
   tileById: Map<string, Tile>;
-  smokeZones: SmokeZone[];
-  sensors: TacticalSensor[];
+  smokeZones?: SmokeZone[];
+  sensors?: TacticalSensor[];
   viewer: number;
   mapRotation: BoardRotation;
   animate: boolean;
@@ -741,8 +750,8 @@ const SmokeZoneCloud: React.FC<{
  */
 export const TacticalAirLayer: React.FC<TacticalAirLayerProps> = React.memo(({
   tileById,
-  smokeZones,
-  sensors,
+  smokeZones = NO_SMOKE_ZONES,
+  sensors = NO_SENSORS,
   viewer,
   mapRotation,
   animate,

@@ -12,6 +12,7 @@ import type {
   BuildingSubType,
   ContractId,
   DeadUnit,
+  DoomsdayZone,
   FinalPushStatus,
   SharedContract,
   ShopConstructId,
@@ -77,6 +78,8 @@ export interface GameState {
   airDropMeta?: AirDropMeta;
   winner: number | 'DRAW' | null;
   activeSeed: string;
+  /** The match's closing-circle plan, computed once at setup. */
+  doomsdayZone?: DoomsdayZone;
   /** Local challenge ops only; online tables never carry one. */
   activeMission: MissionConfig | null;
   matchStats: Record<number, MatchPlayerStats>;

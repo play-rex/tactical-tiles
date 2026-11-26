@@ -20,6 +20,7 @@ import {
   SquadGuideButton,
   SquadLoadoutControls,
   StageShell,
+  VictoryModeControl,
 } from '../components/ui/MatchRulesControls';
 
 interface SliderProps {
@@ -395,6 +396,25 @@ export const DevMaps: React.FC = () => {
                   showDetails
                   onChange={unitCounts => setGameSettings({ unitCounts })}
                 />
+
+                <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>MATCH RULES</div>
+                <FieldGroup>
+                  <VictoryModeControl
+                    victoryMode={settings.victoryMode}
+                    doomsdayEnabled={settings.doomsdayEnabled}
+                    onPatch={setGameSettings}
+                    showConquerNote
+                  />
+                  <div style={{ fontSize: '11px', lineHeight: 1.45, color: 'var(--op-ink-muted)', fontWeight: 600 }}>
+                    {devBotMatch
+                      ? settings.victoryMode === 'DEATHMATCH'
+                        ? settings.doomsdayEnabled
+                          ? 'Simulated match: wipe out every squad while the Doomsday lava ring shrinks the battlefield.'
+                          : 'Simulated match: both bots play Deathmatch until one squad remains.'
+                        : 'Simulated match: both bots race to destroy the enemy HQ.'
+                      : 'The selected rules carry into the match when you enable BOT MATCH.'}
+                  </div>
+                </FieldGroup>
 
                 <div style={{ ...SECTION_LABEL, marginTop: '4px' }}>GENERATION PRESETS</div>
                 <FieldGroup>

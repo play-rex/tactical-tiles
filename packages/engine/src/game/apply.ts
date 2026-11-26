@@ -12,6 +12,7 @@ import {
   CP_SYSTEM,
   DOOMSDAY_ESCALATION,
   DOOMSDAY_SETTINGS,
+  getDoomsdayStartTurn,
   GOLD_SETTINGS,
   MOMENTUM_REFUNDS,
   LAND_MINE_STATS,
@@ -71,7 +72,7 @@ import {
 import { resolveMoveWithOverwatch } from '../rules/OverwatchRules';
 import { calculateMatchScorecard } from '../storage/CareerStatsManager';
 import { createSeededRng } from '../utils/SeededRandom';
-import { getCrossfireSupporters, getSupplyDropTargets, isConstruct, isConsumable, isValidSpawnTile, visibleSet } from './options';
+import { getCrossfireSupporters, getSpawnTiles, getSupplyDropTargets, isConstruct, isConsumable, isValidSpawnTile, visibleSet } from './options';
 import { rollWeather } from './setup';
 import {
   createLog,
@@ -521,6 +522,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
     airDropMeta = { crateRounds: {}, openedCount: 0 },
   } = state;
   const reject = (reason: string): ApplyResult => ({ state, events: [], rejected: reason });
+  const doomsdayZone = state.doomsdayZone;
   const fx = new Fx();
 
   if (state.winner !== null) return reject('Match is already over');
@@ -586,6 +588,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   let logEntry: LogEntry | null = null;
   const extraLogs: LogEntry[] = [];
   const currentRound = totalTurns + 1;
+  const doomsdayStartTurn = doomsdayZone?.startTurn ?? getDoomsdayStartTurn(settings, gridSize);
   let nextLastHqDamageRound = state.lastHqDamageRound ?? 0;
 
   const tacticalWeaponVisualFor = (itemKey?: TacticalId): WeaponVisual => {
@@ -1965,9 +1968,9 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       const cp = nextPlayerCp[nextId];
       const cpRules = getEffectiveCpRules(settings.mutators);
       const doomsdayActive = settings.victoryMode === 'DEATHMATCH' && settings.doomsdayEnabled;
-      const escalation = getDoomsdayEscalation(newTotalTurns, doomsdayActive);
+      const escalation = getDoomsdayEscalation(newTotalTurns, doomsdayActive, doomsdayStartTurn, doomsdayZone?.endTurn);
       const regenAmount = cpRules.regenAmount + escalation.regenBonus;
-      const collapseTurn = DOOMSDAY_SETTINGS.START_TURN;
+      const collapseTurn = doomsdayStartTurn;
       const meltdownTurn = collapseTurn + DOOMSDAY_ESCALATION.MELTDOWN_RING * DOOMSDAY_SETTINGS.SHRINK_INTERVAL;
       if (doomsdayActive && (newTotalTurns === collapseTurn || newTotalTurns === meltdownTurn)) {
         extraLogs.push(createLog(currentRound, -1, `Doomsday ${escalation.label}: all CP regen +${escalation.regenBonus}`, 'ECONOMY'));
@@ -2018,7 +2021,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
       // ── Environment: Doomsday lava, bank turrets, base artillery ──
 
       if (settings.victoryMode === 'DEATHMATCH' && settings.doomsdayEnabled) {
-        newMap = updateDoomsdayState(newMap, newTotalTurns, gridSize);
+        newMap = updateDoomsdayState(newMap, newTotalTurns, gridSize, doomsdayStartTurn, doomsdayZone);
         const lavaTiles = new Set(newMap.filter(t => t.hazardState === 'LAVA').map(t => t.id));
         newMines = newMines.filter(m => !lavaTiles.has(m.tileId));
         const meltingUnits = newUnits.filter(u => lavaTiles.has(u.tileId));
@@ -2043,8 +2046,8 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         const nextDoomsdayRing =
           settings.victoryMode === 'DEATHMATCH' &&
           settings.doomsdayEnabled &&
-          newTotalTurns + 2 >= DOOMSDAY_SETTINGS.START_TURN
-            ? Math.floor((newTotalTurns + 2 - DOOMSDAY_SETTINGS.START_TURN) / DOOMSDAY_SETTINGS.SHRINK_INTERVAL)
+          newTotalTurns + 2 >= doomsdayStartTurn
+            ? Math.floor((newTotalTurns + 2 - doomsdayStartTurn) / DOOMSDAY_SETTINGS.SHRINK_INTERVAL)
             : -1;
         const dropTick = advanceAirDropsForRound(
           {
@@ -2223,8 +2226,12 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
   for (let pid = 0; pid < settings.playerCount; pid++) {
     if (nextPlayerStatus[pid] === 'ELIMINATED') continue;
     const aliveCount = newUnits.filter(u => u.owner === pid).length;
+    // A graveyard body is only a real redeploy option if the HQ plaza is still above lava.
+    const potentialSpawnTiles = getSpawnTiles({ mapData: newMap, units: [], gridSize }, pid);
     const hasRespawnAvailable =
-      (nextPlayerRespawns[pid] || 0) < effectiveMaxRespawns && newGraveyard.some(g => g.owner === pid);
+      potentialSpawnTiles.length > 0 &&
+      (nextPlayerRespawns[pid] || 0) < effectiveMaxRespawns &&
+      newGraveyard.some(g => g.owner === pid);
     if (aliveCount === 0 && !hasRespawnAvailable) {
       nextPlayerStatus[pid] = 'ELIMINATED';
       extraLogs.push(createLog(currentRound, -1, `Player ${pid + 1} eliminated!`, 'COMBAT'));
@@ -2344,7 +2351,7 @@ export function applyAction(state: GameState, action: GameAction, options: Apply
         return nextPlayerStatus[pid] === 'ACTIVE' && newUnits.filter(u => u.owner === pid).length === 1;
       });
       const triggered = doomsdayActive
-        ? newTotalTurns >= DOOMSDAY_SETTINGS.START_TURN
+        ? newTotalTurns >= doomsdayStartTurn
         : living <= 4 || someoneAtOne;
       if (triggered) {
         for (let pid = 0; pid < settings.playerCount; pid++) {

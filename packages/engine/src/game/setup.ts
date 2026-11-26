@@ -11,6 +11,7 @@ import type { GameMutators, GameSettings, Tile, Unit, UnitType, WeatherState, We
 import { getManhattanDistance, getTileByIdFast } from '../grid/Pathfinding';
 import { assignVoronoiZones } from '../grid/ZoneGeneration';
 import { placeEdgeAwareBridges, pruneDeadEndBridges } from '../grid/BridgePlacement';
+import { createDoomsdayZone } from '../grid/DoomsdayManager';
 import { applyUnitXp, getEffectiveCpRules, getUnitMaxHp } from '../rules/CombatRules';
 import { createSeededRng, generateSectorSeed, normalizeSeed } from '../utils/SeededRandom';
 import { getChallengeById } from '../assets/ChallengeOps';
@@ -1088,9 +1089,13 @@ const freshGame = (
         activeSeed,
         matchStats: cloneMatchStats(undefined, settings.playerCount),
     };
+    const doomsdayZone = settings.victoryMode === 'DEATHMATCH' && settings.doomsdayEnabled
+        ? createDoomsdayZone({ mapData, gridSize, units, settings, seed: activeSeed })
+        : undefined;
     const { airDrops, airDropMeta } = initAirDropsForMatch(baseState);
     return withOpeningContract({
         ...baseState,
+        doomsdayZone,
         airDrops,
         airDropMeta,
     });

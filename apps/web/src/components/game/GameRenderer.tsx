@@ -30,6 +30,8 @@ import {
 } from './renderer/TacticalTargetingLayer';
 import { WaterShimmerLayer } from './renderer/WaterShimmerLayer';
 import { LivingMapLayer } from './renderer/LivingMapLayer';
+import { DoomsdayLavaLayer } from './renderer/DoomsdayLavaLayer';
+import { DoomsdayScorchLayer } from './renderer/DoomsdayScorchLayer';
 import { DropAndPromoLayer } from './renderer/DropAndPromoLayer';
 import { PerimeterApronLayer } from './renderer/PerimeterApronLayer';
 import { KillCamSchematicLayer } from './renderer/KillCamSchematicLayer';
@@ -41,6 +43,7 @@ import { fxTimeline } from '../../core/graphics/fxTimeline';
 import type { ParticlePool } from '../../core/graphics/ParticlePool';
 import { canUnitAttackFromTile, getUnitMaxHp } from '@tactical/engine/rules/CombatRules';
 import { getOverwatchCoverageTiles } from '@tactical/engine/rules/OverwatchRules';
+import { getDoomsdayNextRadius, getDoomsdayRadius } from '@tactical/engine/grid/DoomsdayManager';
 import { useLowPowerStageOptions } from './renderer/pixiStageUtils';
 import { type BoardRotation, rotateBoardPoint, unrotateBoardPoint } from '../../core/boardRotation';
 import { computeUnitAttackPreview, getHoverMoveResolution, getPostMoveTargetTiles } from '../../core/hoverMovePreview';
@@ -330,8 +333,12 @@ const AnimatedWaterLayer = React.memo<{ waterTiles: Tile[]; animate: boolean }>(
 });
 
 // 2. Zone, Hazards & Soft Feathered Fog Layer
-const ZoneAndFogLayer = React.memo(({ mapData, visibleTiles, weather, settings, gridSize }: any) => {
+const ZoneAndFogLayer = React.memo(({ mapData, visibleTiles, weather, settings, gridSize, doomsdayZone, totalTurns }: any) => {
     const totalSize = (gridSize || 20) * TILE_SIZE;
+    // When the Doomsday circle exists, the lava mesh owns the lava and warning band. The old
+    // per-tile fills and hard Graphics circles stay only as a legacy fallback.
+    const smoothDoomsday =
+        settings.victoryMode === 'DEATHMATCH' && Boolean(settings.doomsdayEnabled) && Boolean(doomsdayZone);
     const softFogTexture = useMemo(
         () => (settings.fogOfWar ? bakeSoftFogTexture(mapData, visibleTiles, gridSize || 20) : null),
         [settings.fogOfWar, mapData, visibleTiles, gridSize]
@@ -351,14 +358,16 @@ const ZoneAndFogLayer = React.memo(({ mapData, visibleTiles, weather, settings, 
             const px = tile.x * TILE_SIZE;
             const py = tile.y * TILE_SIZE;
 
-            if (tile.hazardState === 'LAVA') {
-                g.beginFill(0xFF0000, 0.52);
-                g.drawRect(px, py, TILE_SIZE, TILE_SIZE);
-                g.endFill();
-            } else if (tile.hazardState === 'WARNING') {
-                g.beginFill(0xFFEB3B, 0.28);
-                g.drawRect(px, py, TILE_SIZE, TILE_SIZE);
-                g.endFill();
+            if (!smoothDoomsday) {
+                if (tile.hazardState === 'LAVA') {
+                    g.beginFill(0xFF0000, 0.52);
+                    g.drawRect(px, py, TILE_SIZE, TILE_SIZE);
+                    g.endFill();
+                } else if (tile.hazardState === 'WARNING') {
+                    g.beginFill(0xFFEB3B, 0.28);
+                    g.drawRect(px, py, TILE_SIZE, TILE_SIZE);
+                    g.endFill();
+                }
             }
 
             if (tile.zone !== undefined) {
@@ -378,7 +387,25 @@ const ZoneAndFogLayer = React.memo(({ mapData, visibleTiles, weather, settings, 
                 }
             }
         });
-    }, [mapData, weather]);
+
+        // PUBG-style safe-zone outlines: cyan is the live circle, amber is the next one.
+        if (!smoothDoomsday && settings.victoryMode === 'DEATHMATCH' && settings.doomsdayEnabled && doomsdayZone) {
+            const radius = getDoomsdayRadius(doomsdayZone, totalTurns);
+            const nextRadius = getDoomsdayNextRadius(doomsdayZone, totalTurns);
+            const cx = doomsdayZone.center.x * TILE_SIZE;
+            const cy = doomsdayZone.center.y * TILE_SIZE;
+            g.lineStyle(3, 0x22D3EE, 0.9);
+            g.drawCircle(cx, cy, radius * TILE_SIZE);
+            if (nextRadius < radius - 0.01) {
+                g.lineStyle(2, 0xFBBF24, 0.85);
+                g.drawCircle(cx, cy, nextRadius * TILE_SIZE);
+            }
+            g.lineStyle(0);
+            g.beginFill(0x22D3EE, 0.8);
+            g.drawCircle(cx, cy, 3);
+            g.endFill();
+        }
+    }, [mapData, weather, settings, doomsdayZone, totalTurns, smoothDoomsday]);
 
     return (
         <Container eventMode="none">
@@ -1261,6 +1288,7 @@ export const GameRenderer = () => {
     const overclockCharges = useGameStore(state => state.overclockCharges);
     const trapRevealRound = useGameStore(state => state.trapRevealRound);
     const totalTurns = useGameStore(state => state.totalTurns);
+    const doomsdayZone = useGameStore(state => state.doomsdayZone);
     const isAiTurn = useGameStore(state => state.isAiTurn);
     const winner = useGameStore(state => state.winner);
     const visibleTiles = useGameStore(state => state.visibleTiles);
@@ -1583,6 +1611,8 @@ export const GameRenderer = () => {
                         isMyTurn,
                         weather,
                         mapRotation,
+                        doomsdayZone,
+                        totalTurns,
                     ]}
                 />
                 <GameViewport
@@ -1665,6 +1695,29 @@ export const GameRenderer = () => {
                             />
                         </Container>
 
+                        {/* 2a. DOOMSDAY LAVA FIELD + BURNT TERRAIN
+                            The mesh forms the feathered lava circle; the scorch layer turns
+                            forests into burning skeletons, structures into rubble and water into
+                            cracked dry riverbeds. Both are below the fog, grid and units. */}
+                        {settings.victoryMode === 'DEATHMATCH' && settings.doomsdayEnabled && doomsdayZone && (
+                            <>
+                                <DoomsdayLavaLayer
+                                    zone={doomsdayZone}
+                                    gridSize={gridSize}
+                                    totalTurns={totalTurns}
+                                    animate={fxMode === 'LIVE'}
+                                />
+                                <DoomsdayScorchLayer
+                                    mapData={mapData}
+                                    gridSize={gridSize}
+                                    animate={fxMode === 'LIVE'}
+                                    fogOfWar={settings.fogOfWar}
+                                    visibleTiles={visibleTiles}
+                                    particlePoolRef={particlePoolRef}
+                                />
+                            </>
+                        )}
+
                         {/* 2. OVERLAYS (Zones, Hazards, Weather Tints, Soft Feathered Fog) */}
                         <ZoneAndFogLayer 
                             mapData={mapData} 
@@ -1672,6 +1725,8 @@ export const GameRenderer = () => {
                             weather={weather} 
                             settings={settings}
                             gridSize={gridSize}
+                            doomsdayZone={doomsdayZone}
+                            totalTurns={totalTurns}
                         />
 
                         {/* 3. GRID & HIGHLIGHTS */}

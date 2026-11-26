@@ -123,7 +123,6 @@ const RULE_SAVE = {
   cpRegen: CP_SYSTEM.REGEN_AMOUNT,
   cpP1: CP_SYSTEM.P1_ROUND1_CP,
   hq: BASE_STATS.HP,
-  doomsday: DOOMSDAY_SETTINGS.START_TURN,
   soldierDamage: UNIT_STATS.SOLDIER.damage,
   soldierCost: UNIT_STATS.SOLDIER.attackCost,
   sniperCost: UNIT_STATS.SNIPER.attackCost,
@@ -141,7 +140,6 @@ const applyRules = (cfg: MatchConfig) => {
   MUTATOR_CONFIG.CLASSIC_CP.REGEN_AMOUNT = RULE_SAVE.classicRegen;
   MUTATOR_CONFIG.CLASSIC_CP.P1_ROUND1_CP = RULE_SAVE.classicP1;
   BASE_STATS.HP = cfg.hqHp;
-  DOOMSDAY_SETTINGS.START_TURN = cfg.doomsdayStart;
   UNIT_STATS.SOLDIER.damage = cfg.scoutDamage ?? RULE_SAVE.soldierDamage;
   UNIT_STATS.SOLDIER.attackCost = cfg.scoutCost ?? RULE_SAVE.soldierCost;
   UNIT_STATS.SNIPER.attackCost = cfg.sniperCost ?? RULE_SAVE.sniperCost;
@@ -277,6 +275,8 @@ const playOne = (cfg: MatchConfig, seed: string): MatchRec => {
     dynamicWeather: true,
     fogOfWar: cfg.fog,
     doomsdayEnabled: cfg.doomsday,
+    // Rule-lab arms can override the player-count pacing table per match.
+    ...(cfg.doomsday ? { doomsdayStartTurn: cfg.doomsdayStart } : {}),
     victoryMode: cfg.mode,
     aiDifficulty: Array.isArray(cfg.seatDifficulty) ? 'HARD' : cfg.seatDifficulty,
     mutators: { classicCp: cfg.cp === 'classic', scarcity: cfg.scarcity, ironman: cfg.ironman },
