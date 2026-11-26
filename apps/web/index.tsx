@@ -449,6 +449,9 @@ if (import.meta.env.DEV) (window as unknown as { __tt: unknown }).__tt = { useGa
 // Opened from a table link (/t/CODE), or reloaded while seated at a table: go online.
 if (codeFromUrl() || hasSavedTable()) {
   useGameStore.setState({ currentScreen: 'ONLINE' });
+} else {
+  // Reloaded mid-way through a local match: put it back on the board.
+  useGameStore.getState().resumeLocalMatch();
 }
 
 const rootElement = document.getElementById('root');

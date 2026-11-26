@@ -62,6 +62,7 @@ import {
   readSavedBoardRotation,
   saveBoardRotation,
 } from '../core/boardRotation';
+import { clearLocalMatch, gameStateChanged, loadLocalMatch, saveLocalMatch } from '../core/storage/localMatchSave';
 
 export type Screen = 'SETUP' | 'GAME' | 'EDITOR' | 'TUTORIAL' | 'ONLINE' | 'DEV';
 
@@ -168,6 +169,8 @@ interface GameStore extends GameState {
   setDevOptions: (patch: Partial<DevMapOptions>) => void;
   rollDevSeed: () => void;
   launchDevSandbox: () => void;
+  /** Back to the local match saved before a reload, if there is one. True when one was restored. */
+  resumeLocalMatch: () => boolean;
   devPlace: (x: number, y: number, brush: DevBrush) => void;
   devFireEvent: (kind: DevEventKind) => void;
   /** Pure sandbox: no ranges, no CP, no turn lock. Units teleport and strike anywhere. */
@@ -675,6 +678,20 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     setGameSettings: (newSettings) => {
       set(state => ({ settings: { ...state.settings, ...newSettings } }));
+    },
+
+    resumeLocalMatch: () => {
+      const saved = loadLocalMatch();
+      if (!saved) return false;
+      const { game } = saved;
+      beginLocal(game, saved.lastCustomMap);
+      // Hot-seat shows the board from the seat whose turn it is; vs AI always from seat 0.
+      const viewer = game.settings.gameMode === 'PVE' ? 0 : game.currentPlayer;
+      const ai = aiPlays(game);
+      set({ visibleTiles: visibleSet(game, viewer), isAiTurn: ai });
+      if (ai) get().runAiLoop();
+      scheduleBotSpectator();
+      return true;
     },
 
     startGame: () => {
@@ -2368,4 +2385,36 @@ export const useGameStore = create<GameStore>((set, get) => {
       });
     },
   };
+});
+
+/**
+ * Keep the local match saved so a reload doesn't lose it. Sandboxes and bot matches are left out
+ * (they're throwaway), and the save goes once the match is over or you head back to setup.
+ */
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+useGameStore.subscribe((state, prev) => {
+  const playing =
+    state.mode === 'LOCAL' &&
+    state.currentScreen === 'GAME' &&
+    !state.devSandbox &&
+    !botMatchActive &&
+    state.mapData.length > 0;
+  if (!playing || state.winner !== null) {
+    // Only drop the save on a real exit, not on screens you can visit mid-match (rules, etc.).
+    if (state.mode === 'ONLINE' || state.currentScreen === 'SETUP' || state.currentScreen === 'DEV' || state.winner !== null || state.devSandbox) {
+      if (saveTimer !== null) clearTimeout(saveTimer);
+      saveTimer = null;
+      clearLocalMatch();
+    }
+    return;
+  }
+  if (prev.currentScreen === 'GAME' && !gameStateChanged(state, prev)) return;
+  if (saveTimer !== null) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const s = useGameStore.getState();
+    if (s.mode === 'LOCAL' && s.currentScreen === 'GAME' && s.winner === null && !s.devSandbox && !botMatchActive) {
+      saveLocalMatch(s, s.lastCustomMap);
+    }
+  }, 300);
 });
